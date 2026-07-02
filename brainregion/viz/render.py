@@ -8,7 +8,8 @@ from __future__ import annotations
 
 from typing import Protocol, runtime_checkable
 
-from .html import HtmlRenderer
+from .diff import BrainDiff
+from .html import DiffHtmlRenderer, HtmlRenderer
 from .snapshot import BrainSnapshot
 
 
@@ -18,6 +19,7 @@ class Renderer(Protocol):
 
 
 _RENDERERS = {"html": HtmlRenderer}
+_DIFF_RENDERERS = {"html": DiffHtmlRenderer}
 
 
 def render(snapshot: BrainSnapshot, fmt: str = "html") -> str:
@@ -31,3 +33,11 @@ def render(snapshot: BrainSnapshot, fmt: str = "html") -> str:
 def render_html(snapshot: BrainSnapshot) -> str:
     """便捷:HTML 渲染。"""
     return HtmlRenderer().render(snapshot)
+
+
+def render_diff(diff: BrainDiff, fmt: str = "html") -> str:
+    """按 fmt 选 renderer 渲染 BrainDiff → str。未知 fmt → ValueError。"""
+    cls = _DIFF_RENDERERS.get(fmt)
+    if cls is None:
+        raise ValueError(f"unknown render format: {fmt!r}; expected one of {list(_DIFF_RENDERERS)}")
+    return cls().render(diff)

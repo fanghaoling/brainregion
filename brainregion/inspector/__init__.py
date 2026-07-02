@@ -30,6 +30,7 @@ def inspect(
     shadow_wake_threshold: float | None = None,
     top_k: int = 3,
     memory_preview_k: int = 3,
+    memory_manifest: bool = False,
     history_limit: int = 20,
 ) -> dict:
     if view not in VIEWS:
@@ -42,7 +43,8 @@ def inspect(
             shadow_wake_threshold=shadow_wake_threshold, top_k=top_k,
         )
     if view in ("all", "memory"):
-        out["memory"] = memory.inspect_memory(region=region, preview_k=memory_preview_k)
+        out["memory"] = memory.inspect_memory(region=region, preview_k=memory_preview_k,
+                                              manifest=memory_manifest)
     if view in ("all", "run"):
         out["run"] = run.inspect_run(run_id=run_id, history_limit=history_limit)
     if view in ("all", "calibration"):

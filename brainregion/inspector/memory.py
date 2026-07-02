@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from ..memory import governance, store as memory_store
 
 
-def inspect_memory(*, region: str | None = None, preview_k: int = 3) -> dict:
+def inspect_memory(*, region: str | None = None, preview_k: int = 3, manifest: bool = False) -> dict:
     events = memory_store.list_experiences(region=region)  # 新→旧；DB 错 → []
     by_region: dict[str, int] = {}
     by_region_recallable: dict[str, int] = {}  # 每 region 可召回数(viz RegionSnapshot 用)
@@ -31,7 +31,7 @@ def inspect_memory(*, region: str | None = None, preview_k: int = 3) -> dict:
             recallable += 1
             by_region_recallable[r] = by_region_recallable.get(r, 0) + 1
     preview = [_event_summary(e) for e in events[: max(0, int(preview_k))]]
-    return {
+    result = {
         "total": len(events),
         "region_filter": region,
         "by_region": by_region,
@@ -44,6 +44,16 @@ def inspect_memory(*, region: str | None = None, preview_k: int = 3) -> dict:
         },
         "preview": preview,
     }
+    if manifest:
+        # 全量记忆清单(Phase 2 Brain Diff 用;复用 events,无二次查询)。默认不开 → live inspect 精简。
+        result["manifest"] = [
+            {"id": e.id, "region": e.region or "(global)",
+             "status": getattr(e, "status", governance.ACTIVE) or governance.ACTIVE,
+             "summary": e.summary or "", "triggers": list(e.triggers or []),
+             "created_at": e.created_at or ""}
+            for e in events
+        ]
+    return result
 
 
 def _event_summary(e) -> dict:

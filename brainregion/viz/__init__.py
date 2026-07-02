@@ -6,11 +6,13 @@ facade:``build_snapshot()`` 投影 Inspector → BrainSnapshot;``render_html()``
 """
 from __future__ import annotations
 
-from .render import HtmlRenderer, Renderer, render, render_html
+from .diff import BrainDiff, ExperienceChange, build_diff
+from .render import DiffHtmlRenderer, HtmlRenderer, Renderer, render, render_diff, render_html
 from .snapshot import (
     SNAPSHOT_SCHEMA_VERSION,
     BrainSnapshot,
     Kpi,
+    ManifestExperience,
     RegionSnapshot,
     build_snapshot,
 )
@@ -19,10 +21,16 @@ __all__ = [
     "SNAPSHOT_SCHEMA_VERSION",
     "BrainSnapshot",
     "Kpi",
+    "ManifestExperience",
     "RegionSnapshot",
+    "BrainDiff",
+    "ExperienceChange",
     "Renderer",
     "HtmlRenderer",
+    "DiffHtmlRenderer",
     "build_snapshot",
+    "build_diff",
     "render",
     "render_html",
+    "render_diff",
 ]

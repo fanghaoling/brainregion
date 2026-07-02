@@ -171,6 +171,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_snap.add_argument("--from", dest="from_file", default=None,
                         help="从已存 snapshot JSON 加载渲染（不调 Inspector/DB，确定性）")
     p_snap.add_argument("--json", dest="as_json", action="store_true", help="输出 snapshot dict 到 stdout（不渲染 HTML）")
+    p_snap.add_argument("--diff", nargs=2, metavar=("A", "B"), default=None,
+                        help="对比两 snapshot JSON（A before / B after）→ diff HTML（不调 Inspector/DB）")
+    p_snap.add_argument("--label-a", default="A", help="diff 页 A 侧标签")
+    p_snap.add_argument("--label-b", default="B", help="diff 页 B 侧标签")
     p_snap.add_argument("--open", dest="open_browser", action="store_true", help="写完后用浏览器打开 HTML")
 
     return parser
@@ -323,7 +327,21 @@ def run_snapshot(args) -> None:
     """
     import webbrowser
 
-    from brainregion.viz import BrainSnapshot, build_snapshot, render_html
+    from brainregion.viz import BrainSnapshot, build_snapshot, render_diff, render_html
+
+    # 0. --diff:对比两 snapshot → diff HTML（不调 Inspector/DB,确定性）
+    if args.diff:
+        from brainregion.viz import build_diff
+
+        a = BrainSnapshot.from_dict(json.loads(Path(args.diff[0]).read_text(encoding="utf-8")))
+        b = BrainSnapshot.from_dict(json.loads(Path(args.diff[1]).read_text(encoding="utf-8")))
+        diff = build_diff(a, b, label_a=args.label_a, label_b=args.label_b)
+        out_path = Path(args.out) if args.out else Path.cwd() / "brain_region_diff.html"
+        out_path.write_text(render_diff(diff), encoding="utf-8")
+        print(f"diff → {out_path}")
+        if args.open_browser:
+            webbrowser.open(out_path.resolve().as_uri())
+        return
 
     # 1. 取 snapshot：--from 优先（不调 Inspector/DB），否则 build
     if args.from_file:

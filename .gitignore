@@ -28,6 +28,7 @@ scripts/verify_*
 # Local snapshot output (viz CLI default HTML/JSON artifacts)
 brain_region_snapshot.html
 brain_region_snapshot.json
+brain_region_diff.html
 
 # Local planning / issue / spec notes (not uploaded)
 docs/ai_collaboration_roadmap.zh-CN.md

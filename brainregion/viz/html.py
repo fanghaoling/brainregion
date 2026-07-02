@@ -12,6 +12,10 @@ import html
 from datetime import datetime, timezone
 
 from ..inspector.render import status_symbol
+from .diff import (
+    ADDED, BrainDiff, MULTI, REGION_CHANGED, REMOVED, STATUS_CHANGED,
+    SUMMARY_CHANGED, TRIGGER_CHANGED,
+)
 from .snapshot import BrainSnapshot
 
 _DOCTYPE = "<!DOCTYPE html>"
@@ -106,6 +110,23 @@ td.mono, th.mono { font-family: ui-monospace, "SFMono-Regular", Consolas, monosp
 .timeline td.sym { text-align: center; font-size: 14px; }
 .empty { color: #8a9099; font-size: 13px; padding: 8px 0; }
 .explain { font-size: 13px; line-height: 1.6; color: #4a5159; }
+/* diff 专用 */
+.stats { display: flex; gap: 10px; flex-wrap: wrap; margin-bottom: 16px; }
+.stat { background: #fff; border: 1px solid #e8eaed; border-radius: 8px; padding: 10px 14px; min-width: 92px; }
+.stat .n { font-size: 22px; font-weight: 700; }
+.stat .l { font-size: 12px; color: #8a9099; }
+.stat.add .n { color: #1a7f37; } .stat.del .n { color: #cf222e; }
+.stat.chg .n { color: #b08800; } .stat.neu .n { color: #5a626c; }
+.ck { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px; font-weight: 600; margin-right: 6px; }
+.ck.add { background: #e6f4ea; color: #1a7f37; }
+.ck.del { background: #ffebe9; color: #cf222e; }
+.ck.status { background: #fff1e0; color: #bc4a00; }
+.ck.summary { background: #ddf4ff; color: #0969da; }
+.ck.trigger { background: #fff8c5; color: #7d5e00; }
+.ck.region { background: #f1e8fd; color: #8250df; }
+.ck.multi { background: #f0f1f3; color: #5a626c; }
+.arrow { color: #8a9099; margin: 0 4px; }
+.del-line { color: #8a9099; }   /* removed 行弱化 */
 """
 
 
@@ -314,6 +335,221 @@ class HtmlRenderer:
             f"<div class=\"explain\">{_esc(act.get('explain'))}</div>"
             f"<table><thead><tr><th>指标</th><th>值</th></tr></thead><tbody>{body}</tbody></table></section>"
         )
+
+
+class DiffHtmlRenderer:
+    """BrainDiff → 自包含 HTML(可视化 Phase 2)。零业务逻辑,全读 diff.summary / diff.* 预算值。"""
+
+    _KIND_BADGE = {
+        ADDED: ("新增", "add"), REMOVED: ("移除", "del"),
+        STATUS_CHANGED: ("状态变", "status"), SUMMARY_CHANGED: ("摘要变", "summary"),
+        TRIGGER_CHANGED: ("Trigger 变", "trigger"), REGION_CHANGED: ("脑区变", "region"),
+        MULTI: ("多项变", "multi"),
+    }
+
+    def render(self, diff: BrainDiff) -> str:
+        parts = [
+            _DOCTYPE,
+            "<html lang=\"zh-CN\"><head><meta charset=\"utf-8\">",
+            "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+            f"<title>{_esc('BrainRegion Diff')}</title>",
+            f"<style>{_CSS}</style></head><body><div class=\"wrap\">",
+            self._header(diff),
+            self._summary_hero(diff.summary),
+            self._kpis(diff.kpis_a, diff.kpis_b),
+            self._memory(diff),
+            self._regions(diff.regions),
+            self._runs(diff.runs, diff.summary),
+            self._calibration(diff.calibration),
+        ]
+        if diff.notes:
+            parts.append("<section><h2>说明</h2><div class=\"explain\">"
+                         + "<br>".join(_esc(n) for n in diff.notes) + "</div></section>")
+        parts.append("</div></body></html>")
+        return "".join(parts)
+
+    # ── 段(renderer 只读不算)────────────────────────────────────────────────
+    def _header(self, d: BrainDiff) -> str:
+        a, b = d.a_meta, d.b_meta
+        return (
+            "<header><h1>🔄 BrainRegion Diff</h1>"
+            f"<div class=\"meta\">{_esc(a.get('label','A'))} {_esc(_fmt_ts(a.get('generated_at')))}"
+            f"{_ql(a)} <span class=\"arrow\">→</span> "
+            f"{_esc(b.get('label','B'))} {_esc(_fmt_ts(b.get('generated_at')))}{_ql(b)}</div></header>"
+        )
+
+    def _summary_hero(self, s: dict) -> str:
+        """Executive Summary:3 秒看完脑变化(GPT r1⑤)。直读 s,不自算。"""
+        chips = []
+        def chip(n, label, cls):
+            if n:
+                chips.append(f"<div class=\"stat {cls}\"><div class=\"n\">{_esc(n)}</div>"
+                             f"<div class=\"l\">{_esc(label)}</div></div>")
+        chip(f"+{s.get('added',0)}", "新增记忆", "add")
+        chip(f"{s.get('changed',0)}", "变化记忆", "chg")
+        chip(f"−{s.get('removed',0)}", "移除记忆", "del")
+        chip(f"+{s.get('regions_added',0)}" if s.get('regions_added',0) else "",
+             "新增脑区", "neu")
+        chip(f"+{s.get('new_runs',0)}", "新 Run", "neu")
+        if s.get("total_a", 0) != s.get("total_b", 0):
+            chips.append(f"<div class=\"stat neu\"><div class=\"n\">{_esc(s.get('total_a',0))}"
+                         f"<span class=\"arrow\">→</span>{_esc(s.get('total_b',0))}</div>"
+                         "<div class=\"l\">记忆总数</div></div>")
+        if s.get("gate_a") != s.get("gate_b"):
+            chips.append(f"<div class=\"stat neu\"><div class=\"n dec {_dec_class(s.get('gate_a'))}\">"
+                         f"{_esc(s.get('gate_a'))}<span class=\"arrow\">→</span>"
+                         f"<span class=\"dec {_dec_class(s.get('gate_b'))}\">{_esc(s.get('gate_b'))}</span></div>"
+                         "<div class=\"l\">闸门</div></div>")
+        if s.get("blocked_a") != s.get("blocked_b"):
+            chips.append("<div class=\"stat neu\"><div class=\"n\">校准</div><div class=\"l\">"
+                         + ("通过→阻塞" if s.get("blocked_b") else "阻塞→通过") + "</div></div>")
+        if not chips:
+            return "<section><div class=\"stat neu\" style=\"display:inline-block\"><div class=\"n\">无变化</div></div></section>"
+        return f"<section><h2>Executive Summary</h2><div class=\"stats\">{''.join(chips)}</div></section>"
+
+    def _kpis(self, kpis_a, kpis_b) -> str:
+        b_by_label = {k.label: k for k in kpis_b}
+        rows = []
+        for ka in kpis_a:
+            kb = b_by_label.get(ka.label)
+            if kb is None:
+                continue
+            rows.append(
+                f"<tr><td>{_esc(ka.label)}</td>"
+                f"<td class=\"dec {_dec_class_value(ka.status)}\">{_esc(ka.value)}</td>"
+                f"<td class=\"arrow\">→</td>"
+                f"<td class=\"dec {_dec_class_value(kb.status)}\">{_esc(kb.value)}</td></tr>"
+            )
+        return ("<section><h2>KPI A → B</h2><table><thead><tr><th>指标</th><th>A</th><th></th>"
+                f"<th>B</th></tr></thead><tbody>{''.join(rows)}</tbody></table></section>")
+
+    def _memory(self, d: BrainDiff) -> str:
+        mem = d.memory
+        parts = ["<section><h2>记忆变化</h2>"]
+        changed = mem.get("changed") or []
+        added = mem.get("added") or []
+        removed = mem.get("removed") or []
+        if not (changed or added or removed):
+            parts.append("<div class=\"empty\">无 experience 级变化</div></section>")
+            return "".join(parts)
+        # 顺序 Changed → Added → Removed(GPT r2⑥)
+        if changed:
+            parts.append("<h2 style=\"font-size:13px\">变化</h2><table><tbody>")
+            for c in changed:
+                parts.append(self._changed_row(c))
+            parts.append("</tbody></table>")
+        if added:
+            parts.append("<h2 style=\"font-size:13px\">新增</h2><table><tbody>")
+            for c in added:
+                parts.append(self._addremove_row(c, "add"))
+            parts.append("</tbody></table>")
+        if removed:
+            parts.append("<h2 style=\"font-size:13px\">移除</h2><table><tbody>")
+            for c in removed:
+                parts.append(self._addremove_row(c, "del"))
+            parts.append("</tbody></table>")
+        parts.append("</section>")
+        return "".join(parts)
+
+    def _changed_row(self, c) -> str:
+        label, cls = self._KIND_BADGE.get(c.change_kind, (c.change_kind or "?", "multi"))
+        identity = (c.after or c.before).summary
+        detail = self._change_detail(c)
+        return (f"<tr><td><span class=\"ck {cls}\">{_esc(label)}</span>{_esc(identity)}</td>"
+                f"<td>{detail}</td></tr>")
+
+    def _change_detail(self, c) -> str:
+        b, a, kind = c.before, c.after, c.change_kind
+        segs = []
+        if kind in (STATUS_CHANGED, MULTI):
+            segs.append(f"状态 <span class=\"ck status\">{_esc(_gov_label(b.status))}</span>"
+                        f"<span class=\"arrow\">→</span><span class=\"ck status\">{_esc(_gov_label(a.status))}</span>")
+        if kind in (TRIGGER_CHANGED, MULTI):
+            segs.append(f"trigger <span class=\"mono\">{_esc(', '.join(b.triggers)) or '∅'}</span>"
+                        f"<span class=\"arrow\">→</span><span class=\"mono\">{_esc(', '.join(a.triggers)) or '∅'}</span>")
+        if kind in (SUMMARY_CHANGED, MULTI):
+            segs.append(f"摘要 {_esc(b.summary)}<span class=\"arrow\">→</span>{_esc(a.summary)}")
+        if kind in (REGION_CHANGED, MULTI):
+            segs.append(f"脑区 {_esc(b.region)}<span class=\"arrow\">→</span>{_esc(a.region)}")
+        return " ".join(segs)
+
+    def _addremove_row(self, c, cls) -> str:
+        e = c.after or c.before
+        label = self._KIND_BADGE.get(c.change_kind, (c.change_kind, cls))[0]
+        return (f"<tr class=\"{'del-line' if cls == 'del' else ''}\">"
+                f"<td><span class=\"ck {cls}\">{_esc(label)}</span>{_esc(e.summary)}</td>"
+                f"<td class=\"mono\">{_esc(e.region)}</td>"
+                f"<td><span class=\"ck {_gov(e.status)}\">{_esc(_gov_label(e.status))}</span></td>"
+                f"<td class=\"mono muted\">{_esc(', '.join(e.triggers)) or '∅'}</td></tr>")
+
+    def _regions(self, regions: dict) -> str:
+        added = regions.get("added") or []
+        removed = regions.get("removed") or []
+        deltas = regions.get("deltas") or []
+        if not added and not removed and not deltas:
+            return ""
+        parts = ["<section><h2>脑区变化</h2><table><thead><tr><th>脑区</th><th>A</th><th></th><th>B</th></tr></thead><tbody>"]
+        for r in added:
+            parts.append(f"<tr><td>{_esc(r)}</td><td>—</td><td class=\"arrow\">→</td>"
+                         f"<td><b>{'+新增'}</b></td></tr>")
+        for r in removed:
+            parts.append(f"<tr class=\"del-line\"><td>{_esc(r)}</td><td><b>消失</b></td>"
+                         f"<td class=\"arrow\">→</td><td>—</td></tr>")
+        for dlt in deltas:
+            a, b = dlt.get("a", 0), dlt.get("b", 0)
+            sign = "+" if b > a else ""
+            parts.append(f"<tr><td>{_esc(dlt.get('region'))}</td><td>{_esc(a)}</td>"
+                         f"<td class=\"arrow\">→</td><td><b>{sign}{_esc(b)}</b></td></tr>")
+        parts.append("</tbody></table></section>")
+        return "".join(parts)
+
+    def _runs(self, runs: dict, summary: dict) -> str:
+        new = runs.get("new") or []
+        if not new:
+            return ""
+        rows = "".join(
+            f"<tr><td class=\"mono\">{_esc(r.get('run_id'))}</td>"
+            f"<td><span class=\"dec {_dec_class(r.get('status'))}\">{_esc(r.get('status'))}</span></td></tr>"
+            for r in new
+        )
+        return ("<section><h2>新增 Run(B 有 A 无)</h2><table><thead><tr><th>Run</th><th>闸门</th>"
+                f"</tr></thead><tbody>{rows}</tbody></table></section>")
+
+    def _calibration(self, cal: dict) -> str:
+        blocked_a = cal.get("blocked_a")
+        blocked_b = cal.get("blocked_b")
+        new_np = cal.get("new_not_passed") or []
+        if blocked_a == blocked_b and not new_np:
+            return ""
+        parts = ["<section><h2>校准变化</h2>"]
+        if blocked_a != blocked_b:
+            parts.append(f"<div class=\"explain\">校准状态: "
+                         f"{'通过' if not blocked_a else '阻塞'}<span class=\"arrow\">→</span>"
+                         f"{'通过' if not blocked_b else '阻塞'}</div>")
+        if new_np:
+            parts.append("<table><thead><tr><th>新增未通过 judge</th><th>模型</th></tr></thead><tbody>")
+            for r in new_np:
+                parts.append(f"<tr><td class=\"mono\">{_esc(r.get('judge_id'))}</td>"
+                             f"<td>{_esc(r.get('judge_model'))}</td></tr>")
+            parts.append("</tbody></table>")
+        parts.append("</section>")
+        return "".join(parts)
+
+
+def _ql(meta: dict) -> str:
+    """query_label 片段(有则显示)。"""
+    ql = meta.get("query_label") or ""
+    return f" · {_esc(ql)}" if ql else ""
+
+
+def _gov(status: str) -> str:
+    """governance status → chip CSS class(原始枚举即 class,同 Phase 1)。"""
+    return status or ""
+
+
+def _dec_class_value(status: str) -> str:
+    """KPI status(ok/warn/bad/neutral)→ dec class(复用 _dec_class 的色彩思路但独立)。"""
+    return {"ok": "dec-go", "bad": "dec-no_go", "warn": "dec-inconclusive"}.get(status or "", "dec-neutral")
 
 
 def _dec_class(dec) -> str:

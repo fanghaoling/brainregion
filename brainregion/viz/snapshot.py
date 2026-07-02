@@ -16,13 +16,55 @@ from datetime import datetime, timezone
 from brainregion import __version__
 from brainregion.inspector import inspect as _inspect
 
-SNAPSHOT_SCHEMA_VERSION = 1
+SNAPSHOT_SCHEMA_VERSION = 2
 
 # KPI 染色状态(HTML renderer 据此上色)
 _OK = "ok"
 _WARN = "warn"
 _BAD = "bad"
 _NEUTRAL = "neutral"
+
+_SUMMARY_MAX = 120  # manifest summary 截断上限(snapshot 作 artifact 控体积;全量正文在 store)
+
+
+@dataclass(frozen=True)
+class ManifestExperience:
+    """一条记忆的 diff-ready 清单项(Phase 2 Brain Diff 用)。
+
+    manifest = 全量记忆清单(无 details/source/age,那些留 preview);要的是可比的
+    id + 语义字段(region/status/summary/triggers)。created_at 仅展示/排序,**不参与 diff**。
+    构造归一(GPT round2 ②③):triggers → sorted(set)(集合语义,顺序无关)、summary → ≤120 字。
+    """
+
+    id: str
+    region: str
+    status: str
+    summary: str
+    triggers: tuple[str, ...] = ()
+    created_at: str = ""
+
+    def __post_init__(self):
+        # frozen → 用 object.__setattr__ 归一(list/tuple 入参都变 sorted tuple)
+        object.__setattr__(self, "triggers", tuple(sorted(set(self.triggers or ()))))
+        object.__setattr__(self, "summary", (self.summary or "")[:_SUMMARY_MAX])
+
+    def semantic_equals(self, other: "ManifestExperience") -> bool:
+        """diff 语义相等:只比 region/status/summary/triggers(均已归一,直接比)。
+
+        id(配对时同)、created_at、未来 metadata(last_seen/confidence)忽略——
+        防「加可变 metadata → 全 changed」(GPT round2 ①)。"""
+        return (self.region == other.region and self.status == other.status
+                and self.summary == other.summary and self.triggers == other.triggers)
+
+    def to_dict(self) -> dict:
+        return {"id": self.id, "region": self.region, "status": self.status,
+                "summary": self.summary, "triggers": list(self.triggers), "created_at": self.created_at}
+
+    @classmethod
+    def from_dict(cls, d: dict) -> "ManifestExperience":
+        return cls(id=d.get("id", ""), region=d.get("region", ""), status=d.get("status", ""),
+                   summary=d.get("summary", ""), triggers=d.get("triggers", ()),
+                   created_at=d.get("created_at", ""))
 
 
 @dataclass(frozen=True)
@@ -77,8 +119,10 @@ class BrainSnapshot:
     generated_at: str = ""
     brainregion_version: str = ""
     has_query: bool = False
+    query_label: str = ""                       # 截断 problem/goal,diff 页标签(GPT r1③)
     kpis: list[Kpi] = field(default_factory=list)
     regions: list[RegionSnapshot] = field(default_factory=list)
+    manifest: list[ManifestExperience] = field(default_factory=list)  # 全量记忆清单(Phase 2 diff 用)
     activation: dict | None = None
     memory: dict = field(default_factory=dict)
     runs: dict = field(default_factory=dict)
@@ -95,14 +139,16 @@ class BrainSnapshot:
                 f"snapshot schema_version {ver} > supported {SNAPSHOT_SCHEMA_VERSION}; "
                 f"升级 brainregion 或用旧版本渲染"
             )
-        # v1 重建(kpis/regions 递归;opaque dict 原样)。未来 v2+ 在此分支。
+        # v1 重建(kpis/regions 递归;opaque dict 原样)。v2 增 query_label/manifest(v1 缺 → 默认空,不报错)。
         return cls(
             schema_version=ver,
             generated_at=d.get("generated_at", ""),
             brainregion_version=d.get("brainregion_version", ""),
             has_query=bool(d.get("has_query", False)),
+            query_label=d.get("query_label", ""),
             kpis=[Kpi.from_dict(k) for k in d.get("kpis", [])],
             regions=[RegionSnapshot.from_dict(r) for r in d.get("regions", [])],
+            manifest=[ManifestExperience.from_dict(m) for m in d.get("manifest", [])],
             activation=d.get("activation"),
             memory=d.get("memory", {}) or {},
             runs=d.get("runs", {}) or {},
@@ -132,7 +178,8 @@ def build_snapshot(
     """
     has_query = bool(problem or goal)
     # inspect(view=...) 返回 {section: {...}} 包一层；这里拆出各 section 的 dict。
-    memory = _inspect(view="memory", region=region, memory_preview_k=memory_preview_k)["memory"]
+    memory = _inspect(view="memory", region=region, memory_preview_k=memory_preview_k,
+                      memory_manifest=True)["memory"]
     runs = _inspect(view="run", run_id=run_id, history_limit=history_limit)["run"]
     calibration = _inspect(view="calibration", judge_id=judge_id)["calibration"]
     activation = None
@@ -145,13 +192,16 @@ def build_snapshot(
 
     regions = _build_regions(memory, activation)
     kpis = _build_kpis(memory, regions, activation, runs)
+    manifest = [ManifestExperience.from_dict(m) for m in (memory.get("manifest") or [])]
     return BrainSnapshot(
         schema_version=SNAPSHOT_SCHEMA_VERSION,
         generated_at=datetime.now(timezone.utc).isoformat(),
         brainregion_version=__version__,
         has_query=has_query,
+        query_label=(problem or goal)[:80],
         kpis=kpis,
         regions=regions,
+        manifest=manifest,
         activation=activation,
         memory=memory,
         runs=runs,
