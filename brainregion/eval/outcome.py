@@ -19,14 +19,14 @@ import statistics
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Literal
+from typing import Callable, Literal
 
 from ..core.consult.report import ConsultReport
 from ..core.consult import ConsultRequest
 from ..core.context import ContextQuery
 from ..core.regions import REGIONS_DIR
 from ..core.wake.gate import wake_gate
-from ..memory import MemoryProvider
+from ..memory import MemoryProvider, MemoryScope
 from ..memory.base import ExperienceEvent
 from .check import check_advice_signal, detect_memory_cite
 from ..server import (
@@ -119,6 +119,9 @@ class OutcomeVariant:
     inject_memory: bool = False  # Phase2A RELEVANT 臂（不改 strategy，正交轴）
     inject_memory_irrelevant: bool = False  # Phase2A.5 IRRELEVANT 臂（跨域无关，控 token 长度）
     inject_memory_stale: bool = False        # Phase2A.5 STALE 臂（过时事实当现状）
+    # scoped-eval 臂:woken 是 per-task 动态 → 持「woken→MemoryScope 的函数」(类型即 MemoryScope,
+    # 无字符串/枚举增长)。runner 调 v.build_scope(shared_wake["woken"]);None=unscoped。GPT r2①。
+    build_scope: Callable[[list[str]], MemoryScope | None] | None = None
 
 
 DEFAULT_OUTCOME_VARIANTS = [
@@ -645,6 +648,36 @@ def compute_memory_diagnostics(judgements: list, variants: list[OutcomeVariant])
     }
 
 
+def _scoped_recall_summary(memory_instr: list) -> dict:
+    """scoped-eval 召回率聚合(GPT r2③④):per-variant relevant_recall / distractor_leak_rate 的 median+mean。
+
+    relevant_recall = relevant_injected/relevant_total(高=好);distractor_leak_rate = distractor_injected/
+    distractor_total(scoped 该≈0、unscoped 高)。带 n + top_k 上下文(防 top_k 截断误读)。仅 scoped-eval
+    臂有 relevant/distractor 计数;其他实验 memory_instr 无这些键 → 返回空 dict(向后兼容)。
+    """
+    by_arm: dict[str, list[dict]] = {}
+    for m in memory_instr:
+        if "relevant_total" not in m:
+            continue
+        rt, ri = int(m.get("relevant_total") or 0), int(m.get("relevant_injected") or 0)
+        dt, di = int(m.get("distractor_total") or 0), int(m.get("distractor_injected") or 0)
+        by_arm.setdefault(m.get("variant", ""), []).append({
+            "relevant_recall": (ri / rt) if rt else None,
+            "distractor_leak_rate": (di / dt) if dt else None,
+        })
+    out: dict = {}
+    for arm, recs in by_arm.items():
+        def _mm(key):
+            vals = [r[key] for r in recs if r[key] is not None]
+            if not vals:
+                return {"median": None, "mean": None, "n": 0}
+            return {"median": round(statistics.median(vals), 3),
+                    "mean": round(statistics.mean(vals), 3), "n": len(vals)}
+        out[arm] = {"relevant_recall": _mm("relevant_recall"),
+                    "distractor_leak_rate": _mm("distractor_leak_rate")}
+    return out
+
+
 async def run_outcome_eval(
     tasks: list, variants: list[OutcomeVariant], judge_entries: list[dict],
     dd: dict, rubric_text: str, rubric_hash: str, run_id: str,
@@ -683,13 +716,30 @@ async def run_outcome_eval(
                 seed_list, arm = getattr(task, "seed_memory_stale", None), "STALE"
             if seed_list:
                 evs = [_seed_to_event(m) for m in seed_list]
-                rr = MemoryProvider.from_records(evs).retrieve(
-                    ContextQuery(text=_task_context(task), top_k=int(dd.get("memory_recall_top_k", 5)))
+                top_k = int(dd.get("memory_recall_top_k", 5))
+                # scoped-eval:build_scope(woken)→MemoryScope;None=unscoped(现状)。GPT r2①
+                scope = v.build_scope(shared_wake["woken"]) if v.build_scope else None
+                rr = MemoryProvider.from_records(evs, scope=scope).retrieve(
+                    ContextQuery(text=_task_context(task), top_k=top_k)
                 )
                 context_blocks = rr.blocks
+                # 召回率 + 混淆(scoped-eval,GPT r1④/r2③⑤):id→role 推召回;block metadata 已带 region
+                id_role = {str(m.get("id")): m.get("role") for m in seed_list}
+                inj_ids = [b.metadata.get("id") for b in rr.blocks]
+                rel_total = sum(1 for r in id_role.values() if r == "relevant")
+                dist_total = sum(1 for r in id_role.values() if r == "distractor")
                 memory_instr.append({
                     "task_id": task.id, "variant": v.name, "arm": arm,
-                    "candidates": rr.meta.get("candidates_before_top_k"), "injected": len(rr.blocks),
+                    "scoped": scope is not None, "top_k": top_k,
+                    "candidates": rr.meta.get("candidates_before_top_k"),
+                    "after_scope": rr.meta.get("candidates_after_scope"),
+                    "after_governance": rr.meta.get("candidates_after_governance"),
+                    "injected": len(rr.blocks),
+                    "relevant_total": rel_total, "distractor_total": dist_total,
+                    "relevant_injected": sum(1 for i in inj_ids if id_role.get(i) == "relevant"),
+                    "distractor_injected": sum(1 for i in inj_ids if id_role.get(i) == "distractor"),
+                    "injected_regions": sorted({(b.metadata.get("region") or "(global)")
+                                                for b in rr.blocks}),
                 })
             rec = await run_outcome_variant(
                 engine, request, panel, consultants, v, mapping_source, shared_wake,
@@ -735,9 +785,15 @@ async def run_outcome_eval(
         judge_entries, rubric_hash, prompt_hash, gold_version)
     # Phase2A：memory A/B 单变量——control=routed, treatment=routed_memory。
     # 修 gate 静默：原调用漏传 control/treatment → 新 arm 对 GO/NO_GO 不可见（用默认 default/routed）。
+    has_scoped = any(v.build_scope is not None for v in variants)  # scoped-eval(GPT r2①)
     has_memory = any(getattr(v, "inject_memory", False) for v in variants)
     gate_kwargs = {"run_id": run_id, "calibration_ok": calib_ok}
-    if has_memory:
+    if has_scoped:
+        # scoped vs unscoped(两臂都有 memory,同 panel)→ cost 持平非目标;control=unscoped/treatment=scoped
+        gate_kwargs["control"] = "routed_memory"
+        gate_kwargs["treatment"] = "routed_memory_scoped"
+        gate_kwargs["cfg"] = GateConfig(cost_primary=False)
+    elif has_memory:
         # memory 召回免费 + 两臂同 panel → cost 结构持平，降本非其目标 → cost 不当 primary
         # （additive/memory 两例证明 cost≤0.85 闸门对覆盖型 treatment 结构上不可能过）。
         gate_kwargs["control"] = "routed"
@@ -749,6 +805,7 @@ async def run_outcome_eval(
     summary["gate"] = gate
     summary["memory_diagnostics"] = compute_memory_diagnostics(judgements, variants)
     summary["memory_instrumentation"] = memory_instr
+    summary["scoped_recall"] = _scoped_recall_summary(memory_instr)
 
     entry = EvalLedgerEntry(
         run_id=run_id,

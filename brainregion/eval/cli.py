@@ -274,6 +274,37 @@ async def run_calibrate_advice(args) -> dict:
     }
 
 
+def build_outcome_variants(args) -> list:
+    """据 args 标志构造 outcome 变体集(抽出来便测)。
+
+    - 默认:default vs routed。
+    - --additive:加 routed_additive(叠加式映射)做 3-way。
+    - --memory:Phase2A.5 4 臂(OFF/RELEVANT/IRRELEVANT/STALE)。
+    - --scoped:scoped-eval 两臂(unscoped control + scoped treatment,单变量=scope)。
+    --memory / --scoped 互斥(elif,整体替换);--additive 在默认之上追加。
+    """
+    variants = list(DEFAULT_OUTCOME_VARIANTS)
+    if getattr(args, "additive", False):
+        variants.append(OutcomeVariant("routed_additive", "routed_additive"))
+    if getattr(args, "memory", False):
+        variants = [
+            OutcomeVariant("routed", "routed"),
+            OutcomeVariant("routed_memory", "routed", inject_memory=True),
+            OutcomeVariant("routed_memory_irrelevant", "routed", inject_memory_irrelevant=True),
+            OutcomeVariant("routed_memory_stale", "routed", inject_memory_stale=True),
+        ]
+    elif getattr(args, "scoped", False):
+        # scoped-eval:单变量=scope。两臂同一份 seed_memory(relevant+global+distractor),
+        # scoped 臂 build_scope(woken)→MemoryScope 过滤跨 region distractor;unscoped 全注入。
+        from ..memory import MemoryScope
+        variants = [
+            OutcomeVariant("routed_memory", "routed", inject_memory=True),  # control(unscoped)
+            OutcomeVariant("routed_memory_scoped", "routed", inject_memory=True,
+                           build_scope=lambda woken: MemoryScope(frozenset(woken))),  # treatment
+        ]
+    return variants
+
+
 async def run_outcome(args) -> dict:
     """`brain-region outcome`：量 wake_gate→consult 建议质量（A=default vs B=routed，真调模型+盲评+gate）。
 
@@ -281,21 +312,7 @@ async def run_outcome(args) -> dict:
     cost_per_useful_advice（roadmap §8 v5.5 主指标），evaluate_gate 出 GO/NO_GO/INCONCLUSIVE。
     """
     dd = _defaults_mod.apply()
-    variants = list(DEFAULT_OUTCOME_VARIANTS)
-    if getattr(args, "additive", False):
-        # 加 routed_additive（叠加式映射：base ∪ region 专题）做 3-way A/B
-        # ——唯一变量=映射方式（替换 vs 叠加），与 routed 共用 wake/panel/judge
-        variants.append(OutcomeVariant("routed_additive", "routed_additive"))
-    if getattr(args, "memory", False):
-        # Phase2A.5 4 臂研究实验：OFF/RELEVANT/IRRELEVANT/STALE。
-        # 主比较 RELEVANT vs IRRELEVANT（控 token 长度，量 information quality）。
-        # default vs routed 已在 Phase 1 定论 → 不跑 default。
-        variants = [
-            OutcomeVariant("routed", "routed"),
-            OutcomeVariant("routed_memory", "routed", inject_memory=True),
-            OutcomeVariant("routed_memory_irrelevant", "routed", inject_memory_irrelevant=True),
-            OutcomeVariant("routed_memory_stale", "routed", inject_memory_stale=True),
-        ]
+    variants = build_outcome_variants(args)
 
     endpoints_cfg = dd.get("endpoints") or {}
     endpoint_ids = set((_resolve_endpoints(endpoints_cfg) or {}).keys())

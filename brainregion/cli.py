@@ -129,6 +129,8 @@ def build_parser() -> argparse.ArgumentParser:
                        help="加 routed_additive 变体（叠加式映射：base ∪ region 专题）做 3-way A/B")
     p_out.add_argument("--memory", action="store_true",
                        help="Phase2A.5：4 臂 memory 研究实验 OFF/RELEVANT/IRRELEVANT/STALE（主比较 RELEVANT vs IRRELEVANT，控 token 长度）")
+    p_out.add_argument("--scoped", action="store_true",
+                       help="scoped-eval：scoped（woken region 过滤）vs unscoped memory 注入（单变量=scope，验证 Phase A scoping）")
     p_out.add_argument("--output", dest="output_format", default="json", choices=["json", "markdown"])
     p_out.add_argument("--output-file", default=None)
 

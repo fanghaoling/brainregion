@@ -1,0 +1,102 @@
+# scoped vs unscoped outcome eval fixtures(验证 Phase A region scoping thesis)。
+#
+# 单变量 = scope。每 task 的 seed_memory 含:1 relevant(该 task 的 woken region)+ 1 global relevant
+# (region="")+ 2 distractor(**其他非 woken region**)。两臂用同一份 seed:
+#   unscoped(routed_memory)→ 全注入(relevant+global+distractor)。
+#   scoped(routed_memory_scoped)→ MemoryScope(woken) 留 relevant+global,滤掉 distractor。
+# distractor 设计(GPT r1②):**高相似但错方向**——triggers 命中 task problem(故 unscoped 会召回泄漏),
+# 但 region 是非 woken 的(scoped 滤),内容是该 region 特有的错向建议。
+# 每 seed 带 unique id + role(relevant|distractor)。seed 数 ≤ memory_recall_top_k(默认 5)。
+# wake-validity(GPT r2②):problem 只含 gold region 触发词,distractor 的 region 不得被 wake 唤醒。
+
+- id: sc-001-debugging-race
+  task_type: consult
+  difficulty: complex
+  input:
+    problem: "Flaky integration test: intermittent AssertionError in payment reconciliation, only on CI. Race condition suspected around DB reconnect."
+    why_stuck: "Cannot reproduce locally; CI logs show the failure right after a DB reconnect."
+    question: "Most likely race conditions + smallest confirming experiment?"
+    goal: "Root cause + one confirming experiment."
+  gold_regions: [debugging]
+  seed_memory:
+    - {id: sc001-r1, role: relevant, region: debugging, summary: "DB reconnect race: connection-bound semaphore 串行化 reconnect 与事务提交", details: "reconciliation 在 DB reconnect 后偶发 AssertionError;根因 reconnect 回调与未完成事务交错。connection-bound semaphore 串行化后稳定。", triggers: ["race", "reconnect", "flaky", "AssertionError", "竞态", "重连"]}
+    - {id: sc001-g1, role: relevant, region: "", summary: "race bug 通用:先抓交错日志再改", details: "竞态先加 interleaving 日志复现,确认顺序再修。", triggers: ["race", "竞态", "reproduce", "flaky"]}
+    - {id: sc001-d1, role: distractor, region: unity_ecs, summary: "race 修法:用 EntityCommandBuffer 确定性 playback 顺序", details: "ECS 里 race 靠 EntityCommandBuffer 的确定性回放顺序消除。", triggers: ["race", "竞态", "flaky", "reconnect"]}
+    - {id: sc001-d2, role: distractor, region: planning, summary: "race:先排个 cutover rollback milestone 再动代码", details: "把 reconnect 改造拆 milestone + rollback 计划。", triggers: ["race", "竞态", "rollback", "milestone"]}
+  notes: "wake 只醒 debugging(problem 含 flaky/AssertionError/race;无 unity/plan 词)。distractor 在 unity_ecs/planning(非 woken)。"
+
+- id: sc-002-unity-burst-gc
+  task_type: consult
+  difficulty: cross_domain
+  input:
+    problem: "Unity Burst job system: GC allocations in the hot path (NativeArray + SystemAPI) cause frame hitches. Need ECS-aware fix to cut allocations."
+    why_stuck: "Profiling shows per-frame allocations in a Burst job; unsure which EntityCommandBuffer pattern removes them."
+    goal: "Cut hot-path allocations without breaking the Jobs schedule."
+  gold_regions: [unity_ecs, performance]
+  seed_memory:
+    - {id: sc002-r1, role: relevant, region: unity_ecs, summary: "Burst GC:EntityCommandBuffer + unmanaged NativeArray 去分配", details: "用 EntityCommandBuffer 结构性变化缓冲 + unmanaged 数组,消除 Burst job 内托管堆分配。", triggers: ["unity", "burst", "nativearray", "allocation", "job system"]}
+    - {id: sc002-g1, role: relevant, region: "", summary: "热点优化:先 profile 分配再动", details: "deep profile 定位分配源再优化,别盲改。", triggers: ["allocation", "hot", "performance", "burst"]}
+    - {id: sc002-d1, role: distractor, region: planning, summary: "Burst GC:把重构拆 milestone 带 rollback", details: "allocation 治理拆成 milestone + rollback 计划分阶段。", triggers: ["burst", "allocation", "GC", "milestone", "rollback"]}
+    - {id: sc002-d2, role: distractor, region: debugging, summary: "Burst GC:加 stack-trace 日志找 bug", details: "GC 是 bug,先加日志定位。", triggers: ["burst", "allocation", "GC", "error", "bug"]}
+  notes: "wake 醒 unity_ecs+performance(problem 含 unity/burst/nativearray/allocation)。distractor 在 planning/debugging(非 woken)。gold 含两 region 避免 false_wake。"
+
+- id: sc-003-security-injection
+  task_type: consult
+  difficulty: complex
+  input:
+    problem: "REST endpoint builds SQL from user input before launch. Need to challenge injection surface and 越权 (privilege escalation)—parameterized queries alone may not cover 越权."
+    why_stuck: "Not sure parameterized queries close both injection and 越权."
+    question: "Where are the real injection and 越权 risks, and what tests prove they're closed?"
+  gold_regions: [security]
+  seed_memory:
+    - {id: sc003-r1, role: relevant, region: security, summary: "SQL 注入+越权:参数化查询堵注入,RBAC+显式 owner 校验堵越权", details: "参数化查询消除注入;越权(IDOR)靠 RBAC 中间件 + 每对象写操作前校验 owner/tenant。两层不同,参数化不覆盖越权。", triggers: ["SQL", "injection", "越权", "parameterized", "authz"]}
+    - {id: sc003-g1, role: relevant, region: "", summary: "信任边界处做输入校验", details: "在 trust boundary 统一校验输入,别散在各 handler。", triggers: ["injection", "input", "validation", "SQL"]}
+    - {id: sc003-d1, role: distractor, region: planning, summary: "注入:先排分片迁移 rollback milestone", details: "把注入治理拆迁移 milestone + rollback。", triggers: ["injection", "SQL", "rollback", "milestone"]}
+    - {id: sc003-d2, role: distractor, region: performance, summary: "注入:加缓存层加速查询校验", details: "给查询校验加 cache 降 latency。", triggers: ["injection", "SQL", "cache", "latency"]}
+  notes: "wake 醒 security(problem 含 SQL/injection/越权;sentinel 兜底)。distractor 在 planning/performance(非 woken,problem 无 plan/latency 词)。"
+
+- id: sc-004-planning-migration
+  task_type: consult
+  difficulty: complex
+  input:
+    problem: "Zero-downtime data migration across sharded stores: decompose into milestones, rollback plan, and testable acceptance criteria."
+    why_stuck: "Unsure how to order the cutover so rollback is always possible mid-migration."
+    goal: "A plan with testable acceptance gates and a rollback path."
+  gold_regions: [planning]
+  seed_memory:
+    - {id: sc004-r1, role: relevant, region: planning, summary: "零停机迁移:拆 milestone + dual-write + rollback gate", details: "dual-write 影子期 → 校验 → 切流;每 milestone 带 rollback gate 与 acceptance criteria。", triggers: ["migration", "milestone", "rollback", "dual-write", "plan"]}
+    - {id: sc004-g1, role: relevant, region: "", summary: "cutover 前定 acceptance criteria", details: "cutover 前明确完成标准,否则别切。", triggers: ["acceptance criteria", "cutover", "plan", "migration"]}
+    - {id: sc004-d1, role: distractor, region: debugging, summary: "迁移:bug 在连接池清理,加日志", details: "迁移失败是连接池 bug,先加日志。", triggers: ["migration", "rollback", "bug", "error"]}
+    - {id: sc004-d2, role: distractor, region: unity_ecs, summary: "迁移:用 EntityCommandBuffer batch 回放", details: "迁移用 ECS batch 回放模式。", triggers: ["migration", "rollback", "unity", "batch"]}
+  notes: "wake 醒 planning(problem 含 migration/milestone/rollback/acceptance)。distractor 在 debugging/unity_ecs(非 woken)。"
+
+- id: sc-005-performance-latency
+  task_type: consult
+  difficulty: complex
+  input:
+    problem: "API p99 latency spiked, throughput dropped, response slow under load. Need to find the hot path and cut it."
+    why_stuck: "Unsure whether the bottleneck is the DB join or serialization."
+    goal: "Cut p99 latency without breaking throughput."
+  gold_regions: [performance]
+  seed_memory:
+    - {id: sc005-r1, role: relevant, region: performance, summary: "p99 latency:索引热 join + 缓存结果", details: "热查询加复合索引 + 结果缓存,降 p99。", triggers: ["latency", "p99", "index", "cache", "slow"]}
+    - {id: sc005-g1, role: relevant, region: "", summary: "量 p99 别量 mean;压测再宣称", details: "看 p99 不看 mean,压测验证再下结论。", triggers: ["latency", "p99", "slow", "throughput"]}
+    - {id: sc005-d1, role: distractor, region: planning, summary: "latency:给 perf 项目排个 milestone", details: "把性能优化拆 milestone 计划。", triggers: ["latency", "slow", "milestone", "plan"]}
+    - {id: sc005-d2, role: distractor, region: debugging, summary: "latency:先本地复现慢路径", details: "慢是 bug,先本地复现。", triggers: ["latency", "slow", "reproduce", "bug"]}
+  notes: "wake 醒 performance(problem 含 latency/p99/slow/throughput)。distractor 在 planning/debugging(非 woken)。"
+
+- id: sc-006-debugging-deadlock
+  task_type: consult
+  difficulty: complex
+  input:
+    problem: "Production deadlock: two worker threads stuck, intermittent hang under load. Bug in lock ordering around a shared queue."
+    why_stuck: "Can't repro in staging; only under sustained load."
+    question: "Where's the lock-ordering violation, and what's the smallest repro?"
+    goal: "Root cause + one confirming experiment."
+  gold_regions: [debugging]
+  seed_memory:
+    - {id: sc006-r1, role: relevant, region: debugging, summary: "deadlock:锁序不变量 + tryLock 超时回退", details: "全局锁序 + tryLock 带超时回退路径,消除环等。压测复现。", triggers: ["deadlock", "lock", "stuck", "bug", "hang"]}
+    - {id: sc006-g1, role: relevant, region: "", summary: "deadlock:卡住瞬间抓 thread dump", details: "卡住时抓 thread dump 定位锁序。", triggers: ["deadlock", "stuck", "thread", "dump"]}
+    - {id: sc006-d1, role: distractor, region: planning, summary: "deadlock:锁重写排 roadmap milestone", details: "锁重写拆 milestone + roadmap。", triggers: ["deadlock", "lock", "milestone", "plan"]}
+    - {id: sc006-d2, role: distractor, region: security, summary: "deadlock:sandbox 锁持有者 + authz 资源", details: "给锁加 sandbox + authz 隔离。", triggers: ["deadlock", "lock", "sandbox", "authz"]}
+  notes: "wake 醒 debugging(problem 含 deadlock/stuck/bug;无 plan/security/injection 词,sentinel leak 未触发)。distractor 在 planning/security(非 woken)。"
