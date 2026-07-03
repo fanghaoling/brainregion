@@ -92,8 +92,10 @@ class LiteLLMBackend:
         ep_kwargs: dict = {}
         if ep:
             provider = ep.get("provider")
-            # 前缀守卫：model 已含 / （用户误写 openai/x）则不再拼，防 openai/openai/
-            if provider in ("openai", "anthropic") and "/" not in model:
+            # 前缀守卫：model 已带本 provider 前缀（用户误写 openai/x）则不再拼，防 openai/openai/。
+            # 用 startswith(<provider>/) 而非"含 /"判断——中转站模型名本身可含 /（如 SiliconFlow 的
+            # Qwen/Qwen3-8B），旧启发式 "/" not in model 会误判这类合法 ID 为"已加前缀"而漏拼 → litellm 不认 provider。
+            if provider in ("openai", "anthropic") and not model.startswith(f"{provider}/"):
                 litellm_model = f"{provider}/{model}"
             if ep.get("base_url"):
                 ep_kwargs["api_base"] = ep["base_url"]  # snake_case！勿用 base_url（有历史 bug）

@@ -350,6 +350,23 @@ def test_backend_prefix_guard(monkeypatch):
     assert cap.calls[0]["model"] == "openai/glm-4"
 
 
+def test_backend_prefix_for_slash_model_id(monkeypatch):
+    """中转站模型名本身含 /（如 SiliconFlow Qwen/Qwen3-8B）仍正确拼 provider 前缀。
+
+    旧守卫用 "/" not in model 判断，会把 Qwen/Qwen3-8B 误判为"已加前缀"而漏拼 →
+    litellm 拿到无前缀的 Qwen/Qwen3-8B，把 Qwen 当 provider，不认 → 调用失败。
+    """
+    cap = _patch_litellm(monkeypatch)
+    reg = {"siliconflow": {"provider": "openai", "base_url": "https://api.siliconflow.cn/v1",
+                           "api_key": "k", "headers": {}, "timeout": None}}
+    backend = LiteLLMBackend(endpoint_registry=reg)
+    asyncio.run(backend.complete(model="Qwen/Qwen3-8B", system="s", user="u", endpoint_id="siliconflow"))
+    kw = cap.calls[0]
+    assert kw["model"] == "openai/Qwen/Qwen3-8B"  # 拼 openai/ 前缀，model 名含 / 不影响
+    assert kw["api_base"] == "https://api.siliconflow.cn/v1"
+    assert kw["api_key"] == "k"
+
+
 def test_backend_headers_and_timeout(monkeypatch):
     cap = _patch_litellm(monkeypatch)
     reg = {"r": {"provider": "openai", "base_url": "https://x", "api_key": "k",
