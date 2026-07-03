@@ -339,7 +339,7 @@ def _capability_markdown(result: dict) -> str:
         lines.append(
             f"- {cell}: solve_given_valid={m.get('solve_rate_given_valid')} "
             f"valid_out={m.get('valid_output_rate')} overall={m.get('overall_solve_rate')} "
-            f"out_tok={m.get('output_tokens_given_valid')} call_fail={m.get('call_fail_rate')} n={m.get('n')}"
+            f"out_tok={m.get('output_tokens_given_valid')} rea_tok={m.get('reasoning_tokens_given_valid')} call_fail={m.get('call_fail_rate')} n={m.get('n')}"
         )
     gaps = s.get("gaps") or {}
     if gaps:

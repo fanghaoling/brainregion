@@ -35,9 +35,6 @@ logger = logging.getLogger("brainregion.eval.capability")
 # clause = 3 个**不同变量**的 literal 析取。assignment: dict[int, bool](全变量)。
 
 _ARM_NAMES = ("baseline", "relevant", "neutral", "distractor")
-# easy/hard anchor(交互效应 Δ_interaction = gap(hard) − gap(easy))
-_EASY_ALPHA = 3.5
-_HARD_ALPHA = 4.26
 
 
 # ── DPLL + 生成 + 验证(纯函数)──────────────────────────────────────────────────
@@ -367,6 +364,7 @@ class CapabilityCase:
     call_failed: int = 0       # backend error / 空 content(excluded,不计 solve 分母)
     input_tokens: int = 0
     output_tokens: int = 0
+    reasoning_tokens: int = 0
     cost_usd: float = 0.0
     claimed_notes: list = field(default_factory=list)   # manip-check 标签
     error: str = ""
@@ -380,6 +378,7 @@ class CapabilityCase:
                 "parse_ok": self.parse_ok, "valid_output": self.valid_output,
                 "solved": self.solved, "call_failed": self.call_failed,
                 "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
+                "reasoning_tokens": self.reasoning_tokens,
                 "claimed_notes": self.claimed_notes,
             },
             retrieved_case_ids=[],
@@ -391,10 +390,15 @@ class CapabilityCase:
         )
 
 
-def _token_counts(usage: dict) -> tuple[int, int]:
+def _token_counts(usage: dict) -> tuple[int, int, int]:
+    """→ (prompt_tokens, completion_tokens, reasoning_tokens)。reasoning 取自 completion_tokens_details
+    (GPT④:推理预算是搜索成本副信号——accuracy 不变但 reasoning 翻倍 / 被 reasoning 吃光 = 另一种干扰)。"""
     if not isinstance(usage, dict):
-        return 0, 0
-    return int(usage.get("prompt_tokens") or 0), int(usage.get("completion_tokens") or 0)
+        return 0, 0, 0
+    prompt = int(usage.get("prompt_tokens") or 0)
+    completion = int(usage.get("completion_tokens") or 0)
+    reasoning = int(((usage.get("completion_tokens_details") or {}).get("reasoning_tokens")) or 0)
+    return prompt, completion, reasoning
 
 
 async def _solve_one(
@@ -418,7 +422,7 @@ async def _solve_one(
         rec.call_failed = 1
         rec.error = f"{type(e).__name__}: {e}"
         return rec
-    rec.input_tokens, rec.output_tokens = _token_counts(getattr(resp, "usage", {}) or {})
+    rec.input_tokens, rec.output_tokens, rec.reasoning_tokens = _token_counts(getattr(resp, "usage", {}) or {})
     rec.cost_usd = float(getattr(resp, "cost_usd", None) or 0.0)
     if getattr(resp, "error", None) or not getattr(resp, "content", ""):
         rec.call_failed = 1                      # excluded(不计 solve 分母)
@@ -458,7 +462,7 @@ async def run_capability_eval(
     seeds: dict, run_id: str,
     distractor_label: str | None = None,
     max_cost_usd: float = 5.0, effort=None, manipulation_check: bool = False,
-    max_tokens: int = 1024, confidence: float = 0.95, max_attempts_gen: int = 200,
+    max_tokens: int = 2048, confidence: float = 0.95, max_attempts_gen: int = 200,
 ) -> tuple[list[CapabilityCase], EvalLedgerEntry]:
     """主编排:生成 instances(matched-pair:同批跨 arm)→ 每 (solver,α,arm) 原子块求解 → 聚合。
 
@@ -535,6 +539,7 @@ def _cell_metrics(cell_cases: list[CapabilityCase]) -> dict:
     solved = sum(c.solved for c in cell_cases)
     failed = sum(c.call_failed for c in cell_cases)
     out_tok = [c.output_tokens for c in cell_cases if c.valid_output]
+    rea_tok = [c.reasoning_tokens for c in cell_cases if c.valid_output]
     return {
         "n": n,
         "parse_rate": _rate(parse_ok, n),
@@ -543,6 +548,7 @@ def _cell_metrics(cell_cases: list[CapabilityCase]) -> dict:
         "overall_solve_rate": _rate(solved, n),
         "call_fail_rate": _rate(failed, n),
         "output_tokens_given_valid": round(sum(out_tok) / len(out_tok), 1) if out_tok else None,
+        "reasoning_tokens_given_valid": round(sum(rea_tok) / len(rea_tok), 1) if rea_tok else None,
         "solved_total": solved, "valid_total": valid, "failed_total": failed,
     }
 
@@ -581,7 +587,7 @@ def aggregate_capability(
                                   confidence=confidence, run_id=run_id, metric_key=label)
 
     # 交互:Δ_interaction = gap(hard α) − gap(easy α)(distractor-vs-neutral)
-    interaction = _interaction(cases, solver_entries, var_by_role,
+    interaction = _interaction(cases, solver_entries, var_by_role, alphas,
                                confidence=confidence, run_id=run_id)
 
     # claimed_note_usage(manip-check 时)
@@ -655,17 +661,21 @@ def _paired_gap(cases, solver_entries, alphas, arm_a, arm_b, *, confidence, run_
     return per_alpha
 
 
-def _interaction(cases, solver_entries, var_by_role, *, confidence, run_id):
+def _interaction(cases, solver_entries, var_by_role, alphas, *, confidence, run_id):
     """Δ_interaction = gap_distractor-vs-neutral(hard α) − gap(easy α)。
 
-    不同 α = 不同 instance 池 → 无法跨 α 配对;给 per-α gap CI + 点 Δ,CI 注明「近似」(诚实限制)。
+    easy/hard 取**本次 run 的 α 极值**(min/max),非硬编码理论相变(后者对校准后的网格不对)。
+    不同 α = 不同 instance 池 → 无法跨 α 配对;给 per-α gap + 点 Δ,CI 注明「近似」(诚实限制)。
     """
     if "distractor" not in var_by_role or "neutral" not in var_by_role:
         return {"note": "缺 distractor/neutral 臂"}
+    if not alphas:
+        return {"note": "无 α"}
+    easy_a, hard_a = min(alphas), max(alphas)
     arm_a, arm_b = var_by_role["distractor"], var_by_role["neutral"]
     points: dict[str, float | None] = {}
     for se in solver_entries:
-        for tag, alpha in (("easy", _EASY_ALPHA), ("hard", _HARD_ALPHA)):
+        for tag, alpha in (("easy", easy_a), ("hard", hard_a)):
             rows = _paired_rows(cases, se["model"], alpha, arm_a, arm_b)
             ra, rb = _rate_from_rows(rows, arm_a), _rate_from_rows(rows, arm_b)
             points[f"{se['model']}|{tag}"] = (ra - rb) if (ra is not None and rb is not None) else None
@@ -675,6 +685,6 @@ def _interaction(cases, solver_entries, var_by_role, *, confidence, run_id):
         d[se["model"]] = {"gap_easy": e, "gap_hard": h,
                           "delta_interaction": (h - e) if (e is not None and h is not None) else None}
     d["note"] = "不同 α 不同 instance 池 → Δ_interaction CI 未单独 bootstrap(近似;以 per-α gap CI 为准)"
-    d["easy_alpha"] = _EASY_ALPHA
-    d["hard_alpha"] = _HARD_ALPHA
+    d["easy_alpha"] = easy_a
+    d["hard_alpha"] = hard_a
     return d
