@@ -134,6 +134,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_out.add_argument("--output", dest="output_format", default="json", choices=["json", "markdown"])
     p_out.add_argument("--output-file", default=None)
 
+    p_cap = sub.add_parser(
+        "capability",
+        help="NP 能力基准:程序化 3-SAT + 客观验证,测注入 context(instruction interference)对 hard-solve solve-rate 的影响",
+    )
+    p_cap.add_argument("--solvers", nargs="*", default=None,
+                       help="solver 模型列表(默认 normalizer_model;建议传便宜模型如 deepseek-v4-flash 控成本)")
+    p_cap.add_argument("--vars", type=int, default=20, help="3-SAT 变量数(>=3)")
+    p_cap.add_argument("--alpha", default="3.5,4.0,4.2,4.26,4.4",
+                       help="逗号分隔 clause/variable 比(均匀随机 3-SAT 相变 α≈4.26 最难)")
+    p_cap.add_argument("--n", type=int, default=20, help="每 α 的 instance 数(smoke=3/pilot≈20/formal≥50)")
+    p_cap.add_argument("--seed", type=int, default=0,
+                       help="instance base seed(pilot seed 0 / formal seed 100+ 用 disjoint 防 selection bias)")
+    p_cap.add_argument("--arms", default="baseline,relevant,neutral,distractor", help="逗号分隔臂子集")
+    p_cap.add_argument("--distractor-label", default=None, help="用哪个 distractor 候选(默认首个;pilot 筛后填)")
+    p_cap.add_argument("--seeds", default=None, help="memory_seeds.yaml 路径(默认内置 capability_fixtures)")
+    p_cap.add_argument("--max-cost-usd", type=float, default=5.0)
+    p_cap.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])
+    p_cap.add_argument("--manipulation-check", action="store_true",
+                       help="pilot 用:事后问用了哪些 notes(claimed_note_usage,self-report,mention ≠ 因果 use)")
+    p_cap.add_argument("--export", default=None, help="导出本次 run 为 JSONL 路径")
+    p_cap.add_argument("--output", dest="output_format", default="json", choices=["json", "markdown"])
+    p_cap.add_argument("--output-file", default=None)
+
     p_ins = sub.add_parser(
         "inspect",
         help="只读调试窗口（v5.x）：activation/memory/run/calibration 可观测面，不调模型不写",
@@ -302,6 +325,47 @@ def _outcome_markdown(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _capability_markdown(result: dict) -> str:
+    """capability 基准汇总的简易 markdown 渲染（json 是主输出）。"""
+    s = result.get("summary", {})
+    lines = [
+        f"# Capability eval {result.get('run_id', '')}", "",
+        f"声明范围: {result.get('claim_scope', '')}",
+        f"solvers={result.get('solvers')} arms={result.get('variants')} n/α={result.get('n_instances_per_alpha')}",
+        f"n_vars={s.get('n_vars')} α={s.get('alphas')} base_seed={s.get('base_seed')}", "",
+        "## per-cell(solver|α|arm):solve_rate_given_valid / valid_output / output_tok",
+    ]
+    for cell, m in (s.get("per_cell") or {}).items():
+        lines.append(
+            f"- {cell}: solve_given_valid={m.get('solve_rate_given_valid')} "
+            f"valid_out={m.get('valid_output_rate')} overall={m.get('overall_solve_rate')} "
+            f"out_tok={m.get('output_tokens_given_valid')} call_fail={m.get('call_fail_rate')} n={m.get('n')}"
+        )
+    gaps = s.get("gaps") or {}
+    if gaps:
+        lines += ["", "## gaps(risk_difference per α;distractor_vs_neutral 为主)"]
+        for glabel, peralpha in gaps.items():
+            lines.append(f"- **{glabel}**:")
+            for ak, gm in peralpha.items():
+                rd = gm.get("risk_difference") or {}
+                orr = (gm.get("odds_ratio") or {}).get("point")
+                lines.append(f"  - {ak}: Δ={rd.get('point')} CI[{rd.get('low')}, {rd.get('high')}] OR={orr}")
+    inter = s.get("interaction") or {}
+    solver_inter = {k: v for k, v in inter.items() if isinstance(v, dict)}
+    if solver_inter:
+        lines += ["", f"## 交互 Δ_interaction(easy={inter.get('easy_alpha')}→hard={inter.get('hard_alpha')})"]
+        for k, v in solver_inter.items():
+            lines.append(f"- {k}: gap_easy={v.get('gap_easy')} gap_hard={v.get('gap_hard')} Δ={v.get('delta_interaction')}")
+        lines.append(f"_{inter.get('note')}_")
+    claimed = s.get("claimed_note_usage")
+    if claimed:
+        lines += ["", "## claimed_note_usage(manip-check,self-report)", *[f"- {k}: {v}" for k, v in claimed.items()]]
+    budget = s.get("budget") or {}
+    if budget.get("incomplete"):
+        lines += ["", f"⚠️ 预算超限 incomplete:dropped {len(budget.get('dropped_cells') or [])} cells"]
+    return "\n".join(lines)
+
+
 def run_inspect(args) -> None:
     """inspect 子命令：只读调试窗口，json 输出（结构化 debug 数据，无需 markdown）。"""
     from brainregion.inspector import inspect as inspect_facade
@@ -408,6 +472,12 @@ def main() -> None:
         result = asyncio.run(eval_cli.run_outcome(args))
         if args.output_format != "json":
             result["rendered"] = _outcome_markdown(result)
+        _emit(result, args)
+        return
+    if args.command == "capability":
+        result = asyncio.run(eval_cli.run_capability(args))
+        if args.output_format != "json":
+            result["rendered"] = _capability_markdown(result)
         _emit(result, args)
         return
     if args.command == "inspect":

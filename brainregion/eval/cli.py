@@ -27,6 +27,7 @@ from .routing import (
     routing_sanity,
     run_routing_eval,
 )
+from .capability import _ARM_NAMES, build_capability_variants, load_memory_seeds, run_capability_eval
 from .outcome import DEFAULT_OUTCOME_VARIANTS, OutcomeVariant, run_outcome_eval
 from .runner import build_engines, make_run_id, run_eval
 from .schema import CalibrationRecord, EvalTask, VariantSpec
@@ -35,6 +36,7 @@ logger = logging.getLogger("brainregion.eval.cli")
 
 _DEFAULT_RUBRIC = Path(__file__).parent / "rubrics" / "review_v1.md"
 _DEFAULT_OUTCOME_RUBRIC = Path(__file__).parent / "rubrics" / "advice_v1.md"
+_DEFAULT_CAPABILITY_SEEDS = Path(__file__).parent / "capability_fixtures" / "memory_seeds.yaml"
 
 
 def load_tasks(fixtures_dir: str) -> list[EvalTask]:
@@ -352,5 +354,68 @@ async def run_outcome(args) -> dict:
         },
         "summary": entry.summary,
         "gate": gate,
+        "exported_jsonl": exported,
+    }
+
+
+async def run_capability(args) -> dict:
+    """`brain-region capability`:NP 能力基准——程序化 3-SAT + 客观验证,测**注入 context(instruction
+    interference)对 hard-solve solve-rate 的影响**。确定性验证器替代主观 judge;matched-pair + 配对 bootstrap。
+
+    分层指标(solve_rate_given_valid 隔离 format-fighting)+ 4 臂(baseline/relevant/neutral/distractor,
+    主比较 distractor-vs-neutral 长度控)+ effect size + 交互。声明范围 = instruction interference 非 diffuse
+    context pollution。
+    """
+    dd = _defaults_mod.apply()
+
+    # 入口硬校验(fail-fast,评审):n_vars≥3 / n>0 / α>0 / arms⊆白名单 / max-cost>0
+    n_vars = int(args.vars)
+    n_instances = int(args.n)
+    if n_vars < 3:
+        raise SystemExit(f"n_vars>=3(3-SAT 每子句 3 不同变量),got {n_vars}")
+    if n_instances < 1:
+        raise SystemExit(f"n>=1,got {n_instances}")
+    try:
+        alphas = [float(x) for x in str(args.alpha or "").split(",") if str(x).strip()]
+    except ValueError:
+        raise SystemExit(f"--alpha 解析失败(逗号分隔正浮点): {args.alpha}")
+    if not alphas or any(a <= 0 for a in alphas):
+        raise SystemExit(f"--alpha 需正浮点列表(相变 α≈4.26),got {args.alpha}")
+    arms = [a.strip() for a in str(args.arms or "").split(",") if a.strip()]
+    bad = [a for a in arms if a not in _ARM_NAMES]
+    if bad:
+        raise SystemExit(f"--arms 非法 {bad}(合法: {list(_ARM_NAMES)})")
+    max_cost = float(args.max_cost_usd)
+    if max_cost <= 0:
+        raise SystemExit(f"--max-cost-usd>0,got {max_cost}")
+
+    variants = build_capability_variants(arms)
+    seeds_path = Path(args.seeds) if getattr(args, "seeds", None) else _DEFAULT_CAPABILITY_SEEDS
+    seeds = load_memory_seeds(str(seeds_path))   # schema 校验 fail-fast
+
+    endpoints_cfg = dd.get("endpoints") or {}
+    endpoint_ids = set((_resolve_endpoints(endpoints_cfg) or {}).keys())
+    solver_specs = args.solvers or [dd.get("normalizer_model", "claude-opus-4-8")]
+    solver_entries = [_normalize_one(s, endpoint_ids, endpoints_cfg) for s in solver_specs]
+    backend = LiteLLMBackend(timeout=float(dd.get("timeout", 90)),
+                             endpoint_registry=_resolve_endpoints(endpoints_cfg))
+
+    run_id = make_run_id()
+    _cases, entry = await run_capability_eval(
+        n_vars=n_vars, alphas=alphas, n_instances=n_instances, base_seed=int(args.seed),
+        variants=variants, solver_entries=solver_entries, backend=backend, seeds=seeds,
+        run_id=run_id, distractor_label=getattr(args, "distractor_label", None),
+        max_cost_usd=max_cost, effort=args.effort,
+        manipulation_check=bool(getattr(args, "manipulation_check", False)),
+    )
+
+    exported = store.export_jsonl(run_id, args.export) if getattr(args, "export", None) else None
+    return {
+        "run_id": run_id,
+        "n_instances_per_alpha": n_instances,
+        "variants": entry.variants,
+        "solvers": entry.judge_models,
+        "claim_scope": entry.summary.get("claim_scope"),
+        "summary": entry.summary,
         "exported_jsonl": exported,
     }
