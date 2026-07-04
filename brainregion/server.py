@@ -62,7 +62,7 @@ from .core import ReviewDocument  # noqa: E402
 from .knowledge import YamlKnowledgeProvider  # noqa: E402
 from .core.context import ContextQuery as _ContextQuery  # noqa: E402
 from .core.context import default_provider_registry as _default_provider_registry  # noqa: E402
-from .memory import MemoryProvider, MemoryScope, governance, store as memory_store  # noqa: E402
+from .memory import MemoryProvider, governance, store as memory_store  # noqa: E402
 from .git import GitProvider  # noqa: E402
 from .privacy import build_policy  # noqa: E402
 from .providers import LiteLLMBackend  # noqa: E402
@@ -1357,24 +1357,29 @@ async def consult_problem(
         cost_limit = dd.get("max_cost_usd")
     input_limit = int(max_input_chars if max_input_chars is not None else dd.get("consult_max_input_chars", 24000))
 
-    # ContextProvider 召回（memory 脑区扶正，Phase2A）：memory_inject 门控，默认关 = 不注入。
+    # ContextProvider 召回(Phase 7 provider-loop):memory 自 scope(query.regions)/ git scopeless /
+    # 未来 provider 注册即注入。memory_inject 门控(默认关 = 不注入)。loop **纯 merge**,无
+    # if git/if memory 逻辑(GPT④ 不变量:server 不知 provider 内部,各 provider 自返 meta)。
     context_blocks: list = []
-    memory_meta: dict = {}
+    providers_meta: dict = {}
     if dd.get("memory_inject"):
         anchor = "\n".join(x for x in (problem, context) if x)
-        # Phase A selective context：把 memory 召回 scope 到 wake 激活的 region（∪ 全局），
-        # 防跨项目 bleed（Unity 任务注入 Blender 记忆 = IRRELEVANT 失败模式）。
-        # 故意用 _route_regions（静态 trigger 路由）而非 full wake_gate（sentinel/shadow/escalate）
-        # —— 这里只需「该任务属于哪些 region」，不需要防御性兜底唤醒。若未来 routing 逻辑迁移，
-        # memory scope 与 consultant routing 应保持语义一致。
+        # Phase A selective context:memory 召回 scope 到 wake 激活的 region(∪ 全局),防跨项目 bleed。
+        # 故意用 _route_regions(静态 trigger 路由)而非 full wake_gate —— 只需「该任务属于哪些 region」。
+        # memory 自取 scope(memory/provider.py 优先级 _scope > query.regions);git scopeless 忽略 regions。
         routing = _route_regions(goal=goal, problem=problem, context=context, files=files or {})
         woken = {c["id"] for c in routing.get("selected", [])}
-        scope = MemoryScope(frozenset(woken)) if dd.get("memory_scope", "woken") == "woken" else None
-        rr = MemoryProvider.from_store(scope=scope).retrieve(
-            _ContextQuery(text=anchor, top_k=int(dd.get("memory_recall_top_k", 5)))
-        )
-        context_blocks = rr.blocks
-        memory_meta = {"provider": rr.provider, "scope": sorted(woken), **rr.meta}
+        regions = frozenset(woken) if dd.get("memory_scope", "woken") == "woken" else None
+        query = _ContextQuery(text=anchor, regions=regions, top_k=int(dd.get("context_top_k", 5)))
+        _ensure_default_providers()
+        for name in _default_provider_registry.list_names():  # sorted()(context.py)→ 确定性顺序 git,memory
+            try:  # review① per-provider 异常隔离:单 provider 崩不拖垮其余(memory 不被 git 拖垮)
+                rr = _default_provider_registry.get(name).retrieve(query)
+            except Exception as e:  # memory/git 内部已降级返空;此为意外兜底
+                providers_meta[name] = {"provider": name, "available": False, "error": str(e)[:200]}
+                continue
+            context_blocks += rr.blocks
+            providers_meta[name] = {"provider": rr.provider, **rr.meta}
     engine = _build_consult_engine(dd)
     report = await engine.consult(
         ConsultRequest(
@@ -1411,7 +1416,8 @@ async def consult_problem(
         "route_warnings": route_info["warnings"],
         "ambiguous_models": route_info["ambiguous_models"],
     }
-    result["memory"] = memory_meta
+    result["context_providers"] = providers_meta
+    result["memory"] = providers_meta.get("memory", {})  # review② 兼容别名(旧消费者不破;transitional)
     # 只记录 consult 元数据与 advice id，不记录 prompt/问题正文/advice 全文。
     reviews_db.record_consultation(result)
     return result
@@ -1460,13 +1466,25 @@ def list_regions() -> dict:
 _skill_registry_singleton: _SkillRegistry | None = None
 
 
+def _ensure_default_providers() -> None:
+    """注册默认 ContextProvider(memory/git)到 default_provider_registry。
+
+    idempotent + **分别 has() 判断**(review:不只判 git,防部分初始化时 memory 重复注册)。
+    _skill_registry(校验 skill ref)与 consult(provider-loop)都调 —— 抽出解耦:provider 注册
+    不再依赖 skill bootstrap。register 是 warn+overwrite upsert,分别 has() 避免无谓 warn。
+    """
+    if not _default_provider_registry.has("memory"):
+        _default_provider_registry.register("memory", MemoryProvider.from_store())  # drift:与 server 内联 wiring 同源
+    if not _default_provider_registry.has("git"):
+        _default_provider_registry.register("git", GitProvider.from_repo())  # Phase 6:零成本注册(git 惰性跑)
+
+
 def _skill_registry() -> _SkillRegistry:
     """Build-once SkillRegistry(模块级 lazy;bootstrap 顺序:provider 先于 skill YAML 校验)。"""
     global _skill_registry_singleton
     if _skill_registry_singleton is not None:
         return _skill_registry_singleton
-    _default_provider_registry.register("memory", MemoryProvider.from_store())   # drift:与 server 内联 wiring 同源
-    _default_provider_registry.register("git", GitProvider.from_repo())  # Phase 6:零成本注册(git 惰性跑)
+    _ensure_default_providers()
     region_ids = {r.id for r in _load_regions(REGIONS_DIR)}
     manifests = _load_skills(
         _SKILLS_DIR,

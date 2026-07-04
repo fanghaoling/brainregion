@@ -716,7 +716,7 @@ async def run_outcome_eval(
                 seed_list, arm = getattr(task, "seed_memory_stale", None), "STALE"
             if seed_list:
                 evs = [_seed_to_event(m) for m in seed_list]
-                top_k = int(dd.get("memory_recall_top_k", 5))
+                top_k = int(dd.get("context_top_k", 5))
                 # scoped-eval:build_scope(woken)→MemoryScope;None=unscoped(现状)。GPT r2①
                 scope = v.build_scope(shared_wake["woken"]) if v.build_scope else None
                 rr = MemoryProvider.from_records(evs, scope=scope).retrieve(

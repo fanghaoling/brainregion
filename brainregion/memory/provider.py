@@ -57,10 +57,13 @@ class MemoryProvider:
 
     def retrieve(self, query: ContextQuery) -> RetrieveResult:
         top_k = max(0, int(query.top_k or 5))
-        # scope：provider 构造的优先；否则 query.region（ad-hoc 单 region，旧路径）。
+        # scope 优先级:构造 _scope > query.regions(多 region,consult woken) > query.region(单 region,旧) > None。
+        # 构造 scope 永远赢 → eval 的 from_records(scope=) 不受 query.regions 影响(review ⑥)。
         scope = self._scope
-        if scope is None and query.region:
-            scope = _region_to_scope(query.region)
+        if scope is None and getattr(query, "regions", None) is not None:
+            scope = MemoryScope(query.regions)           # Phase 7:consult 传 woken 集,memory 自 scope
+        elif scope is None and query.region:
+            scope = _region_to_scope(query.region)       # 旧:单 region ad-hoc
 
         if self._records is not None:
             pool_all = self._records

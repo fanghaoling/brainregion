@@ -38,7 +38,7 @@ class ConsultEngine:
     ) -> ConsultReport:
         consultation_id = consultation_id or f"consult-{uuid.uuid4().hex[:12]}"
         sanitized, guard_meta = prepare_request(request, max_input_chars=max_input_chars)
-        # ContextProvider 召回块（memory 脑区扶正，config memory_inject 门控）：
+        # ContextProvider 召回块（memory/git/…,config memory_inject 门控 consult provider-loop 注入）：
         # 渲染一次（跨 panel×consultant 共用），cap 到 max_input_chars//4 防 budget 挤压。
         context_block_str = ""
         if context_blocks:

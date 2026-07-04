@@ -36,10 +36,16 @@ class ContextBlock:
 
 @dataclass
 class ContextQuery:
-    """召回请求。text 是锚文本（problem+context 等）；region 可选用于 scope。"""
+    """召回请求。text 是锚文本（problem+context 等）；region/regions 可选用于 scope。
+
+    ``regions``(多 region frozenset,Phase 7)由 consult 传入 woken 集,让 provider 自取 scope;
+    ``region``(单 region)是旧 ad-hoc 路径。provider 按自己语义取用(memory 用 regions/region 做
+    MemoryScope;git scopeless 忽略)。
+    """
 
     text: str
     region: str | None = None
+    regions: frozenset[str] | None = None  # Phase 7:多 region scope(consult woken 集);默认 None 向后兼容
     top_k: int = 5
 
 

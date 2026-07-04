@@ -54,7 +54,7 @@ _BUILTINS = {
     "consult_max_input_chars": 24000,
     "consult_max_cost_usd": None,
     "memory_inject": False,
-    "memory_recall_top_k": 5,
+    "context_top_k": 5,  # Phase 7:每 ContextProvider 召回 top_k(memory/git/…共用;曾名 memory_recall_top_k)
     "memory_scope": "woken",  # Phase A：memory 召回按 wake 的 region scope（"none"=unscoped 消融）
     "planner_panel": [],
     "planner_max_input_chars": 24000,
@@ -158,7 +158,7 @@ def _coerce(key: str, val: str):
         "min_compressed_chars",
         "consult_max_input_chars",
         "planner_max_input_chars",
-        "memory_recall_top_k",
+        "context_top_k",
     ):
         try:
             return int(val)

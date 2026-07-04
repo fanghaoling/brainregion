@@ -33,15 +33,15 @@ def _panel(model: str) -> dict:
 def test_defaults_memory_inject_off_by_default():
     dd = defaults.apply()
     assert dd["memory_inject"] is False  # 默认关 = 不注入（字节不变）
-    assert dd["memory_recall_top_k"] == 5
+    assert dd["context_top_k"] == 5
 
 
 def test_defaults_memory_inject_env_coerce(monkeypatch):
     monkeypatch.setenv("BRAIN_REGION_DEFAULT_MEMORY_INJECT", "true")
-    monkeypatch.setenv("BRAIN_REGION_DEFAULT_MEMORY_RECALL_TOP_K", "8")
+    monkeypatch.setenv("BRAIN_REGION_DEFAULT_CONTEXT_TOP_K", "8")
     dd = defaults.apply()
     assert dd["memory_inject"] is True
-    assert dd["memory_recall_top_k"] == 8
+    assert dd["context_top_k"] == 8
 
 
 def test_render_with_and_without_context_block():
