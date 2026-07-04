@@ -27,7 +27,14 @@ from .routing import (
     routing_sanity,
     run_routing_eval,
 )
-from .capability import _ARM_NAMES, build_capability_variants, load_memory_seeds, run_capability_eval
+from .capability import (
+    _ARM_NAMES,
+    _SB_ARMS,
+    build_capability_variants,
+    load_memory_seeds,
+    run_capability_eval,
+    run_capability_eval_skill_bloat,
+)
 from .outcome import DEFAULT_OUTCOME_VARIANTS, OutcomeVariant, run_outcome_eval
 from .runner import build_engines, make_run_id, run_eval
 from .schema import CalibrationRecord, EvalTask, VariantSpec
@@ -367,6 +374,8 @@ async def run_capability(args) -> dict:
     context pollution。
     """
     dd = _defaults_mod.apply()
+    if getattr(args, "skill_bloat", False):        # Phase 3D:skill-inventory bloat × region-scoping
+        return await _run_capability_skill_bloat(args, dd)
 
     # 入口硬校验(fail-fast,评审):n_vars≥3 / n>0 / α>0 / arms⊆白名单 / max-cost>0
     n_vars = int(args.vars)
@@ -413,6 +422,65 @@ async def run_capability(args) -> dict:
     return {
         "run_id": run_id,
         "n_instances_per_alpha": n_instances,
+        "variants": entry.variants,
+        "solvers": entry.judge_models,
+        "claim_scope": entry.summary.get("claim_scope"),
+        "summary": entry.summary,
+        "exported_jsonl": exported,
+    }
+
+
+async def _run_capability_skill_bloat(args, dd) -> dict:
+    """Phase 3D `--skill-bloat`:procedural Decode skill 库 bloat × region-scoping A/B。
+    4 臂(oracle/plausible/garbage/random_subset)matched-pair + 配对 bootstrap + selection 诊断。
+    claim 降调 consistent-with;oracle=upper bound 非 architecture gain。
+    """
+    n_instances = int(args.n)
+    if n_instances < 1:
+        raise SystemExit(f"n>=1,got {n_instances}")
+    try:
+        ks = [int(x) for x in str(args.sb_inventory or "").split(",") if str(x).strip()]
+    except ValueError:
+        raise SystemExit(f"--sb-inventory 解析失败(逗号分隔正整数): {args.sb_inventory}")
+    if not ks or any(k < 1 for k in ks):
+        raise SystemExit(f"--sb-inventory 需正整数列表,got {args.sb_inventory}")
+    arms = [a.strip() for a in str(args.sb_arms or "").split(",") if a.strip()]
+    bad = [a for a in arms if a not in _SB_ARMS]
+    if bad:
+        raise SystemExit(f"--sb-arms 非法 {bad}(合法: {list(_SB_ARMS)})")
+    table_size = int(args.sb_table_size)
+    n_examples = int(args.sb_examples)
+    n_skills = int(getattr(args, "sb_skills", 128))
+    max_tokens = int(getattr(args, "sb_max_tokens", 4096))
+    if table_size <= n_examples * 3:
+        raise SystemExit(f"--sb-table-size({table_size}) 需 > 3×--sb-examples({n_examples});"
+                         f"否则示例可能覆盖全符号 → skill 非必要 → K 轴失效")
+    kmax = max(ks)
+    if n_skills < kmax:
+        raise SystemExit(f"--sb-skills({n_skills}) 需 ≥ max(K)({kmax});random_subset/plausible 需 pool ≥ K")
+    max_cost = float(args.max_cost_usd)
+    if max_cost <= 0:
+        raise SystemExit(f"--max-cost-usd>0,got {max_cost}")
+
+    endpoints_cfg = dd.get("endpoints") or {}
+    endpoint_ids = set((_resolve_endpoints(endpoints_cfg) or {}).keys())
+    solver_specs = args.solvers or [dd.get("normalizer_model", "claude-opus-4-8")]
+    solver_entries = [_normalize_one(s, endpoint_ids, endpoints_cfg) for s in solver_specs]
+    backend = LiteLLMBackend(timeout=float(dd.get("timeout", 90)),
+                             endpoint_registry=_resolve_endpoints(endpoints_cfg))
+
+    run_id = make_run_id()
+    _cases, entry = await run_capability_eval_skill_bloat(
+        table_size=table_size, n_examples=n_examples, n_instances=n_instances,
+        base_seed=int(args.seed), ks=ks, arms=arms, solver_entries=solver_entries,
+        backend=backend, run_id=run_id, n_skills=n_skills, max_tokens=max_tokens,
+        max_cost_usd=max_cost, effort=args.effort,
+    )
+    exported = store.export_jsonl(run_id, args.export) if getattr(args, "export", None) else None
+    return {
+        "run_id": run_id,
+        "mode": "skill_bloat",
+        "n_instances": n_instances,
         "variants": entry.variants,
         "solvers": entry.judge_models,
         "claim_scope": entry.summary.get("claim_scope"),

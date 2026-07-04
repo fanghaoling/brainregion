@@ -156,6 +156,17 @@ def build_parser() -> argparse.ArgumentParser:
     p_cap.add_argument("--export", default=None, help="导出本次 run 为 JSONL 路径")
     p_cap.add_argument("--output", dest="output_format", default="json", choices=["json", "markdown"])
     p_cap.add_argument("--output-file", default=None)
+    # Phase 3D:skill-inventory bloat × region-scoping(架构提升 A/B)
+    p_cap.add_argument("--skill-bloat", action="store_true",
+                       help="Phase 3D:procedural Decode skill 库 bloat × region-scoping A/B(主脑=deepseek)")
+    p_cap.add_argument("--sb-inventory", default="2,8,32", help="逗号分隔库存大小 K(Stage 1 早拐点;formal 可扩 64)")
+    p_cap.add_argument("--sb-arms", default="oracle,plausible,garbage,random_subset",
+                       help="逗号分隔臂子集(oracle=upper bound / plausible=bloat / garbage=token 对照 / random_subset=coverage)")
+    p_cap.add_argument("--sb-table-size", type=int, default=12,
+                       help="alphabet 符号数(校准值 12:oracle≈1 + 退化可见;>3×--sb-examples 保 skill 必要)")
+    p_cap.add_argument("--sb-examples", type=int, default=2, help="一致性示例数(校准值 2;揭示部分 alphabet 供选择)")
+    p_cap.add_argument("--sb-skills", type=int, default=128, help="pool 大小(≥ max K;random_subset 命中概率=K/pool)")
+    p_cap.add_argument("--sb-max-tokens", type=int, default=4096, help="输出 max_tokens(全 cell 固定)")
 
     p_ins = sub.add_parser(
         "inspect",
@@ -366,6 +377,65 @@ def _capability_markdown(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _capability_skill_bloat_markdown(result: dict) -> str:
+    """Phase 3D skill-bloat 汇总:K×臂 solve 曲线 + degradation/plausibility/coverage contrasts + selection 诊断。"""
+    s = result.get("summary", {})
+    ks = s.get("ks") or []
+    lines = [
+        f"# Capability eval (skill-bloat) {result.get('run_id', '')}", "",
+        f"声明范围: {result.get('claim_scope', '')}",
+        f"solvers={result.get('solvers')} ks={ks} arms={s.get('arms')} n={result.get('n_instances')} "
+        f"table_size={s.get('table_size')} n_examples={s.get('n_examples')} pool={s.get('n_skills')} "
+        f"base_seed={s.get('base_seed')} max_tokens={s.get('max_tokens')}", "",
+    ]
+    # K×arm solve curve
+    for slv, curve in (s.get("k_curve") or {}).items():
+        lines.append(f"## K×arm solve_rate(solver={slv})")
+        header = ["arm"] + [f"K={k}" for k in ks]
+        lines.append("| " + " | ".join(header) + " |")
+        lines.append("|" + "|".join(["---"] * len(header)) + "|")
+        for arm in ("plausible", "garbage", "random_subset"):
+            row = [arm] + [str((curve.get(arm) or {}).get(str(k))) for k in ks]
+            lines.append("| " + " | ".join(row) + " |")
+        lines.append(f"_oracle(upper bound) solve_rate = {curve.get('oracle')}_\n")
+
+    def _rd(ps: dict) -> str:
+        rd = ps.get("risk_difference") or {}
+        return f"Δ={rd.get('point')} CI[{rd.get('low')},{rd.get('high')}] n={ps.get('n')}"
+
+    contrasts = s.get("contrasts") or {}
+    lines.append("## contrasts(配对 bootstrap;consistent-with,oracle=upper bound 非 architecture gain)")
+    for k in ks:
+        for slv, ps in (contrasts.get(f"degradation_at_k{k}") or {}).items():
+            lines.append(f"- **degradation_k{k}**[{slv}] {_rd(ps)}  (>0=inventory 退化,主指标)")
+        for slv, ps in (contrasts.get(f"plausibility_effect_at_k{k}") or {}).items():
+            lines.append(f"- **plausibility_k{k}**[{slv}] {_rd(ps)}  (>0=竞争选择负载 §0;≈0=裸 token)")
+        for slv, ps in (contrasts.get(f"coverage_value_at_k{k}") or {}).items():
+            lines.append(f"- **coverage_k{k}**[{slv}] {_rd(ps)}  (>0=拥有正确 skill 价值)")
+        for slv, ps in (contrasts.get(f"reasoning_cost_at_k{k}") or {}).items():
+            md = ps.get("mean_diff") or {}
+            lines.append(f"- **reasoning_cost_k{k}**[{slv}] Δ={md.get('point')} CI[{md.get('low')},{md.get('high')}]  "
+                         f"(>0=plausible 比 oracle 花更多推理 = region-scoping 节省;推理模型 accuracy 持平时的负载信号)")
+    for slv, v in (contrasts.get("bloat_slope") or {}).items():
+        lines.append(f"- **bloat_slope**[{slv}] solve(Kmin)={v.get('solve_kmin')} "
+                     f"solve(Kmax)={v.get('solve_kmax')} slope={v.get('slope')}")
+    lines.append("")
+
+    lines.append("## selection 诊断(plausible 臂)")
+    for cell, m in (s.get("per_cell") or {}).items():
+        if "|plausible_k" in cell:
+            lines.append(f"- {cell}: wrong_selection={m.get('wrong_selection_rate')} "
+                         f"top_distractor={m.get('top_distractor')} entropy={m.get('selection_entropy')} "
+                         f"inv_tok={m.get('inventory_tokens_mean')} rea_tok={m.get('reasoning_tokens_mean')} "
+                         f"outcomes={m.get('outcome_breakdown')}")
+    budget = s.get("budget") or {}
+    if budget.get("incomplete"):
+        lines.append("", f"⚠️ 预算超限 incomplete:dropped {len(budget.get('dropped_cells') or [])} cells "
+                         f"(spent={budget.get('spent_usd')}/{budget.get('max_usd')})")
+    lines.append("", f"_{s.get('note')}_")
+    return "\n".join(lines)
+
+
 def run_inspect(args) -> None:
     """inspect 子命令：只读调试窗口，json 输出（结构化 debug 数据，无需 markdown）。"""
     from brainregion.inspector import inspect as inspect_facade
@@ -477,7 +547,9 @@ def main() -> None:
     if args.command == "capability":
         result = asyncio.run(eval_cli.run_capability(args))
         if args.output_format != "json":
-            result["rendered"] = _capability_markdown(result)
+            md = (_capability_skill_bloat_markdown if result.get("mode") == "skill_bloat"
+                  else _capability_markdown)
+            result["rendered"] = md(result)
         _emit(result, args)
         return
     if args.command == "inspect":
