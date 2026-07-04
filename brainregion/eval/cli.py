@@ -31,6 +31,7 @@ from .capability import (
     _ARM_NAMES,
     _SB_ARMS,
     build_capability_variants,
+    get_family,
     load_memory_seeds,
     run_capability_eval,
     run_capability_eval_skill_bloat,
@@ -448,6 +449,14 @@ async def _run_capability_skill_bloat(args, dd) -> dict:
     bad = [a for a in arms if a not in _SB_ARMS]
     if bad:
         raise SystemExit(f"--sb-arms 非法 {bad}(合法: {list(_SB_ARMS)})")
+    families = [f.strip() for f in str(getattr(args, "sb_families", "") or "").split(",") if f.strip()]
+    if not families:
+        families = ["decode", "filter"]
+    for f in families:
+        try:
+            get_family(f)                                  # 验证 family 已注册
+        except ValueError as e:
+            raise SystemExit(f"--sb-families 非法:{e}")
     table_size = int(args.sb_table_size)
     n_examples = int(args.sb_examples)
     n_skills = int(getattr(args, "sb_skills", 128))
@@ -455,6 +464,8 @@ async def _run_capability_skill_bloat(args, dd) -> dict:
     if table_size <= n_examples * 3:
         raise SystemExit(f"--sb-table-size({table_size}) 需 > 3×--sb-examples({n_examples});"
                          f"否则示例可能覆盖全符号 → skill 非必要 → K 轴失效")
+    if "filter" in families and table_size < 8:
+        raise SystemExit(f"--sb-table-size({table_size}) 需 ≥8(filter 家族 gold 空间=2^test_distinct)")
     kmax = max(ks)
     if n_skills < kmax:
         raise SystemExit(f"--sb-skills({n_skills}) 需 ≥ max(K)({kmax});random_subset/plausible 需 pool ≥ K")
@@ -471,7 +482,7 @@ async def _run_capability_skill_bloat(args, dd) -> dict:
 
     run_id = make_run_id()
     _cases, entry = await run_capability_eval_skill_bloat(
-        table_size=table_size, n_examples=n_examples, n_instances=n_instances,
+        families=families, table_size=table_size, n_examples=n_examples, n_instances=n_instances,
         base_seed=int(args.seed), ks=ks, arms=arms, solver_entries=solver_entries,
         backend=backend, run_id=run_id, n_skills=n_skills, max_tokens=max_tokens,
         max_cost_usd=max_cost, effort=args.effort,

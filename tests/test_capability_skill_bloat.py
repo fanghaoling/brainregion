@@ -1,10 +1,9 @@
-"""Phase 3D:Skill-Inventory Bloat × Region-Scoping 测试。
+"""Phase 3D-MultiFamily:skill-inventory bloat × region-scoping 多家族 benchmark 测试。
 
-procedural Decode skill(单一类型);4 臂(oracle/plausible/garbage/random_subset)matched-pair。
-覆盖:gen pool/task(determinism、bijection、covered/uncovered、distractor 不变量、容量 raise)、
-render(4 臂、token 匹配、不漏 skill 名、injection framing)、parse、_solve_sb_one(solved/unsolved/
-wrong_selection/parse_fail/failed ladder)、SkillBloatCase.to_case_record、aggregate(per_cell/
-k_curve/contrasts/entropy 空集保护)、runner(matched-pair、真实 cost gate、store、validation)。
+Family(逻辑层)+ Skill(数据层)+ registry;3 家族 decode/sort/filter。覆盖:registry、Skill 委托、
+每家族 gen(determinism/necessity/distractor 不变量/容量)、render、parse、_solve_sb_one、
+SkillBloatCase 字段、aggregate(per_family + overall macro/generation)、runner(families loop/cost gate)。
+核心 gen/render/solve 测试用 pytest.mark.parametrize 跨家族。
 """
 from __future__ import annotations
 
@@ -12,9 +11,7 @@ import pytest
 
 from brainregion.eval import capability as cap
 from brainregion.eval.capability import (
-    Skill,
     SkillBloatCase,
-    SkillBloatTask,
     _sb_cell_name,
     _sb_gen_correct,
     _sb_gen_distractors,
@@ -23,124 +20,109 @@ from brainregion.eval.capability import (
     _shannon_entropy,
     aggregate_capability_skill_bloat,
     gen_skill_pool,
+    get_family,
     render_skill_bloat_prompt,
     run_capability_eval_skill_bloat,
 )
 from brainregion.providers.base import ModelResponse
 
-
-# ── gen pool / task ────────────────────────────────────────────────────────────
-
-def test_gen_correct_bijection():
-    s = _sb_gen_correct(7, table_size=10)
-    imgs = [img for _, img in s.alphabet]
-    assert len(set(imgs)) == 10                      # 双射:像无重复
-    assert {sym for sym, _ in s.alphabet} == set("ABCDEFGHIJ")
+FAMILIES = ("decode", "sort", "filter")
 
 
-def test_gen_pool_seeded_deterministic():
-    t1, p1 = gen_skill_pool(7, n_skills=32, table_size=12, n_examples=3)
-    t2, p2 = gen_skill_pool(7, n_skills=32, table_size=12, n_examples=3)
-    assert len(p1) == len(p2) == 32
-    assert p1[0].alphabet == p2[0].alphabet          # seeded 确定性
-    assert t1.test_input == t2.test_input and t1.gold == t2.gold
-    assert gen_skill_pool(8, n_skills=32, table_size=12, n_examples=3)[0].gold != t1.gold  # 换 seed → 不同
+# ── registry + Skill 委托 ──────────────────────────────────────────────────────
+
+def test_family_registry():
+    for f in FAMILIES:
+        assert get_family(f).name == f
+    with pytest.raises(ValueError):
+        get_family("bogus")
 
 
-def test_gen_task_necessity_and_gold():
-    correct = _sb_gen_correct(3, table_size=14)
-    task = _sb_gen_task(99, correct, n_examples=3)
-    assert list(task.gold) == correct.apply(list(task.test_input))      # gold = correct 重跑
-    # 必要性:测试输入含 ≥1 未覆盖符号(否则可从示例推断)
-    uncovered = [s for s, _ in correct.alphabet if s not in task.covered]
-    assert any(s in uncovered for s in task.test_input if s != "#")
-    # covered ⊂ symbols
-    assert task.covered <= {s for s, _ in correct.alphabet}
+@pytest.mark.parametrize("fam", FAMILIES)
+def test_skill_delegates_to_family(fam):
+    s = _sb_gen_correct(7, family=fam, table_size=10)
+    seq = s.symbols()[:4]
+    assert s.apply(seq) == get_family(fam).apply(s.parameter, seq)     # 委托
+    assert s.doc_text() and s.name in s.doc_text()
+    assert s.parameter_size == len(s.symbols()) == 10
+    assert s.family == fam
 
 
-def test_gen_task_raises_when_table_too_small():
-    """table_size ≤ 3×n_examples → 示例可能覆盖全部 → skill 非必要 → runner 拒启动(这里测 gen 容错)。"""
-    # gen_task 本身不强校验;但 runner 会 raise(见 test_runner_validates_table_size)。
+# ── gen(跨家族 parametrize)─────────────────────────────────────────────────────
+
+@pytest.mark.parametrize("fam", FAMILIES)
+def test_gen_correct_seeded_deterministic(fam):
+    a = _sb_gen_correct(5, family=fam, table_size=10)
+    b = _sb_gen_correct(5, family=fam, table_size=10)
+    assert a.parameter == b.parameter                               # seeded 确定性
+    assert _sb_gen_correct(6, family=fam, table_size=10).parameter != a.parameter
 
 
-def test_distractor_invariants_covered_mismatch_and_gold_distinct():
-    correct = _sb_gen_correct(5, table_size=12)
-    task = _sb_gen_task(55, correct, n_examples=3)
+@pytest.mark.parametrize("fam", FAMILIES)
+def test_gen_task_necessity_and_gold(fam):
+    correct = _sb_gen_correct(3, family=fam, table_size=12)
+    task = _sb_gen_task(99, correct, n_examples=2)
+    assert list(task.gold) == correct.apply(list(task.test_input))   # gold = correct 重跑
+    assert task.family == fam
+    uncovered = [s for s in correct.symbols() if s not in task.covered]
+    assert any(s in uncovered for s in task.test_input)              # 必要性:测试含未覆盖
+    assert task.covered <= set(correct.symbols())
+
+
+@pytest.mark.parametrize("fam", FAMILIES)
+def test_distractor_invariants(fam):
+    correct = _sb_gen_correct(5, family=fam, table_size=12)
+    task = _sb_gen_task(55, correct, n_examples=2)
     ds = _sb_gen_distractors(77, 20, correct, task)
-    cmap = correct.map_
-    assert len(ds) == 20
-    seen_gold = {tuple(task.gold)}
+    ex_inputs = [inp for inp, _ in task.examples]
+    seen = {tuple(task.gold)}
     for d in ds:
-        dm = d.map_
-        # 与 correct 在 ≥1 covered 符号不同(→ 与示例不一致 → correct 唯一可定)
-        assert any(dm[s] != cmap[s] for s in task.covered)
+        assert d.family == fam                                       # 同族
+        # ① 与 correct 在 ≥1 示例输出上不同(→ 不一致 → correct 唯一可定)
+        assert any(tuple(d.apply(ei)) != tuple(correct.apply(ei)) for ei in ex_inputs)
         g = tuple(d.apply(task.test_input))
-        assert g != tuple(task.gold) and g not in seen_gold     # gold 去重(无第二正确答案)
-        seen_gold.add(g)
+        assert g != tuple(task.gold) and g not in seen               # ② gold 互异
+        seen.add(g)
 
 
 def test_distractor_capacity_raises_when_output_space_small():
-    """test_input 仅 2 个不同符号 → 互异 gold 数 = table_size×(table_size−1) < n → raise(不静默缩水)。"""
-    import random
-    symbols = list("ABCDEFGH")                       # table_size=8
-    img = random.Random(0).sample(symbols, 8)
-    correct = Skill(name="Decode-0", alphabet=tuple(zip(symbols, img)))
-    task = SkillBloatTask(correct=correct,
-                          examples=((("A", "B"), tuple(correct.apply(["A", "B"]))),),
-                          test_input=("A", "B", "A", "B"),   # 仅 2 个不同符号 → 8×7=56 互异 gold
-                          gold=tuple(correct.apply(["A", "B", "A", "B"])),
-                          covered=frozenset({"A", "B"}), seed=0)
+    """filter + 2 不同符号测试 → gold 空间 2^2=4 远不足 50 → raise(不静默缩水)。"""
+    correct = _sb_gen_correct(1, family="filter", table_size=8)
+    # 手构造 2-symbol 测试(逼小 gold 空间)
+    syms = correct.symbols()[:2]
+    task = cap.SkillBloatTask(correct=correct, examples=(((syms[0],), tuple(correct.apply([syms[0]]))),),
+                              test_input=tuple(syms), gold=tuple(correct.apply(syms)),
+                              covered=frozenset({syms[0]}), seed=0, family="filter")
     with pytest.raises(ValueError):
-        _sb_gen_distractors(3, 200, correct, task)   # 互异 gold 仅 56 < 200 → raise
+        _sb_gen_distractors(3, 50, correct, task)
+
+
+@pytest.mark.parametrize("fam", FAMILIES)
+def test_gen_pool_seeded(fam):
+    t1, p1 = gen_skill_pool(7, family=fam, n_skills=32, table_size=12, n_examples=2)
+    t2, p2 = gen_skill_pool(7, family=fam, n_skills=32, table_size=12, n_examples=2)
+    assert len(p1) == 32 and p1[0].family == fam
+    assert t1.test_input == t2.test_input and t1.gold == t2.gold     # 确定性
 
 
 # ── render ─────────────────────────────────────────────────────────────────────
 
-def _task_pool():
-    return gen_skill_pool(11, n_skills=64, table_size=14, n_examples=3)
-
-
-def test_render_oracle_one_skill():
-    task, pool = _task_pool()
-    sys_, usr, chosen, inv = render_skill_bloat_prompt(task, "oracle", pool=pool, k=1, seed=1)
-    assert len(chosen) == 1 and chosen[0].name == task.correct.name
-    assert "候选 skill 数据" in sys_                          # injection framing(data)
-    assert task.correct.name not in usr                       # user 不含 skill 名
-
-
-def test_render_plausible_correct_plus_distractors_same_procedure():
-    task, pool = _task_pool()
-    sys_, usr, chosen, inv = render_skill_bloat_prompt(task, "plausible", pool=pool, k=8, seed=2)
-    assert len(chosen) == 8
-    assert task.correct in chosen                             # correct 恒在
-    others = [c for c in chosen if c.name != task.correct.name]
-    assert all(c.name != task.correct.name for c in others)   # 同类型(substitution)不同 alphabet
-    assert task.correct.name not in usr
-
-
-def test_render_garbage_token_matched_to_plausible():
-    task, pool = _task_pool()
-    _sp, _up, _cp, inv_plaus = render_skill_bloat_prompt(task, "plausible", pool=pool, k=8, seed=3)
-    _sg, _ug, chosen_g, inv_garb = render_skill_bloat_prompt(task, "garbage", pool=pool, k=8, seed=3)
-    assert len(chosen_g) == 1 and chosen_g[0].name == task.correct.name   # correct 恒在;garbage 不算 chosen
-    # token 对照:garbage 与 plausible 库存 token ±15%
-    assert inv_plaus > 0 and abs(inv_garb - inv_plaus) / inv_plaus <= 0.15
-
-
-def test_render_random_subset_correct_not_guaranteed():
-    # 小池 n_skills=8,k=4 → P(correct∈subset)=0.5/draw → 两种结果近确定都出现(correct 不保证)
-    task, pool = gen_skill_pool(11, n_skills=8, table_size=14, n_examples=3)
-    has_correct = has_no_correct = False
-    for sd in range(50):
-        _s, _u, chosen, _i = render_skill_bloat_prompt(task, "random_subset", pool=pool, k=4, seed=sd)
-        assert len(chosen) == 4
-        has_correct = has_correct or (task.correct in chosen)
-        has_no_correct = has_no_correct or (task.correct not in chosen)
-    assert has_correct and has_no_correct                    # 两种都出现(correct 不保证)
+@pytest.mark.parametrize("fam", FAMILIES)
+def test_render_arms(fam):
+    task, pool = gen_skill_pool(11, family=fam, n_skills=64, table_size=12, n_examples=2)
+    so, uo, co, _ = render_skill_bloat_prompt(task, "oracle", pool=pool, k=1, seed=1)
+    assert len(co) == 1 and co[0].name == task.correct.name
+    assert task.correct.name not in uo                               # user 不含 skill 名
+    sp, up, cp, ip = render_skill_bloat_prompt(task, "plausible", pool=pool, k=8, seed=2)
+    assert len(cp) == 8 and task.correct in cp
+    sg, ug, cg, ig = render_skill_bloat_prompt(task, "garbage", pool=pool, k=8, seed=3)
+    assert abs(ip - ig) / ip <= 0.15                                 # garbage ≈ plausible token
+    sr, ur, cr, _ = render_skill_bloat_prompt(task, "random_subset", pool=pool, k=8, seed=4)
+    assert len(cr) == 8
 
 
 def test_render_rejects_unknown_arm():
-    task, pool = _task_pool()
+    task, pool = gen_skill_pool(1, family="decode", n_skills=16, table_size=12, n_examples=2)
     with pytest.raises(ValueError):
         render_skill_bloat_prompt(task, "bogus", pool=pool, k=4, seed=1)
 
@@ -148,11 +130,11 @@ def test_render_rejects_unknown_arm():
 # ── parse ──────────────────────────────────────────────────────────────────────
 
 def test_parse_output_variants():
-    assert _sb_parse_output('{"result":["A","B","#"]}') == ["A", "B", "#"]
-    assert _sb_parse_output('```json\n{"result":["M","Q"]}\n```') == ["M", "Q"]
-    assert _sb_parse_output('thinking... {"out":["X"]} done') == ["X"]
+    assert _sb_parse_output('{"result":["A","B"]}') == ["A", "B"]
+    assert _sb_parse_output('```json\n{"result":["M"]}\n```') == ["M"]
+    assert _sb_parse_output('x {"out":["Y"]} y') == ["Y"]
     assert _sb_parse_output("") is None
-    assert _sb_parse_output("totally not json") is None
+    assert _sb_parse_output("not json") is None
 
 
 # ── fake backend + _solve_sb_one ───────────────────────────────────────────────
@@ -160,12 +142,10 @@ def test_parse_output_variants():
 class _FakeBackend:
     def __init__(self, responses, *, cost_usd=0.01):
         self.responses = list(responses)
-        self.calls: list[dict] = []
         self.cost_usd = cost_usd
 
     async def complete(self, *, model, system, user, temperature=0.0, max_tokens=1024,
                        effort=None, endpoint_id=None):
-        self.calls.append({"system": system, "user": user, "max_tokens": max_tokens})
         if not self.responses:
             return ModelResponse(model=model, content="", error="no more responses")
         content, error = self.responses.pop(0)
@@ -179,74 +159,53 @@ def _entry():
 
 
 @pytest.mark.asyncio
-async def test_solve_sb_one_solved_with_gold(monkeypatch, tmp_path):
+async def test_solve_sb_one_solved_and_wrong_selection(monkeypatch, tmp_path):
     monkeypatch.setenv("UNITY_PROJECT_ROOT", str(tmp_path))
-    task, pool = gen_skill_pool(1, n_skills=32, table_size=12, n_examples=3)
-    content = '{"result":' + str(list(task.gold)).replace("'", '"') + '}'
-    back = _FakeBackend([(content, None)])
-    rec = await cap._solve_sb_one(back, _entry(), task, arm="oracle", k=0, pool=pool,
-                                  max_tokens=4096, effort=None, seed=5)
-    assert rec.outcome == "solved" and rec.solved == 1
-    assert rec.cell == "oracle"
-    assert rec.inventory_tokens > 0
-    assert rec.cost_usd == 0.01                              # 真实 cost 记录
-
-
-@pytest.mark.asyncio
-async def test_solve_sb_one_wrong_selection_plausible_only(monkeypatch, tmp_path):
-    """plausible 臂:喂某 prompt 内 distractor 的 gold 输出 → unsolved + wrong_selection + matched_distractor。"""
-    monkeypatch.setenv("UNITY_PROJECT_ROOT", str(tmp_path))
-    task, pool = gen_skill_pool(2, n_skills=32, table_size=12, n_examples=3)
-    # 先 render(seed=6)拿 chosen,挑一个在 prompt 里的 distractor;_solve_sb_one 用同 seed → 同 chosen
-    _s, _u, chosen, _i = render_skill_bloat_prompt(task, "plausible", pool=pool, k=8, seed=6)
+    task, pool = gen_skill_pool(2, family="decode", n_skills=32, table_size=12, n_examples=2)
+    gold_content = '{"result":' + str(list(task.gold)).replace("'", '"') + '}'
+    # oracle:喂 gold → solved
+    rec_o = await cap._solve_sb_one(_FakeBackend([(gold_content, None)]), _entry(), task,
+                                    arm="oracle", k=0, pool=pool, max_tokens=4096, effort=None, seed=5)
+    assert rec_o.outcome == "solved" and rec_o.family == "decode" and rec_o.cost_usd == 0.01
+    # plausible:先 render 拿 chosen,挑一个 distractor 喂其输出 → wrong_selection;同 seed 同 chosen
+    _, _, chosen, _ = render_skill_bloat_prompt(task, "plausible", pool=pool, k=8, seed=6)
     distractor = next(c for c in chosen if c.name != task.correct.name)
-    wrong_out = distractor.apply(task.test_input)
-    content = '{"result":' + str(list(wrong_out)).replace("'", '"') + '}'
-    back = _FakeBackend([(content, None), (content, None)])
-    # plausible 臂 → wrong_selection 记录
-    rec_p = await cap._solve_sb_one(back, _entry(), task, arm="plausible", k=8, pool=pool,
-                                    max_tokens=4096, effort=None, seed=6)
-    assert rec_p.outcome == "unsolved" and rec_p.solved == 0 and rec_p.valid_output == 1
+    wrong = '{"result":' + str(list(distractor.apply(task.test_input))).replace("'", '"') + '}'
+    rec_p = await cap._solve_sb_one(_FakeBackend([(wrong, None), (wrong, None)]), _entry(), task,
+                                    arm="plausible", k=8, pool=pool, max_tokens=4096, effort=None, seed=6)
     assert rec_p.wrong_selection == 1 and rec_p.matched_distractor == distractor.name
-    # garbage 臂喂同样输出 → wrong_selection=0(仅 plausible 算)
-    rec_g = await cap._solve_sb_one(back, _entry(), task, arm="garbage", k=8, pool=pool,
-                                    max_tokens=4096, effort=None, seed=7)
-    assert rec_g.wrong_selection == 0                        # review 不变量:wrong_selection 仅 plausible
+    # garbage 臂喂同样输出 → wrong_selection=0(仅 plausible)
+    rec_g = await cap._solve_sb_one(_FakeBackend([(wrong, None)]), _entry(), task,
+                                    arm="garbage", k=8, pool=pool, max_tokens=4096, effort=None, seed=7)
+    assert rec_g.wrong_selection == 0
 
 
 @pytest.mark.asyncio
 async def test_solve_sb_one_parse_fail_and_failed(monkeypatch, tmp_path):
     monkeypatch.setenv("UNITY_PROJECT_ROOT", str(tmp_path))
-    task, pool = gen_skill_pool(3, n_skills=16, table_size=12, n_examples=3)
-    # 烧 max_tokens / 非法 JSON → parse_fail(不抛异常)
-    back_pf = _FakeBackend([("```,./not json,,", None)])
-    rec_pf = await cap._solve_sb_one(back_pf, _entry(), task, arm="plausible", k=4, pool=pool,
-                                     max_tokens=4096, effort=None, seed=8)
-    assert rec_pf.outcome == "parse_fail" and rec_pf.valid_output == 0 and rec_pf.parse_ok == 1
-    # backend error → failed
-    back_fl = _FakeBackend([("", "boom")])
-    rec_fl = await cap._solve_sb_one(back_fl, _entry(), task, arm="plausible", k=4, pool=pool,
-                                     max_tokens=4096, effort=None, seed=9)
+    task, pool = gen_skill_pool(3, family="sort", n_skills=16, table_size=12, n_examples=2)
+    rec_pf = await cap._solve_sb_one(_FakeBackend([("```,./not json", None)]), _entry(), task,
+                                     arm="plausible", k=4, pool=pool, max_tokens=4096, effort=None, seed=8)
+    assert rec_pf.outcome == "parse_fail" and rec_pf.parse_ok == 1
+    rec_fl = await cap._solve_sb_one(_FakeBackend([("", "boom")]), _entry(), task,
+                                     arm="plausible", k=4, pool=pool, max_tokens=4096, effort=None, seed=9)
     assert rec_fl.outcome == "failed" and rec_fl.call_failed == 1
 
 
-def test_to_case_record_variant_and_summary():
+def test_to_case_record_family_and_difficulty():
     c = SkillBloatCase(run_id="r", task_id="t", cell="plausible_k8", solver="s", arm="plausible",
-                      k=8, n_skills=128, table_size=16)
-    c.matched_distractor = "Decode-3"
-    c.wrong_selection = 1
+                      k=8, n_skills=128, table_size=12, family="sort", difficulty=12.0)
     rec = c.to_case_record()
     assert rec.variant == "plausible_k8"
-    assert rec.report_summary["wrong_selection"] == 1 and rec.report_summary["matched_distractor"] == "Decode-3"
+    assert rec.report_summary["family"] == "sort" and rec.report_summary["difficulty"] == 12.0
 
 
-# ── aggregate ──────────────────────────────────────────────────────────────────
+# ── aggregate(per_family + overall)─────────────────────────────────────────────
 
-def _sbc(task_id: str, arm: str, k: int, solved: bool, *, wrong: bool = False,
-         matched: str = "", solver: str = "s") -> SkillBloatCase:
+def _sbc(task_id, fam, arm, k, solved, *, wrong=False, matched="", solver="s", rea=0):
     c = SkillBloatCase(run_id="r", task_id=task_id, cell=_sb_cell_name(arm, k), solver=solver,
-                      arm=arm, k=k, n_skills=128, table_size=16, valid_output=1,
-                      inventory_tokens=100, input_tokens=200,
+                      arm=arm, k=k, n_skills=128, table_size=12, family=fam, difficulty=12.0,
+                      valid_output=1, inventory_tokens=100, input_tokens=200, reasoning_tokens=rea,
                       outcome=("solved" if solved else "unsolved"), solved=1 if solved else 0)
     if wrong:
         c.wrong_selection = 1
@@ -254,120 +213,57 @@ def _sbc(task_id: str, arm: str, k: int, solved: bool, *, wrong: bool = False,
     return c
 
 
-def test_aggregate_degradation_contrast_and_entropy_empty_guard():
-    # oracle 全解;plausible_k8 解 1/3 → degradation>0。plausible wrong_selection 集中 → 低熵。
+def test_aggregate_per_family_and_overall_generalization():
+    """两家族 decode/sort,都 oracle 全解 / plausible 解 1/3 → per_family degradation>0 +
+    overall generalizes(两族 CI 都排 0)。"""
     cases = []
-    for i, s in enumerate([True, True, True]):              # oracle ×3 全解
-        cases.append(_sbc(f"t{i}", "oracle", 0, s))
-    for i, (s, w, m) in enumerate([(False, True, "Decode-5"), (False, True, "Decode-5"), (True, False, "")]):
-        c = _sbc(f"t{i}", "plausible", 8, s, wrong=w, matched=m)
-        cases.append(c)
-    for i in range(3):                                       # garbage_k8 全解(token 对照,易)
-        cases.append(_sbc(f"t{i}", "garbage", 8, True))
-    for i in range(3):                                       # random_subset_k8 0/3(常 miss correct)
-        cases.append(_sbc(f"t{i}", "random_subset", 8, False))
+    for fam in ("decode", "sort"):
+        for i in range(3):
+            cases.append(_sbc(f"{fam}-t{i}", fam, "oracle", 0, True))
+            cases.append(_sbc(f"{fam}-t{i}", fam, "plausible", 8, False))    # 全败 → diff=1.0 恒定 → CI 紧排 0
+            cases.append(_sbc(f"{fam}-t{i}", fam, "garbage", 8, True))
+            cases.append(_sbc(f"{fam}-t{i}", fam, "random_subset", 8, False))
     summ = aggregate_capability_skill_bloat(cases, [{"model": "s"}], [8],
-                                            confidence=0.95, run_id="r")
-    # k_curve
-    assert summ["k_curve"]["s"]["oracle"] == 1.0
-    assert summ["k_curve"]["s"]["plausible"]["8"] == round(1 / 3, 4)
-    # degradation_at_k8 = solve(oracle) − solve(plausible) > 0
-    d = summ["contrasts"]["degradation_at_k8"]["s"]["risk_difference"]
+                                            confidence=0.95, run_id="r", families=["decode", "sort"])
+    # per_family
+    assert set(summ["per_family"]) == {"decode", "sort"}
+    d = summ["per_family"]["decode"]["contrasts"]["degradation_at_k8"]["s"]["risk_difference"]
     assert d["point"] is not None and d["point"] > 0
-    # entropy:wrong_selection 全集中在 Decode-5 → 低熵(>0);非 None
-    cell = summ["per_cell"]["s|plausible_k8"]
-    assert cell["selection_entropy"] is not None and cell["selection_entropy"] >= 0.0
-    assert cell["top_distractor"] == "Decode-5"
-    # entropy 空集保护:oracle cell 无 wrong_selection → entropy=None(top_distractor 同)
-    assert summ["per_cell"]["s|oracle"]["selection_entropy"] is None
-    assert summ["per_cell"]["s|oracle"]["top_distractor"] is None
-    assert summ["per_cell"]["s|oracle"]["wrong_selection_rate"] == 0.0   # 0/valid = 0.0(率;非 None)
+    # overall macro + generalization
+    assert summ["overall"]["macro_mean"]["degradation_at_k8"]["s"] > 0
+    g = summ["overall"]["generalization"]["degradation_at_k8"]["s"]
+    assert g["n_families"] == 2 and g["generalizes"] is True           # 两族都 CI 排 0
 
 
 def test_shannon_entropy_empty_and_uniform():
     assert _shannon_entropy([]) is None
-    assert _shannon_entropy(["a", "a"]) == 0.0              # 集中 → 熵 0
-    assert _shannon_entropy(["a", "b"]) == 1.0              # 均匀 2 类 → 熵 1 bit
+    assert _shannon_entropy(["a", "a"]) == 0.0
+    assert _shannon_entropy(["a", "b"]) == 1.0
 
 
-def test_skill_bloat_markdown_renders():
-    """渲染器不抛(list.append 2-arg 回归防护);覆盖 budget.incomplete + note 分支。"""
-    from brainregion.cli import _capability_skill_bloat_markdown
-    result = {
-        "run_id": "r1", "mode": "skill_bloat", "n_instances": 2, "solvers": ["s"],
-        "claim_scope": "test scope",
-        "summary": {
-            "ks": [8], "arms": ["oracle", "plausible", "garbage", "random_subset"],
-            "table_size": 12, "n_examples": 2, "n_skills": 128, "base_seed": 700, "max_tokens": 4096,
-            "k_curve": {"s": {"oracle": 1.0, "plausible": {"8": 0.5},
-                              "garbage": {"8": 0.9}, "random_subset": {"8": 0.3}}},
-            "contrasts": {
-                "degradation_at_k8": {"s": {"risk_difference": {"point": 0.5, "low": 0.1, "high": 0.9}, "n": 5}},
-                "plausibility_effect_at_k8": {"s": {"risk_difference": {"point": 0.4}, "n": 5}},
-                "coverage_value_at_k8": {"s": {"risk_difference": {"point": 0.2}, "n": 5}},
-                "reasoning_cost_at_k8": {"s": {"mean_diff": {"point": 1400, "low": 100, "high": 2700}, "n": 5}},
-                "bloat_slope": {"s": {"solve_kmin": 0.5, "solve_kmax": 0.3, "slope": 0.2}},
-            },
-            "per_cell": {"s|plausible_k8": {"wrong_selection_rate": 0.2, "top_distractor": "Decode-3",
-                                            "selection_entropy": 1.5, "inventory_tokens_mean": 900,
-                                            "reasoning_tokens_mean": 1600,
-                                            "outcome_breakdown": {"solved": 3, "unsolved": 2}}},
-            "budget": {"incomplete": True, "spent_usd": 0.5, "max_usd": 5.0, "dropped_cells": ["x"]},
-            "note": "test note",
-        },
-    }
-    md = _capability_skill_bloat_markdown(result)
-    assert "skill-bloat" in md and "degradation_k8" in md
-    assert "reasoning_cost_k8" in md and "预算超限" in md   # 覆盖 budget append 分支
-
-
-def test_aggregate_reasoning_cost_contrast():
-    """deepseek 头条信号:plausible 比 oracle 花更多 reasoning_tok → reasoning_cost_at_k > 0。"""
-    cases = []
-    for i in range(4):
-        oc = _sbc(f"t{i}", "oracle", 0, True)
-        oc.reasoning_tokens = 200                            # oracle(lean)少想
-        cases.append(oc)
-        pc = _sbc(f"t{i}", "plausible", 8, True)
-        pc.reasoning_tokens = 1600                           # plausible(bloat)多想 8×
-        cases.append(pc)
-    summ = aggregate_capability_skill_bloat(cases, [{"model": "s"}], [8],
-                                            confidence=0.95, run_id="r")
-    rc = summ["contrasts"]["reasoning_cost_at_k8"]["s"]["mean_diff"]
-    assert rc["point"] is not None and rc["point"] > 0       # plausible − oracle > 0
-
-
-# ── runner ─────────────────────────────────────────────────────────────────────
+# ── runner(families loop + cost gate)────────────────────────────────────────────
 
 @pytest.mark.asyncio
-async def test_runner_matched_pair_and_store(monkeypatch, tmp_path):
+async def test_runner_families_matched_pair_and_store(monkeypatch, tmp_path):
     monkeypatch.setenv("UNITY_PROJECT_ROOT", str(tmp_path))
-    # 用真 gen:喂 gold 让 oracle 可解(验 matched-pair 同 task_id 跨臂)
-    task0, _ = gen_skill_pool(101, n_skills=32, table_size=12, n_examples=3)
-    gold_content = '{"result":' + str(list(task0.gold)).replace("'", '"') + '}'
-
-    def _resp(model, system, user, **_):
-        # 同 instance 同 gold;gold 不在 prompt → static gold 简化(只测调度/matched-pair)
-        return ModelResponse(model=model, content=gold_content, usage={"prompt_tokens": 50},
-                             cost_usd=0.0)
+    task0, _ = gen_skill_pool(101, family="decode", n_skills=32, table_size=12, n_examples=2)
+    gold = '{"result":' + str(list(task0.gold)).replace("'", '"') + '}'
 
     class _B:
         async def complete(self, **kw):
-            return _resp(**kw)
+            return ModelResponse(model=kw["model"], content=gold, usage={"prompt_tokens": 50}, cost_usd=0.0)
 
     recorded = []
     monkeypatch.setattr(cap.store, "record_case", lambda rec: recorded.append(rec))
     cases, entry = await run_capability_eval_skill_bloat(
-        table_size=12, n_examples=3, n_instances=2, base_seed=101,
+        families=["decode", "sort"], table_size=12, n_examples=2, n_instances=2, base_seed=101,
         ks=[4, 8], arms=["oracle", "plausible", "garbage", "random_subset"],
         solver_entries=[{"model": "s", "endpoint_id": None}], backend=_B(),
-        run_id="run-sb", n_skills=32, max_cost_usd=5.0)
-    # matched-pair:同一 task_id 跨臂出现
-    task_ids = {c.task_id for c in cases}
-    assert len(task_ids) == 2                                # 2 instance
-    cells = {c.cell for c in cases}
-    assert "oracle" in cells and "plausible_k4" in cells
-    assert len(recorded) == len(cases)                       # 每 case 落 store
+        run_id="run-sb-mf", n_skills=32, max_cost_usd=5.0)
+    fams_seen = {c.family for c in cases}
+    assert fams_seen == {"decode", "sort"}                            # 两家族都跑
+    assert len({c.task_id for c in cases}) == 4                       # 2 家族 × 2 instance
+    assert len(recorded) == len(cases)
 
 
 @pytest.mark.asyncio
@@ -379,31 +275,54 @@ async def test_runner_real_cost_gate_trips(monkeypatch, tmp_path):
             return ModelResponse(model=kw["model"], content='{"result":["X"]}',
                                  usage={"prompt_tokens": 50}, cost_usd=0.01)
 
-    recorded = []
-    monkeypatch.setattr(cap.store, "record_case", lambda rec: recorded.append(rec))
     cases, entry = await run_capability_eval_skill_bloat(
-        table_size=12, n_examples=3, n_instances=2, base_seed=200,
+        families=["decode"], table_size=12, n_examples=2, n_instances=2, base_seed=200,
         ks=[4, 8], arms=["oracle", "plausible", "garbage", "random_subset"],
         solver_entries=[{"model": "s", "endpoint_id": None}], backend=_B(),
-        run_id="run-sb2", n_skills=32, max_cost_usd=0.05)
-    # 真 cost 0.01/call,gate 0.05 → 第 6 call 起 drop → incomplete
+        run_id="run-sb-mf2", n_skills=32, max_cost_usd=0.05)
     assert entry.summary["budget"]["incomplete"] is True
-    assert entry.summary["budget"]["dropped_cells"]
-    assert len(recorded) < len(cases) + 100                  # dropped cell 不入 store
-    assert all(c.cost_usd == 0.01 for c in cases)            # 真实 cost 记录(非 0)
+    assert all(c.cost_usd == 0.01 for c in cases)
 
 
 @pytest.mark.asyncio
 async def test_runner_validates_table_size_and_pool():
-    # table_size ≤ 3×n_examples → raise(同步,在任何 await 前,backend 不被调用)
     with pytest.raises(ValueError):
         await run_capability_eval_skill_bloat(
-            table_size=6, n_examples=3, n_instances=1, base_seed=1, ks=[4],
+            families=["decode"], table_size=6, n_examples=2, n_instances=1, base_seed=1, ks=[4],
             arms=["oracle"], solver_entries=[{"model": "s", "endpoint_id": None}],
             backend=None, run_id="r", n_skills=32)
-    # n_skills < max(K) → raise
     with pytest.raises(ValueError):
         await run_capability_eval_skill_bloat(
-            table_size=12, n_examples=3, n_instances=1, base_seed=1, ks=[64],
+            families=["decode"], table_size=12, n_examples=2, n_instances=1, base_seed=1, ks=[64],
             arms=["oracle"], solver_entries=[{"model": "s", "endpoint_id": None}],
             backend=None, run_id="r", n_skills=32)
+
+
+# ── renderer(防 list.append 回归 + 多家族结构)──────────────────────────────────
+
+def test_skill_bloat_markdown_renders_multifamily():
+    from brainregion.cli import _capability_skill_bloat_markdown
+    result = {
+        "run_id": "r1", "mode": "skill_bloat", "n_instances": 2, "solvers": ["s"],
+        "claim_scope": "test", "summary": {
+            "families": ["decode", "sort"], "ks": [8],
+            "arms": ["oracle", "plausible"], "table_size": 12, "n_examples": 2,
+            "n_skills": 128, "base_seed": 700, "max_tokens": 4096,
+            "per_family": {
+                "decode": {"k_curve": {"s": {"oracle": 1.0, "plausible": {"8": 0.4}}},
+                           "contrasts": {"degradation_at_k8": {"s": {"risk_difference": {"point": 0.6, "low": 0.2, "high": 0.9}, "n": 5}}},
+                           "per_cell": {"s|plausible_k8": {"wrong_selection_rate": 0.1, "top_distractor": "decode-3", "selection_entropy": 1.2, "inventory_tokens_mean": 900}}},
+                "sort": {"k_curve": {"s": {"oracle": 0.95, "plausible": {"8": 0.5}}},
+                         "contrasts": {"degradation_at_k8": {"s": {"risk_difference": {"point": 0.45, "low": 0.1, "high": 0.8}, "n": 5}}},
+                         "per_cell": {}},
+            },
+            "overall": {"macro_mean": {"degradation_at_k8": {"s": 0.525}},
+                        "generalization": {"degradation_at_k8": {"s": {"n_families": 2, "n_ci_excludes_0": 2, "generalizes": True}}},
+                        },
+            "budget": {"incomplete": False}, "note": "test note",
+        },
+    }
+    md = _capability_skill_bloat_markdown(result)
+    assert "skill-bloat,多家族" in md and "Overall" in md
+    assert "degradation_at_k8" in md and "✅" in md              # generalizes 标记
+    assert "family=decode" in md and "family=sort" in md

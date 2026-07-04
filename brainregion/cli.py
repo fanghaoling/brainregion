@@ -158,7 +158,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_cap.add_argument("--output-file", default=None)
     # Phase 3D:skill-inventory bloat × region-scoping(架构提升 A/B)
     p_cap.add_argument("--skill-bloat", action="store_true",
-                       help="Phase 3D:procedural Decode skill 库 bloat × region-scoping A/B(主脑=deepseek)")
+                       help="Phase 3D:多家族 skill 库 bloat × region-scoping A/B(§0 generality + region 地基)")
+    p_cap.add_argument("--sb-families", default="decode,filter",
+                       help="逗号分隔家族(registry:decode=map/filter=subset 跨模型通用;sort=reorder 仅推理"
+                            "模型(deepseek)能执行,glm 非 oracle<0.9 floor)")
     p_cap.add_argument("--sb-inventory", default="2,8,32", help="逗号分隔库存大小 K(Stage 1 早拐点;formal 可扩 64)")
     p_cap.add_argument("--sb-arms", default="oracle,plausible,garbage,random_subset",
                        help="逗号分隔臂子集(oracle=upper bound / plausible=bloat / garbage=token 对照 / random_subset=coverage)")
@@ -378,60 +381,71 @@ def _capability_markdown(result: dict) -> str:
 
 
 def _capability_skill_bloat_markdown(result: dict) -> str:
-    """Phase 3D skill-bloat 汇总:K×臂 solve 曲线 + degradation/plausibility/coverage contrasts + selection 诊断。"""
+    """Phase 3D 多家族 skill-bloat 汇总:overall(跨族 generality 头条)+ per-family(K×臂 + contrasts + 诊断)。"""
     s = result.get("summary", {})
     ks = s.get("ks") or []
+    families = s.get("families") or []
+    solvers = result.get("solvers") or []
     lines = [
-        f"# Capability eval (skill-bloat) {result.get('run_id', '')}", "",
+        f"# Capability eval (skill-bloat,多家族) {result.get('run_id', '')}", "",
         f"声明范围: {result.get('claim_scope', '')}",
-        f"solvers={result.get('solvers')} ks={ks} arms={s.get('arms')} n={result.get('n_instances')} "
+        f"solvers={solvers} families={families} ks={ks} arms={s.get('arms')} n={result.get('n_instances')} "
         f"table_size={s.get('table_size')} n_examples={s.get('n_examples')} pool={s.get('n_skills')} "
         f"base_seed={s.get('base_seed')} max_tokens={s.get('max_tokens')}", "",
     ]
-    # K×arm solve curve
-    for slv, curve in (s.get("k_curve") or {}).items():
-        lines.append(f"## K×arm solve_rate(solver={slv})")
-        header = ["arm"] + [f"K={k}" for k in ks]
-        lines.append("| " + " | ".join(header) + " |")
-        lines.append("|" + "|".join(["---"] * len(header)) + "|")
-        for arm in ("plausible", "garbage", "random_subset"):
-            row = [arm] + [str((curve.get(arm) or {}).get(str(k))) for k in ks]
-            lines.append("| " + " | ".join(row) + " |")
-        lines.append(f"_oracle(upper bound) solve_rate = {curve.get('oracle')}_\n")
+    overall = s.get("overall") or {}
+    macro = overall.get("macro_mean") or {}
+    gen = overall.get("generalization") or {}
+    lines.append("## Overall(跨家族;§0 generality 头条)")
+    lines.append("| contrast | " + " | ".join(solvers) + " |")
+    lines.append("|" + "|".join(["---"] * (1 + len(solvers))) + "|")
+    labels = ([f"degradation_at_k{k}" for k in ks] + [f"plausibility_effect_at_k{k}" for k in ks]
+              + [f"reasoning_cost_at_k{k}" for k in ks] + [f"coverage_value_at_k{k}" for k in ks])
+    for label in labels:
+        row = [label]
+        for slv in solvers:
+            mm = (macro.get(label) or {}).get(slv)
+            g = (gen.get(label) or {}).get(slv) or {}
+            star = "✅" if g.get("generalizes") else ("⚠️" if g.get("n_ci_excludes_0", 0) else "·")
+            row.append(f"{star} mean={mm} ({g.get('n_ci_excludes_0')}/{g.get('n_families')} 族 CI排0)")
+        lines.append("| " + " | ".join(row) + " |")
+    lines.append("")
 
     def _rd(ps: dict) -> str:
         rd = ps.get("risk_difference") or {}
         return f"Δ={rd.get('point')} CI[{rd.get('low')},{rd.get('high')}] n={ps.get('n')}"
 
-    contrasts = s.get("contrasts") or {}
-    lines.append("## contrasts(配对 bootstrap;consistent-with,oracle=upper bound 非 architecture gain)")
-    for k in ks:
-        for slv, ps in (contrasts.get(f"degradation_at_k{k}") or {}).items():
-            lines.append(f"- **degradation_k{k}**[{slv}] {_rd(ps)}  (>0=inventory 退化,主指标)")
-        for slv, ps in (contrasts.get(f"plausibility_effect_at_k{k}") or {}).items():
-            lines.append(f"- **plausibility_k{k}**[{slv}] {_rd(ps)}  (>0=竞争选择负载 §0;≈0=裸 token)")
-        for slv, ps in (contrasts.get(f"coverage_value_at_k{k}") or {}).items():
-            lines.append(f"- **coverage_k{k}**[{slv}] {_rd(ps)}  (>0=拥有正确 skill 价值)")
-        for slv, ps in (contrasts.get(f"reasoning_cost_at_k{k}") or {}).items():
-            md = ps.get("mean_diff") or {}
-            lines.append(f"- **reasoning_cost_k{k}**[{slv}] Δ={md.get('point')} CI[{md.get('low')},{md.get('high')}]  "
-                         f"(>0=plausible 比 oracle 花更多推理 = region-scoping 节省;推理模型 accuracy 持平时的负载信号)")
-    for slv, v in (contrasts.get("bloat_slope") or {}).items():
-        lines.append(f"- **bloat_slope**[{slv}] solve(Kmin)={v.get('solve_kmin')} "
-                     f"solve(Kmax)={v.get('solve_kmax')} slope={v.get('slope')}")
-    lines.append("")
-
-    lines.append("## selection 诊断(plausible 臂)")
-    for cell, m in (s.get("per_cell") or {}).items():
-        if "|plausible_k" in cell:
-            lines.append(f"- {cell}: wrong_selection={m.get('wrong_selection_rate')} "
-                         f"top_distractor={m.get('top_distractor')} entropy={m.get('selection_entropy')} "
-                         f"inv_tok={m.get('inventory_tokens_mean')} rea_tok={m.get('reasoning_tokens_mean')} "
-                         f"outcomes={m.get('outcome_breakdown')}")
+    for fam in families:
+        fa = (s.get("per_family") or {}).get(fam) or {}
+        kc, contrasts, per_cell = fa.get("k_curve") or {}, fa.get("contrasts") or {}, fa.get("per_cell") or {}
+        lines.append(f"## family={fam}")
+        for slv in solvers:
+            curve = kc.get(slv) or {}
+            header = ["arm"] + [f"K={k}" for k in ks]
+            lines.append(f"_solver={slv}_  oracle(upper bound)={curve.get('oracle')}")
+            lines.append("| " + " | ".join(header) + " |")
+            lines.append("|" + "|".join(["---"] * len(header)) + "|")
+            for arm in ("plausible", "garbage", "random_subset"):
+                lines.append("| " + " | ".join([arm] + [str((curve.get(arm) or {}).get(str(k))) for k in ks]) + " |")
+        for k in ks:
+            for slv in solvers:
+                ps = (contrasts.get(f"degradation_at_k{k}") or {}).get(slv)
+                if ps:
+                    lines.append(f"- degradation_k{k}[{slv}] {_rd(ps)}")
+                ps = (contrasts.get(f"reasoning_cost_at_k{k}") or {}).get(slv)
+                if ps:
+                    md = ps.get("mean_diff") or {}
+                    lines.append(f"- reasoning_cost_k{k}[{slv}] Δ={md.get('point')} CI[{md.get('low')},{md.get('high')}]")
+        for cell, m in per_cell.items():
+            if "|plausible_k" in cell:
+                lines.append(f"- {cell}: wrong_sel={m.get('wrong_selection_rate')} "
+                             f"top={m.get('top_distractor')} entropy={m.get('selection_entropy')} "
+                             f"inv_tok={m.get('inventory_tokens_mean')}")
+        lines.append("")
     budget = s.get("budget") or {}
     if budget.get("incomplete"):
-        lines += ["", f"⚠️ 预算超限 incomplete:dropped {len(budget.get('dropped_cells') or [])} cells "
-                    f"(spent={budget.get('spent_usd')}/{budget.get('max_usd')})"]
+        lines += [f"⚠️ 预算超限:dropped {len(budget.get('dropped_cells') or [])} cells "
+                  f"(spent={budget.get('spent_usd')}/{budget.get('max_usd')})"]
     lines += ["", f"_{s.get('note')}_"]
     return "\n".join(lines)
 

@@ -715,112 +715,229 @@ def _sb_est_tokens(s: str) -> int:
     return max(1, len(s) * 7 // 10)
 
 
-@dataclass(frozen=True)
-class Skill:
-    """procedural Decode skill:多步过程(reverse / drop_pad / alphabet 解码)。alphabet = 任意双射(必要参数)。"""
+# ── Family(逻辑层)+ Skill(数据层)+ registry(GPT #1/#2:新家族 = 一个子类,不改 evaluator)──
+class Family:
+    """家族逻辑/模板:如何造参 / 出题 / 验证 / 渲染。家族特异 = generate_parameter/apply/render_doc;
+    gen_examples/gen_test 家族无关(用 symbols + apply)。Skill 是 dumb data,逻辑委托 Family。"""
 
-    name: str
-    alphabet: tuple[tuple[str, str], ...]     # (sym, img) 按 sym 序;img = symbols 的一个排列(双射)
+    name: str = ""
 
-    @property
-    def map_(self) -> dict[str, str]:
-        return dict(self.alphabet)
+    def generate_parameter(self, rng: random.Random, table_size: int) -> dict:
+        raise NotImplementedError
 
-    def apply(self, seq) -> list[str]:
-        """单步 substitution decode:逐符号按 alphabet 替换(未知透传,防御)。确定性。"""
-        m = self.map_
-        return [m.get(t, t) for t in seq]
+    def apply(self, param: dict, seq) -> list:
+        raise NotImplementedError
 
-    def doc_text(self) -> str:
-        """procedural NL doc(替换密码 = Decode 操作;alphabet 逐行清晰列出,降执行噪声)。"""
-        lines = [f"Skill {self.name}: 解码(替换密码)",
+    def symbols(self, param: dict) -> list:
+        return list(param["symbols"])
+
+    def render_doc(self, param: dict, skill_name: str) -> str:
+        raise NotImplementedError
+
+    def difficulty(self, param: dict) -> float:
+        return float(len(self.symbols(param)))
+
+    # ── 家族无关(gen 走这俩)───────────────────────────────────────────────────
+    def gen_examples(self, param, rng, n_examples) -> tuple[list, frozenset]:
+        syms = self.symbols(param)
+        examples: list = []
+        covered: set = set()
+        for _ in range(n_examples):
+            inp = rng.sample(syms, rng.randint(2, 3))
+            examples.append((tuple(inp), tuple(self.apply(param, inp))))
+            covered.update(inp)
+        return examples, frozenset(covered)
+
+    def gen_test(self, param, rng, covered) -> tuple[tuple, tuple]:
+        syms = self.symbols(param)
+        uncovered = [s for s in syms if s not in covered]
+        if not uncovered:
+            raise ValueError(f"{self.name}:示例覆盖全部符号 → skill 非必要(增大 table_size 或减 n_examples)")
+        # 采样 distinct 符号(filter 的 gold 空间=2^d,需 d≥8 支撑 pool=128 → 127 distractor;decode/sort 不受影响)+ 保 ≥1 未覆盖
+        test_len = min(8, len(syms))
+        test_input = rng.sample(syms, test_len)
+        must = rng.choice(uncovered)
+        if must not in test_input:
+            test_input[rng.randrange(test_len)] = must
+        rng.shuffle(test_input)
+        return tuple(test_input), tuple(self.apply(param, test_input))
+
+
+class DecodeFamily(Family):
+    name = "decode"                                          # map(替换密码)
+
+    def generate_parameter(self, rng, table_size):
+        symbols = list(_SB_SYMBOLS[:table_size])
+        img = rng.sample(symbols, len(symbols))              # 随机双射
+        return {"symbols": symbols, "alphabet": dict(zip(symbols, img))}
+
+    def apply(self, param, seq):
+        alpha = param["alphabet"]
+        return [alpha.get(t, t) for t in seq]
+
+    def render_doc(self, param, skill_name):
+        alpha = param["alphabet"]
+        lines = [f"Skill {skill_name}: 解码(替换密码)",
                  "规则:对输入序列的每个符号,按下表替换为其目标符号(保持原序)。", "字母表:"]
-        lines += [f"  {s} → {img}" for s, img in self.alphabet]
+        lines += [f"  {s} → {alpha[s]}" for s in param["symbols"]]
         lines.append("输出:替换后的符号序列。")
         return "\n".join(lines)
 
 
+class SortFamily(Family):
+    name = "sort"                                            # reorder(优先级排序)
+
+    def generate_parameter(self, rng, table_size):
+        symbols = list(_SB_SYMBOLS[:table_size])
+        order = rng.sample(symbols, len(symbols))            # 随机优先级排列
+        return {"symbols": symbols, "priority": {s: i for i, s in enumerate(order)}}
+
+    def apply(self, param, seq):
+        pri = param["priority"]
+        return sorted(seq, key=lambda x: pri[x])
+
+    def render_doc(self, param, skill_name):
+        pri = param["priority"]
+        order = sorted(param["symbols"], key=lambda s: pri[s])      # 高→低
+        lines = [f"Skill {skill_name}: 优先级排序",
+                 "规则:将输入序列按此优先级排序(列在前 = 更高优先,排到输出前面)。", "优先级(高→低):"]
+        lines += [f"  {i + 1}. {s}" for i, s in enumerate(order)]
+        lines.append("输出:排序后的符号序列。")
+        return "\n".join(lines)
+
+
+class FilterFamily(Family):
+    name = "filter"                                          # subset(规则过滤)
+
+    def generate_parameter(self, rng, table_size):
+        symbols = list(_SB_SYMBOLS[:table_size])
+        keep = set(rng.sample(symbols, max(1, table_size // 2)))    # ~半数保留
+        return {"symbols": symbols, "keep": keep}
+
+    def apply(self, param, seq):
+        keep = param["keep"]
+        return [x for x in seq if x in keep]
+
+    def render_doc(self, param, skill_name):
+        keep, syms = param["keep"], param["symbols"]
+        lines = [f"Skill {skill_name}: 规则过滤",
+                 "规则:只保留下列【保留集】内的符号,丢弃其余(保持相对顺序)。", "保留集:"]
+        lines.append("  " + ", ".join(s for s in syms if s in keep))
+        lines.append("丢弃集: " + ", ".join(s for s in syms if s not in keep))
+        lines.append("输出:过滤后的符号序列。")
+        return "\n".join(lines)
+
+
+_SB_FAMILIES: dict[str, Family] = {}
+
+
+def register_family(fam: Family) -> None:
+    _SB_FAMILIES[fam.name] = fam
+
+
+def get_family(name: str) -> Family:
+    if name not in _SB_FAMILIES:
+        raise ValueError(f"未知 family {name!r};已注册 {list(_SB_FAMILIES)}")
+    return _SB_FAMILIES[name]
+
+
+for _f in (DecodeFamily(), SortFamily(), FilterFamily()):
+    register_family(_f)
+
+
+@dataclass(frozen=True)
+class Skill:
+    """数据层:family key + parameter。逻辑全在 Family(apply/doc_text/symbols 委托)。"""
+
+    name: str
+    family: str
+    parameter: dict
+
+    def apply(self, seq) -> list:
+        return get_family(self.family).apply(self.parameter, seq)
+
+    def doc_text(self) -> str:
+        return get_family(self.family).render_doc(self.parameter, self.name)
+
+    def symbols(self) -> list:
+        return get_family(self.family).symbols(self.parameter)
+
+    @property
+    def difficulty(self) -> float:
+        return get_family(self.family).difficulty(self.parameter)
+
+    @property
+    def parameter_size(self) -> int:
+        return len(self.symbols())
+
+
 @dataclass(frozen=True)
 class SkillBloatTask:
-    """单 Decode 任务:correct skill + 一致性示例 + 测试输入 + gold。示例不命名 skill(靠一致性选)。"""
+    """单任务(家族无关):correct skill + 一致性示例 + 测试输入 + gold + family tag。示例不命名 skill。"""
 
     correct: Skill
-    examples: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...]   # ((input, output), ...)
-    test_input: tuple[str, ...]
-    gold: tuple[str, ...]
-    covered: frozenset[str]            # 示例揭示的符号(skill 必要性:测试输入须含未覆盖符号)
+    examples: tuple[tuple[tuple, tuple], ...]     # ((input, output), ...)
+    test_input: tuple
+    gold: tuple
+    covered: frozenset              # 示例揭示的符号(skill 必要性:测试输入须含未覆盖)
     seed: int
+    family: str
 
     @property
     def task_id(self) -> str:
-        return f"decode-t{self.seed}"
+        return f"{self.family}-t{self.seed}"
 
 
-def _sb_gen_correct(seed: int, *, table_size: int) -> Skill:
-    rng = random.Random(seed)
-    symbols = list(_SB_SYMBOLS[:table_size])
-    img = rng.sample(symbols, len(symbols))                      # 随机双射
-    return Skill(name="Decode-0", alphabet=tuple(zip(symbols, img)))
+def _sb_gen_correct(seed: int, *, family: str, table_size: int) -> Skill:
+    fam = get_family(family)
+    param = fam.generate_parameter(random.Random(seed), table_size)
+    return Skill(name=f"{family}-0", family=family, parameter=param)
 
 
 def _sb_gen_task(seed: int, correct: Skill, *, n_examples: int) -> SkillBloatTask:
-    """生成一致性示例(揭示部分 alphabet)+ 测试输入(含未覆盖符号)+ gold。"""
+    """家族无关:经 Family.gen_examples / gen_test(用 symbols + apply)。"""
+    fam = get_family(correct.family)
     rng = random.Random(seed)
-    symbols = [s for s, _ in correct.alphabet]
-    examples: list[tuple[tuple[str, ...], tuple[str, ...]]] = []
-    covered: set[str] = set()
-    for _ in range(n_examples):
-        k = rng.randint(2, 3)
-        inp = rng.sample(symbols, k)
-        examples.append((tuple(inp), tuple(correct.apply(inp))))
-        covered.update(inp)
-    uncovered = [s for s in symbols if s not in covered]
-    if not uncovered:
-        raise ValueError("示例覆盖全部符号 → skill 非必要(增大 table_size 或减 n_examples)")
-    # 测试输入:含 ≥1 未覆盖符号(必要性),长度 4-5
-    test_len = rng.randint(4, 5)
-    must = rng.choice(uncovered)
-    rest = [rng.choice(symbols) for _ in range(test_len - 1)]
-    test_input = [must, *rest]
-    rng.shuffle(test_input)
-    if must not in test_input:                                   # shuffle 后保 must 在
-        test_input[rng.randrange(len(test_input))] = must
-    return SkillBloatTask(correct=correct, examples=tuple(examples), test_input=tuple(test_input),
-                          gold=tuple(correct.apply(test_input)), covered=frozenset(covered), seed=seed)
+    examples, covered = fam.gen_examples(correct.parameter, rng, n_examples)
+    test_input, gold = fam.gen_test(correct.parameter, rng, covered)
+    return SkillBloatTask(correct=correct, examples=tuple(examples), test_input=test_input,
+                          gold=gold, covered=covered, seed=seed, family=correct.family)
 
 
 def _sb_gen_distractors(seed: int, n: int, correct: Skill, task: SkillBloatTask) -> list[Skill]:
-    """n 个不同 alphabet 的 distractor(substitution decode,同类型)。
-    review 不变量:① 与 correct 在 ≥1 covered 符号上不同(→ 与示例不一致 → 被排除 → correct 唯一可定);
-    ② gold(test_input)≠ correct gold 且互异(→ 无第二个正确答案,wrong_selection 可辨)。"""
+    """n 个同族不同 param 的 distractor(家族无关,经 Skill.apply)。
+    review 不变量:① 与 correct 在 ≥1 示例输出上不同(→ 与示例不一致 → correct 唯一可定);
+    ② gold(test_input)≠ correct gold 且互异(无第二正确答案,wrong_selection 可辨)。"""
+    fam = get_family(correct.family)
     rng = random.Random(seed)
-    symbols = [s for s, _ in correct.alphabet]
-    correct_map = correct.map_
+    table_size = correct.parameter_size
     correct_gold = tuple(task.gold)
-    golds_seen: set[tuple[str, ...]] = {correct_gold}
+    ex_inputs = [inp for inp, _ in task.examples]
+    golds_seen: set[tuple] = {correct_gold}
     out: list[Skill] = []
     attempts = 0
     while len(out) < n and attempts < n * 400:
         attempts += 1
-        img = rng.sample(symbols, len(symbols))
-        m = dict(zip(symbols, img))
-        if all(m[s] == correct_map[s] for s in task.covered):    # 与示例一致 → 会造成歧义,弃
+        param = fam.generate_parameter(rng, table_size)
+        cand = Skill(name=f"{correct.family}-{len(out) + 1}", family=correct.family, parameter=param)
+        # ① 必须在某示例上与 correct 输出不同(否则与示例一致 → 歧义)
+        if all(tuple(cand.apply(ei)) == tuple(correct.apply(ei)) for ei in ex_inputs):
             continue
-        sk = Skill(name=f"Decode-{len(out) + 1}", alphabet=tuple(zip(symbols, img)))
-        g = tuple(sk.apply(task.test_input))
-        if g == correct_gold or g in golds_seen:                 # gold 去重(防第二正确答案)
+        g = tuple(cand.apply(task.test_input))               # ② gold 互异(防第二正确答案)
+        if g == correct_gold or g in golds_seen:
             continue
         golds_seen.add(g)
-        out.append(sk)
+        out.append(cand)
     if len(out) < n:
-        raise ValueError(f"distractor 容量不足:需 {n} 得 {len(out)}(table_size={len(symbols)} 太小?)")
+        raise ValueError(f"{correct.family} distractor 容量不足:需 {n} 得 {len(out)}"
+                         f"(table_size={table_size} 太小?filter 的 gold 空间=2^test_distinct)")
     return out
 
 
-def gen_skill_pool(seed: int, *, n_skills: int, table_size: int, n_examples: int
+def gen_skill_pool(seed: int, *, family: str, n_skills: int, table_size: int, n_examples: int
                    ) -> tuple[SkillBloatTask, list[Skill]]:
-    """生成 (task, pool):pool[0]=correct,其余 distractor(同 procedure 不同 alphabet)。n_skills 固定(默认 128)。"""
-    correct = _sb_gen_correct(seed, table_size=table_size)
+    """生成 (task, pool):pool[0]=correct,其余 同族不同 param distractor。"""
+    correct = _sb_gen_correct(seed, family=family, table_size=table_size)
     task = _sb_gen_task(seed + 1000003, correct, n_examples=n_examples)
     distractors = _sb_gen_distractors(seed + 2000003, n_skills - 1, correct, task)
     return task, [correct, *distractors]
@@ -943,7 +1060,9 @@ class SkillBloatCase:
     arm: str
     k: int
     n_skills: int
-    table_size: int
+    table_size: int                       # = parameter_size(family symbols 数;GPT #5 provenance)
+    family: str = ""                      # 家族 tag(decode/sort/filter)
+    difficulty: float = 0.0               # family difficulty proxy(GPT #5:family×param×inventory 切片)
     parse_ok: int = 0
     valid_output: int = 0
     solved: int = 0
@@ -964,6 +1083,7 @@ class SkillBloatCase:
             report_summary={
                 "solver": self.solver, "arm": self.arm, "k": self.k, "cell": self.cell,
                 "n_skills": self.n_skills, "table_size": self.table_size,
+                "family": self.family, "difficulty": self.difficulty,
                 "parse_ok": self.parse_ok, "valid_output": self.valid_output,
                 "solved": self.solved, "call_failed": self.call_failed, "outcome": self.outcome,
                 "input_tokens": self.input_tokens, "output_tokens": self.output_tokens,
@@ -992,7 +1112,8 @@ async def _solve_sb_one(backend, solver_entry: dict, task: SkillBloatTask, *,
     review 不变量:空/非法输出 → parse_fail(不抛异常中断 run);wrong_selection 仅 plausible 臂。"""
     rec = SkillBloatCase(run_id="", task_id=task.task_id, cell=_sb_cell_name(arm, k),
                          solver=solver_entry["model"], arm=arm, k=k, n_skills=len(pool),
-                         table_size=len(task.correct.alphabet))
+                         table_size=task.correct.parameter_size, family=task.family,
+                         difficulty=task.correct.difficulty)
     system, user, chosen, inv_tok = render_skill_bloat_prompt(task, arm, pool=pool, k=k, seed=seed)
     rec.inventory_tokens = inv_tok
     try:
@@ -1146,73 +1267,110 @@ def _sb_contrast_tok(cases, solver_entries, cell_a, cell_b, *, confidence, run_i
     return out
 
 
-def aggregate_capability_skill_bloat(cases, solver_entries, ks, *,
-                                     confidence: float, run_id: str) -> dict:
-    """per-cell(arm×K)+ K×arm solve curve + contrasts(degradation/plausibility/coverage/bloat_slope)
-    + selection 诊断。claim 降调 consistent-with;oracle=upper bound 非 architecture gain。"""
+def _sb_aggregate_family(fam_cases, solver_entries, ks, *, confidence: float, run_id: str) -> dict:
+    """单家族的 per_cell(arm×K)+ K×arm curve + contrasts(degradation/plausibility/coverage/reasoning_cost
+    /bloat_slope)+ selection 诊断。家族无关(操作在 case 字段)。"""
     per_cell: dict[str, dict] = {}
     for se in solver_entries:
         per_cell[f"{se['model']}|oracle"] = _sb_cell_metrics(
-            [c for c in cases if c.solver == se["model"] and c.arm == "oracle"])
+            [c for c in fam_cases if c.solver == se["model"] and c.arm == "oracle"])
         for arm in ("plausible", "garbage", "random_subset"):
             for k in ks:
                 per_cell[f"{se['model']}|{_sb_cell_name(arm, k)}"] = _sb_cell_metrics(
-                    [c for c in cases if c.solver == se["model"] and c.arm == arm and c.k == k])
+                    [c for c in fam_cases if c.solver == se["model"] and c.arm == arm and c.k == k])
 
     k_curve: dict[str, dict] = {}
     for se in solver_entries:
-        curve = {"oracle": _sb_solve_rate([c for c in cases if c.solver == se["model"]
+        curve = {"oracle": _sb_solve_rate([c for c in fam_cases if c.solver == se["model"]
                                             and c.arm == "oracle"])}
         for arm in ("plausible", "garbage", "random_subset"):
-            curve[arm] = {str(k): _sb_solve_rate([c for c in cases if c.solver == se["model"]
+            curve[arm] = {str(k): _sb_solve_rate([c for c in fam_cases if c.solver == se["model"]
                                                   and c.arm == arm and c.k == k]) for k in ks}
         k_curve[se["model"]] = curve
 
     contrasts: dict[str, dict] = {}
     for k in ks:
-        contrasts[f"degradation_at_k{k}"] = _sb_contrast(            # solve(oracle) − solve(plausible_k)
-            cases, solver_entries, "oracle", _sb_cell_name("plausible", k),
+        contrasts[f"degradation_at_k{k}"] = _sb_contrast(
+            fam_cases, solver_entries, "oracle", _sb_cell_name("plausible", k),
             confidence=confidence, run_id=run_id, label=f"degr_k{k}")
-        contrasts[f"plausibility_effect_at_k{k}"] = _sb_contrast(    # solve(garbage_k) − solve(plausible_k)
-            cases, solver_entries, _sb_cell_name("garbage", k), _sb_cell_name("plausible", k),
+        contrasts[f"plausibility_effect_at_k{k}"] = _sb_contrast(
+            fam_cases, solver_entries, _sb_cell_name("garbage", k), _sb_cell_name("plausible", k),
             confidence=confidence, run_id=run_id, label=f"plaus_k{k}")
-        contrasts[f"coverage_value_at_k{k}"] = _sb_contrast(         # solve(plausible_k) − solve(rand_k)
-            cases, solver_entries, _sb_cell_name("plausible", k), _sb_cell_name("random_subset", k),
+        contrasts[f"coverage_value_at_k{k}"] = _sb_contrast(
+            fam_cases, solver_entries, _sb_cell_name("plausible", k), _sb_cell_name("random_subset", k),
             confidence=confidence, run_id=run_id, label=f"cov_k{k}")
-        contrasts[f"reasoning_cost_at_k{k}"] = _sb_contrast_tok(     # reasoning_tok(plausible_k) − reasoning_tok(oracle)
-            cases, solver_entries, _sb_cell_name("plausible", k), "oracle",
+        contrasts[f"reasoning_cost_at_k{k}"] = _sb_contrast_tok(
+            fam_cases, solver_entries, _sb_cell_name("plausible", k), "oracle",
             confidence=confidence, run_id=run_id, label=f"rea_cost_k{k}")
-    if len(ks) >= 2:                                                # bloat_slope = solve(plausible_min) − solve(max)
+    if len(ks) >= 2:
         kmin, kmax = min(ks), max(ks)
         for se in solver_entries:
-            lo = _sb_solve_rate([c for c in cases if c.solver == se["model"]
+            lo = _sb_solve_rate([c for c in fam_cases if c.solver == se["model"]
                                  and c.arm == "plausible" and c.k == kmin])
-            hi = _sb_solve_rate([c for c in cases if c.solver == se["model"]
+            hi = _sb_solve_rate([c for c in fam_cases if c.solver == se["model"]
                                  and c.arm == "plausible" and c.k == kmax])
             contrasts.setdefault("bloat_slope", {})[se["model"]] = {
                 "solve_kmin": lo, "solve_kmax": hi,
                 "slope": ((lo - hi) if (lo is not None and hi is not None) else None)}
+    return {"per_cell": per_cell, "k_curve": k_curve, "contrasts": contrasts}
 
+
+def _sb_overall(per_family: dict, solver_entries, ks) -> dict:
+    """跨家族两层汇总(GPT #3):macro-mean of contrast 点 + generalization(每族 CI 是否排 0 → §0 跨族成立度)。"""
+    labels = [f"{c}_at_k{k}" for c in ("degradation", "plausibility_effect", "coverage_value", "reasoning_cost")
+              for k in ks]
+    macro_mean: dict[str, dict] = {}
+    generalization: dict[str, dict] = {}
+    for label in labels:
+        macro_mean[label] = {}
+        generalization[label] = {}
+        for se in solver_entries:
+            sm = se["model"]
+            pts, n_excl, n_fam = [], 0, 0
+            for fam_agg in per_family.values():
+                entry = (fam_agg.get("contrasts") or {}).get(label, {}).get(sm)
+                if not entry:
+                    continue
+                rd = entry.get("risk_difference") or entry.get("mean_diff") or {}
+                p, low = rd.get("point"), rd.get("low")
+                if p is None:
+                    continue
+                n_fam += 1
+                pts.append(p)
+                if low is not None and low > 0:
+                    n_excl += 1
+            macro_mean[label][sm] = round(sum(pts) / len(pts), 4) if pts else None
+            generalization[label][sm] = {"n_families": n_fam, "n_ci_excludes_0": n_excl,
+                                         "generalizes": bool(n_fam and n_excl == n_fam)}
+    return {"macro_mean": macro_mean, "generalization": generalization}
+
+
+def aggregate_capability_skill_bloat(cases, solver_entries, ks, *,
+                                     confidence: float, run_id: str, families: list[str]) -> dict:
+    """两层聚合:per_family(每族 per_cell/k_curve/contrasts)+ overall(macro-mean + generalization)。
+    claim 降调 consistent-with;oracle=upper bound 非 architecture gain。"""
+    per_family = {fam: _sb_aggregate_family([c for c in cases if c.family == fam], solver_entries, ks,
+                                            confidence=confidence, run_id=run_id)
+                  for fam in families}
+    overall = _sb_overall(per_family, solver_entries, ks)
     return {
-        "claim_scope": ("skill-inventory bloat → selection/遵循退化;region-scoping(oracle=upper bound)"
-                        "consistent-with 帮助。procedural Decode skill(单一类型);4 臂 matched-pair"),
+        "claim_scope": ("skill-inventory bloat → selection/遵循退化;跨家族 generality;"
+                        "region-scoping(oracle=upper bound)consistent-with 帮助"),
         "mode": "skill_bloat",
-        "per_cell": per_cell,
-        "k_curve": k_curve,
-        "contrasts": contrasts,
-        "primary_gap": ("degradation_at_K(CI>0=inventory accuracy 退化,非推理模型信号);"
-                        "reasoning_cost_at_K(CI>0=inventory 推理 cost 升,推理模型 accuracy 持平时的负载信号;"
-                        "oracle-vs-plausible 即 region-scoping 节省);plausibility_effect_at_K"
-                        "(>0=竞争选择负载,§0 机制);coverage_value_at_K(>0=拥有正确 skill 价值);"
-                        "bloat_slope(>0=solve 随 K 降)"),
+        "families": list(families),
+        "per_family": per_family,
+        "overall": overall,
+        "primary_gap": ("overall.generalization: degradation_at_K 全家族 CI 排 0 → §0 跨操作类型成立;"
+                        "reasoning_cost_at_K 全家族 CI 排 0 → 推理 cost 升跨族成立;"
+                        "overall.macro_mean: 跨族平均效应量"),
         "ks": list(ks),
         "note": ("oracle=upper bound 非 architecture gain;真架构 router-scoped defer。"
-                 "formal 声明 exploratory/未做多重比较校正(4 contrast × |K|)。"),
+                 "formal 声明 exploratory/未做多重比较校正(家族 × contrast × K)。"),
     }
 
 
 async def run_capability_eval_skill_bloat(
-    *, table_size: int, n_examples: int, n_instances: int, base_seed: int,
+    *, families: list[str], table_size: int, n_examples: int, n_instances: int, base_seed: int,
     ks: list[int], arms: list[str], solver_entries: list[dict], backend, run_id: str,
     n_skills: int = 128, max_tokens: int = 4096, max_cost_usd: float = 5.0,
     effort=None, confidence: float = 0.95,
@@ -1233,39 +1391,40 @@ async def run_capability_eval_skill_bloat(
     spent = 0.0
     dropped: list[str] = []
     cases: list[SkillBloatCase] = []
-    for se in solver_entries:
-        for i in range(n_instances):
-            seed_i = base_seed + i
-            task, pool = gen_skill_pool(seed_i, n_skills=n_skills, table_size=table_size,
-                                        n_examples=n_examples)
-            # oracle:K 无关,每 (solver, instance) 一次
-            for arm in arms:
-                if arm == "oracle":
-                    if spent >= max_cost_usd:
-                        dropped.append(f"{se['model']}/{task.task_id}/oracle")
-                        continue
-                    case = await _solve_sb_one(backend, se, task, arm="oracle", k=0, pool=pool,
-                                               max_tokens=max_tokens, effort=effort,
-                                               seed=seed_for(run_id, f"{task.task_id}-oracle"))
-                    case.run_id = run_id
-                    spent += case.cost_usd
-                    cases.append(case)
-                    store.record_case(case.to_case_record())
-                else:
-                    for k in ks:
+    for fam in families:
+        for se in solver_entries:
+            for i in range(n_instances):
+                seed_i = base_seed + i + 10007 * (hash(fam) % 997)     # 每 family seed 偏移,族间 task 不撞
+                task, pool = gen_skill_pool(seed_i, family=fam, n_skills=n_skills, table_size=table_size,
+                                            n_examples=n_examples)
+                tid = f"{fam}/{task.task_id}"
+                for arm in arms:
+                    if arm == "oracle":
                         if spent >= max_cost_usd:
-                            dropped.append(f"{se['model']}/{task.task_id}/{arm}_k{k}")
+                            dropped.append(f"{se['model']}/{tid}/oracle")
                             continue
-                        case = await _solve_sb_one(backend, se, task, arm=arm, k=k, pool=pool,
+                        case = await _solve_sb_one(backend, se, task, arm="oracle", k=0, pool=pool,
                                                    max_tokens=max_tokens, effort=effort,
-                                                   seed=seed_for(run_id, f"{task.task_id}-{arm}_k{k}"))
+                                                   seed=seed_for(run_id, f"{tid}-oracle"))
                         case.run_id = run_id
                         spent += case.cost_usd
                         cases.append(case)
                         store.record_case(case.to_case_record())
+                    else:
+                        for k in ks:
+                            if spent >= max_cost_usd:
+                                dropped.append(f"{se['model']}/{tid}/{arm}_k{k}")
+                                continue
+                            case = await _solve_sb_one(backend, se, task, arm=arm, k=k, pool=pool,
+                                                       max_tokens=max_tokens, effort=effort,
+                                                       seed=seed_for(run_id, f"{tid}-{arm}_k{k}"))
+                            case.run_id = run_id
+                            spent += case.cost_usd
+                            cases.append(case)
+                            store.record_case(case.to_case_record())
 
     summary = aggregate_capability_skill_bloat(cases, solver_entries, ks,
-                                               confidence=confidence, run_id=run_id)
+                                               confidence=confidence, run_id=run_id, families=families)
     summary["budget"] = {"spent_usd": round(spent, 6), "max_usd": max_cost_usd,
                          "incomplete": bool(dropped), "dropped_cells": dropped}
     summary["table_size"] = table_size
