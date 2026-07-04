@@ -12,16 +12,20 @@ import pytest
 from brainregion.eval import capability as cap
 from brainregion.eval.capability import (
     SkillBloatCase,
+    _classify_family_by_shapes,
     _sb_cell_name,
     _sb_gen_correct,
     _sb_gen_distractors,
     _sb_gen_task,
     _sb_parse_output,
     _shannon_entropy,
+    aggregate_capability_mixed_router,
     aggregate_capability_skill_bloat,
+    gen_mixed_pool,
     gen_skill_pool,
     get_family,
     render_skill_bloat_prompt,
+    run_capability_eval_mixed_router,
     run_capability_eval_skill_bloat,
 )
 from brainregion.providers.base import ModelResponse
@@ -326,3 +330,207 @@ def test_skill_bloat_markdown_renders_multifamily():
     assert "skill-bloat,多家族" in md and "Overall" in md
     assert "degradation_at_k8" in md and "✅" in md              # generalizes 标记
     assert "family=decode" in md and "family=sort" in md
+
+
+# ── Phase 3E:mixed-pool + 跨区域 router ───────────────────────────────────────
+
+def _mixed_pool(fam="decode", families=("decode", "filter"), n_within=2, n_cross=2):
+    return gen_mixed_pool(11, correct_family=fam, families=list(families), n_within=n_within,
+                          n_cross_per_family=n_cross, table_size=12, n_examples=2)
+
+
+def test_gen_mixed_pool_structure():
+    task, fp = _mixed_pool("decode", ("decode", "filter"), n_within=3, n_cross=4)
+    assert task.family == "decode"
+    assert fp["decode"][0].name == task.correct.name          # correct 在 correct 家族首位
+    assert len(fp["decode"]) == 1 + 3                          # correct + n_within
+    assert len(fp["filter"]) == 4                              # 每别家族 n_cross
+    for s in fp["filter"]:
+        assert s.family == "filter"                           # cross 来自别族
+    assert sum(len(v) for v in fp.values()) == 1 + 3 + 4
+
+
+def test_gen_mixed_pool_rejects_bad_inputs():
+    with pytest.raises(ValueError):
+        gen_mixed_pool(1, correct_family="decode", families=["decode"], n_within=2, n_cross_per_family=2,
+                       table_size=12, n_examples=2)           # <2 家族
+    with pytest.raises(ValueError):
+        gen_mixed_pool(1, correct_family="bogus", families=["decode", "filter"], n_within=2,
+                       n_cross_per_family=2, table_size=12, n_examples=2)  # correct_family 不在 families
+
+
+@pytest.mark.parametrize("fam", ["decode", "filter", "sort"])
+def test_classify_family_by_shapes(fam):
+    """形状分类器对真实生成 task 100% 路由到正确家族(sanity:操作类型可从 I/O 形状辨 → 路由任务良态)。"""
+    correct = _sb_gen_correct(5, family=fam, table_size=12)
+    task = _sb_gen_task(55, correct, n_examples=2)
+    assert _classify_family_by_shapes(task) == fam
+
+
+@pytest.mark.asyncio
+async def test_route_family_llm_parses_and_fails(monkeypatch, tmp_path):
+    monkeypatch.setenv("UNITY_PROJECT_ROOT", str(tmp_path))
+    task, _ = _mixed_pool()
+
+    class _B:
+        async def complete(self, **kw):
+            return ModelResponse(model=kw["model"], content="decode", usage={"prompt_tokens": 40},
+                                 cost_usd=0.001)
+    routed, r_in, r_cost, r_fail, raw = await cap.route_family_llm(_B(), {"model": "r", "endpoint_id": None},
+                                                                   task, ["decode", "filter"])
+    assert routed == "decode" and r_fail is False and r_cost == 0.001 and r_in == 40
+
+    class _BFail:                                              # 路由调用抛错 → failed tuple
+        async def complete(self, **kw):
+            raise RuntimeError("boom")
+    routed2, _, _, r_fail2, _ = await cap.route_family_llm(_BFail(), {"model": "r", "endpoint_id": None},
+                                                           task, ["decode", "filter"])
+    assert routed2 == "" and r_fail2 is True
+
+
+@pytest.mark.asyncio
+async def test_solve_mixed_one_arms(monkeypatch, tmp_path):
+    monkeypatch.setenv("UNITY_PROJECT_ROOT", str(tmp_path))
+    task, fp = _mixed_pool("decode", ("decode", "filter"), n_within=2, n_cross=2)
+    gold = '{"result":' + str(list(task.gold)).replace("'", '"') + '}'
+    entry = {"model": "s", "endpoint_id": None}
+    # oracle:喂 gold → solved
+    rec_o = await cap._solve_mixed_one(_FakeBackend([(gold, None)]), entry, task, fp, arm="oracle",
+                                        correct_family="decode", max_tokens=4096, effort=None, seed=1)
+    assert rec_o.outcome == "solved" and rec_o.pool_mode == "mixed"
+    # mixed_all:chosen = 全 pool(2+3 = 5 跨 decode+filter);喂 gold → solved
+    rec_a = await cap._solve_mixed_one(_FakeBackend([(gold, None)]), entry, task, fp, arm="mixed_all",
+                                        correct_family="decode", max_tokens=4096, effort=None, seed=2)
+    assert rec_a.outcome == "solved"
+    assert rec_a.inventory_tokens > rec_o.inventory_tokens     # mixed_all doc > oracle doc
+    # router_gold:chosen ⊆ 正确家族;喂 gold → solved;inventory 介于 oracle 与 mixed_all
+    rec_g = await cap._solve_mixed_one(_FakeBackend([(gold, None)]), entry, task, fp, arm="router_gold",
+                                        correct_family="decode", max_tokens=4096, effort=None, seed=3)
+    assert rec_g.outcome == "solved"
+    assert rec_o.inventory_tokens < rec_g.inventory_tokens < rec_a.inventory_tokens
+    # router(正确路由):route_correct=1 → chosen=decode 族 → 喂 gold solved
+    rec_rc = await cap._solve_mixed_one(_FakeBackend([(gold, None)]), entry, task, fp, arm="router",
+                                         correct_family="decode", routed=("decode", 40, 0.001, False, ""),
+                                         max_tokens=4096, effort=None, seed=4)
+    assert rec_rc.route_correct == 1 and rec_rc.routed_family == "decode" and rec_rc.routing_cost_usd == 0.001
+    # router(误路由到 filter):route_correct=0 → chosen=filter 族(correct 不在);喂非-gold → unsolved
+    rec_rw = await cap._solve_mixed_one(_FakeBackend([('{"result":["Z"]}', None)]), entry, task, fp,
+                                         arm="router", correct_family="decode",
+                                         routed=("filter", 40, 0.001, False, ""),
+                                         max_tokens=4096, effort=None, seed=5)
+    assert rec_rw.route_correct == 0 and rec_rw.outcome == "unsolved"
+    # router(路由彻底失败):不调主脑 → route_fail
+    rec_rf = await cap._solve_mixed_one(_FakeBackend([]), entry, task, fp, arm="router",
+                                         correct_family="decode", routed=("", 0, 0.0, True, ""),
+                                         max_tokens=4096, effort=None, seed=6)
+    assert rec_rf.outcome == "route_fail" and rec_rf.route_correct == 0
+
+
+def _mxcase(task_id, correct_family, arm, solved, *, solver="s", route_correct=-1, routed="", rea=0):
+    return SkillBloatCase(run_id="r", task_id=task_id, cell=arm, solver=solver, arm=arm, k=0,
+                          n_skills=20, table_size=12, family=correct_family, difficulty=12.0,
+                          pool_mode="mixed", correct_family=correct_family, routed_family=routed,
+                          route_correct=route_correct, valid_output=1, inventory_tokens=100,
+                          input_tokens=200, reasoning_tokens=rea,
+                          outcome=("solved" if solved else "unsolved"), solved=1 if solved else 0)
+
+
+def test_aggregate_mixed_decomposition():
+    """oracle/router_gold 全解、mixed_all 全败、router 全解(正确路由)→ cross_region_value>0,
+    within_region_bloat=0,route_accuracy=1.0。"""
+    cases = []
+    for fam in ("decode", "filter"):
+        for i in range(3):
+            tid = f"{fam}-t{i}"
+            cases.append(_mxcase(tid, fam, "oracle", True))
+            cases.append(_mxcase(tid, fam, "router_gold", True))
+            cases.append(_mxcase(tid, fam, "mixed_all", False))
+            cases.append(_mxcase(tid, fam, "router", True, route_correct=1, routed=fam))
+    summ = aggregate_capability_mixed_router(cases, [{"model": "s"}], confidence=0.95, run_id="r",
+                                             families=["decode", "filter"])
+    cr = summ["per_family"]["decode"]["contrasts"]["cross_region_value"]["s"]["risk_difference"]
+    assert cr["point"] is not None and cr["point"] > 0                    # router_gold 解 > mixed_all
+    wr = summ["per_family"]["decode"]["contrasts"]["within_region_bloat"]["s"]["risk_difference"]
+    assert wr["point"] == 0                                               # oracle == router_gold
+    assert summ["overall"]["macro_mean"]["cross_region_value"]["s"] > 0
+    assert summ["overall"]["route_accuracy"]["s"] == 1.0
+
+
+@pytest.mark.asyncio
+async def test_runner_mixed_structure_and_store(monkeypatch, tmp_path):
+    monkeypatch.setenv("UNITY_PROJECT_ROOT", str(tmp_path))
+    task0, _ = gen_mixed_pool(101, correct_family="decode", families=["decode", "filter"],
+                              n_within=2, n_cross_per_family=2, table_size=12, n_examples=2)
+    gold = '{"result":' + str(list(task0.gold)).replace("'", '"') + '}'
+
+    class _B:
+        async def complete(self, **kw):
+            content = "decode" if "技能路由器" in kw.get("system", "") else gold   # 路由→家族;主脑→gold
+            return ModelResponse(model=kw["model"], content=content, usage={"prompt_tokens": 50},
+                                 cost_usd=0.0)
+
+    recorded = []
+    monkeypatch.setattr(cap.store, "record_case", lambda rec: recorded.append(rec))
+    cases, entry = await run_capability_eval_mixed_router(
+        families=["decode", "filter"], table_size=12, n_examples=2, n_instances=2, base_seed=101,
+        n_within=2, n_cross_per_family=2, arms=["oracle", "mixed_all", "router_gold", "router"],
+        solver_entries=[{"model": "s", "endpoint_id": None}],
+        router_entry={"model": "r", "endpoint_id": None}, backend=_B(), run_id="run-mixed")
+    assert {c.correct_family for c in cases} == {"decode", "filter"}      # 两 correct_family 都跑
+    assert {c.arm for c in cases} == {"oracle", "mixed_all", "router_gold", "router"}
+    assert len(recorded) == len(cases)                                    # 每 case 入库
+    assert entry.summary["router_model"] == "r"
+
+
+@pytest.mark.asyncio
+async def test_runner_mixed_cost_gate_trips(monkeypatch, tmp_path):
+    monkeypatch.setenv("UNITY_PROJECT_ROOT", str(tmp_path))
+
+    class _B:
+        async def complete(self, **kw):
+            content = "decode" if "技能路由器" in kw.get("system", "") else '{"result":["X"]}'
+            return ModelResponse(model=kw["model"], content=content, usage={"prompt_tokens": 50},
+                                 cost_usd=0.01)
+
+    cases, entry = await run_capability_eval_mixed_router(
+        families=["decode", "filter"], table_size=12, n_examples=2, n_instances=2, base_seed=200,
+        n_within=2, n_cross_per_family=2, arms=["oracle", "mixed_all", "router_gold", "router"],
+        solver_entries=[{"model": "s", "endpoint_id": None}],
+        router_entry={"model": "r", "endpoint_id": None}, backend=_B(), run_id="run-mixed2",
+        max_cost_usd=0.05)
+    assert entry.summary["budget"]["incomplete"] is True
+
+
+def test_mixed_router_markdown_renders():
+    from brainregion.cli import _capability_mixed_router_markdown
+    result = {
+        "run_id": "r1", "mode": "skill_bloat_mixed", "n_instances": 2, "solvers": ["s"],
+        "router_model": "r", "claim_scope": "test",
+        "summary": {
+            "families": ["decode", "filter"], "table_size": 12, "n_examples": 2, "n_within": 8,
+            "n_cross_per_family": 8, "base_seed": 700,
+            "per_family": {
+                "decode": {"per_cell": {"s|oracle": {"solve_rate": 1.0, "reasoning_tokens_mean": 100,
+                                                      "inventory_tokens_mean": 80, "cost_mean": 0.001},
+                                         "s|router_gold": {"solve_rate": 0.9, "reasoning_tokens_mean": 300,
+                                                           "inventory_tokens_mean": 200, "cost_mean": 0.002},
+                                         "s|mixed_all": {"solve_rate": 0.4, "reasoning_tokens_mean": 800,
+                                                         "inventory_tokens_mean": 600, "cost_mean": 0.004},
+                                         "s|router": {"solve_rate": 0.85, "reasoning_tokens_mean": 320,
+                                                      "inventory_tokens_mean": 200, "cost_mean": 0.002}},
+                              "contrasts": {"cross_region_value": {"s": {"risk_difference": {"point": 0.5,
+                                                                                              "low": 0.1, "high": 0.8},
+                                                                         "n": 6}}},
+                              "route_accuracy": {"s": 0.95}},
+            },
+            "overall": {"macro_mean": {"cross_region_value": {"s": 0.5},
+                                       "within_region_bloat": {"s": 0.1},
+                                       "routing_error_cost_solve": {"s": 0.05}},
+                        "route_accuracy": {"s": 0.95}},
+            "budget": {"incomplete": False}, "note": "test note",
+        },
+    }
+    md = _capability_mixed_router_markdown(result)
+    assert "跨区域 router" in md and "cross_region_value" not in md      # 用描述名非 key
+    assert "跨区域 scoping" in md and "route_accuracy" in md
+    assert "correct_family=decode" in md and "mixed_all" in md and "router_gold" in md

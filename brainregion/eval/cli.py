@@ -30,10 +30,12 @@ from .routing import (
 from .capability import (
     _ARM_NAMES,
     _SB_ARMS,
+    _SB_MIXED_ARMS,
     build_capability_variants,
     get_family,
     load_memory_seeds,
     run_capability_eval,
+    run_capability_eval_mixed_router,
     run_capability_eval_skill_bloat,
 )
 from .outcome import DEFAULT_OUTCOME_VARIANTS, OutcomeVariant, run_outcome_eval
@@ -439,6 +441,8 @@ async def _run_capability_skill_bloat(args, dd) -> dict:
     n_instances = int(args.n)
     if n_instances < 1:
         raise SystemExit(f"n>=1,got {n_instances}")
+    if getattr(args, "sb_pool", "single") == "mixed":        # Phase 3E:mixed pool + 跨区域 router
+        return await _run_capability_mixed_router(args, dd)
     try:
         ks = [int(x) for x in str(args.sb_inventory or "").split(",") if str(x).strip()]
     except ValueError:
@@ -494,6 +498,70 @@ async def _run_capability_skill_bloat(args, dd) -> dict:
         "n_instances": n_instances,
         "variants": entry.variants,
         "solvers": entry.judge_models,
+        "claim_scope": entry.summary.get("claim_scope"),
+        "summary": entry.summary,
+        "exported_jsonl": exported,
+    }
+
+
+async def _run_capability_mixed_router(args, dd) -> dict:
+    """Phase 3E `--skill-bloat --sb-pool mixed`:混合家族 pool + 跨区域 router。
+    现实 LLM router(读示例+家族描述)路由到家族 → 主脑只看该族 skill。
+    oracle gap 分解:cross_region_value(头条)/ within_region_bloat(router 修不了)/ routing_error_cost。"""
+    n_instances = int(args.n)
+    if n_instances < 1:
+        raise SystemExit(f"n>=1,got {n_instances}")
+    families = [f.strip() for f in str(getattr(args, "sb_families", "") or "").split(",") if f.strip()]
+    if not families:
+        families = ["decode", "filter"]
+    for f in families:
+        try:
+            get_family(f)
+        except ValueError as e:
+            raise SystemExit(f"--sb-families 非法:{e}")
+    if len(families) < 2:
+        raise SystemExit(f"--sb-pool mixed 需 ≥2 家族(跨区域路由),got {families}")
+    table_size = int(args.sb_table_size)
+    n_examples = int(args.sb_examples)
+    n_within = int(getattr(args, "sb_n_within", 8))
+    n_cross = int(getattr(args, "sb_n_cross", 8))
+    max_tokens = int(getattr(args, "sb_max_tokens", 4096))
+    arms = [a.strip() for a in str(args.sb_arms or "").split(",") if a.strip()]
+    if not arms:
+        arms = list(_SB_MIXED_ARMS)
+    if bad := [a for a in arms if a not in _SB_MIXED_ARMS]:
+        raise SystemExit(f"--sb-arms(mixed)非法 {bad}(合法: {list(_SB_MIXED_ARMS)})")
+    if table_size <= n_examples * 3:
+        raise SystemExit(f"--sb-table-size({table_size}) 需 > 3×--sb-examples({n_examples});skill 非必要")
+    if "filter" in families and table_size < 8:
+        raise SystemExit(f"--sb-table-size({table_size}) 需 ≥8(filter gold 空间)")
+    max_cost = float(args.max_cost_usd)
+    if max_cost <= 0:
+        raise SystemExit(f"--max-cost-usd>0,got {max_cost}")
+
+    endpoints_cfg = dd.get("endpoints") or {}
+    endpoint_ids = set((_resolve_endpoints(endpoints_cfg) or {}).keys())
+    solver_specs = args.solvers or [dd.get("normalizer_model", "claude-opus-4-8")]
+    solver_entries = [_normalize_one(s, endpoint_ids, endpoints_cfg) for s in solver_specs]
+    router_entry = _normalize_one(args.sb_router_model, endpoint_ids, endpoints_cfg)
+    backend = LiteLLMBackend(timeout=float(dd.get("timeout", 90)),
+                             endpoint_registry=_resolve_endpoints(endpoints_cfg))
+
+    run_id = make_run_id()
+    _cases, entry = await run_capability_eval_mixed_router(
+        families=families, table_size=table_size, n_examples=n_examples, n_instances=n_instances,
+        base_seed=int(args.seed), n_within=n_within, n_cross_per_family=n_cross, arms=arms,
+        solver_entries=solver_entries, router_entry=router_entry, backend=backend, run_id=run_id,
+        max_tokens=max_tokens, max_cost_usd=max_cost, effort=args.effort,
+    )
+    exported = store.export_jsonl(run_id, args.export) if getattr(args, "export", None) else None
+    return {
+        "run_id": run_id,
+        "mode": "skill_bloat_mixed",
+        "n_instances": n_instances,
+        "variants": entry.variants,
+        "solvers": entry.judge_models,
+        "router_model": router_entry["model"],
         "claim_scope": entry.summary.get("claim_scope"),
         "summary": entry.summary,
         "exported_jsonl": exported,
