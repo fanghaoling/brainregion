@@ -290,6 +290,37 @@ def test_shannon_entropy_empty_and_uniform():
     assert _shannon_entropy(["a", "b"]) == 1.0              # 均匀 2 类 → 熵 1 bit
 
 
+def test_skill_bloat_markdown_renders():
+    """渲染器不抛(list.append 2-arg 回归防护);覆盖 budget.incomplete + note 分支。"""
+    from brainregion.cli import _capability_skill_bloat_markdown
+    result = {
+        "run_id": "r1", "mode": "skill_bloat", "n_instances": 2, "solvers": ["s"],
+        "claim_scope": "test scope",
+        "summary": {
+            "ks": [8], "arms": ["oracle", "plausible", "garbage", "random_subset"],
+            "table_size": 12, "n_examples": 2, "n_skills": 128, "base_seed": 700, "max_tokens": 4096,
+            "k_curve": {"s": {"oracle": 1.0, "plausible": {"8": 0.5},
+                              "garbage": {"8": 0.9}, "random_subset": {"8": 0.3}}},
+            "contrasts": {
+                "degradation_at_k8": {"s": {"risk_difference": {"point": 0.5, "low": 0.1, "high": 0.9}, "n": 5}},
+                "plausibility_effect_at_k8": {"s": {"risk_difference": {"point": 0.4}, "n": 5}},
+                "coverage_value_at_k8": {"s": {"risk_difference": {"point": 0.2}, "n": 5}},
+                "reasoning_cost_at_k8": {"s": {"mean_diff": {"point": 1400, "low": 100, "high": 2700}, "n": 5}},
+                "bloat_slope": {"s": {"solve_kmin": 0.5, "solve_kmax": 0.3, "slope": 0.2}},
+            },
+            "per_cell": {"s|plausible_k8": {"wrong_selection_rate": 0.2, "top_distractor": "Decode-3",
+                                            "selection_entropy": 1.5, "inventory_tokens_mean": 900,
+                                            "reasoning_tokens_mean": 1600,
+                                            "outcome_breakdown": {"solved": 3, "unsolved": 2}}},
+            "budget": {"incomplete": True, "spent_usd": 0.5, "max_usd": 5.0, "dropped_cells": ["x"]},
+            "note": "test note",
+        },
+    }
+    md = _capability_skill_bloat_markdown(result)
+    assert "skill-bloat" in md and "degradation_k8" in md
+    assert "reasoning_cost_k8" in md and "预算超限" in md   # 覆盖 budget append 分支
+
+
 def test_aggregate_reasoning_cost_contrast():
     """deepseek 头条信号:plausible 比 oracle 花更多 reasoning_tok → reasoning_cost_at_k > 0。"""
     cases = []

@@ -430,9 +430,9 @@ def _capability_skill_bloat_markdown(result: dict) -> str:
                          f"outcomes={m.get('outcome_breakdown')}")
     budget = s.get("budget") or {}
     if budget.get("incomplete"):
-        lines.append("", f"⚠️ 预算超限 incomplete:dropped {len(budget.get('dropped_cells') or [])} cells "
-                         f"(spent={budget.get('spent_usd')}/{budget.get('max_usd')})")
-    lines.append("", f"_{s.get('note')}_")
+        lines += ["", f"⚠️ 预算超限 incomplete:dropped {len(budget.get('dropped_cells') or [])} cells "
+                    f"(spent={budget.get('spent_usd')}/{budget.get('max_usd')})"]
+    lines += ["", f"_{s.get('note')}_"]
     return "\n".join(lines)
 
 
