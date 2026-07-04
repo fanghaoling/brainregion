@@ -9,8 +9,11 @@ Memory 是第一个 ContextProvider；未来 Code / Git / Logs 各成一个 Prov
 """
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Literal, Protocol, runtime_checkable
+
+_logger = logging.getLogger("brainregion.core.context")
 
 
 @dataclass
@@ -93,3 +96,35 @@ def render_context_blocks(blocks: list[ContextBlock]) -> str:
     if ref_parts:
         out.append("\n\n".join(ref_parts))
     return "\n\n".join(out)
+
+
+class ProviderRegistry:
+    """ContextProvider 名 → 实例注册表(填 §15.5 gap:此前无 provider discovery,MemoryProvider 内联直调)。
+
+    重复注册 **warn + 覆盖**;``get`` 未知名返 None。本期校验 **warn-only**(不 raise,避免破坏现有
+    内联 ``source`` 字符串路径)。SkillManifest kind=provider 的 ``ref`` 经此解析为 ContextProvider body。
+    """
+
+    def __init__(self) -> None:
+        self._providers: dict[str, ContextProvider] = {}
+
+    def register(self, name: str, provider: ContextProvider) -> None:
+        name = (name or "").strip()
+        if not name:
+            raise ValueError("provider name cannot be empty")
+        if name in self._providers:
+            _logger.warning("ProviderRegistry: 覆盖已注册 provider %r", name)
+        self._providers[name] = provider
+
+    def get(self, name: str) -> ContextProvider | None:
+        return self._providers.get((name or "").strip())
+
+    def has(self, name: str) -> bool:
+        return (name or "").strip() in self._providers
+
+    def list_names(self) -> list[str]:
+        return sorted(self._providers)
+
+
+# 模块级默认注册表(server startup 注册 MemoryProvider 为 "memory";SkillRegistry bootstrap 从此校验 ref)。
+default_provider_registry = ProviderRegistry()

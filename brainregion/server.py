@@ -48,6 +48,11 @@ from .core.engine import ReviewEngine  # noqa: E402
 from .core.planner import PlanRequest, PlannerEngine  # noqa: E402
 from .core.regions import REGIONS_DIR, load_regions as _load_regions  # noqa: E402
 from .core.regions import route_regions as _route_regions  # noqa: E402
+from .core.skills import (  # noqa: E402
+    SKILLS_DIR as _SKILLS_DIR,
+    SkillRegistry as _SkillRegistry,
+    load_skills as _load_skills,
+)
 from .core.report import CanonicalFinding, Finding, ReviewReport  # noqa: E402
 from .core.reviewers.loader import list_reviewers as _list_reviewer_files  # noqa: E402
 from .core.workflow import suggest_workflow as _suggest_workflow  # noqa: E402
@@ -56,6 +61,7 @@ from .core.stages import CORE_REVIEWERS_DIR, build_default_pipeline  # noqa: E40
 from .core import ReviewDocument  # noqa: E402
 from .knowledge import YamlKnowledgeProvider  # noqa: E402
 from .core.context import ContextQuery as _ContextQuery  # noqa: E402
+from .core.context import default_provider_registry as _default_provider_registry  # noqa: E402
 from .memory import MemoryProvider, MemoryScope, governance, store as memory_store  # noqa: E402
 from .privacy import build_policy  # noqa: E402
 from .providers import LiteLLMBackend  # noqa: E402
@@ -1445,6 +1451,42 @@ def list_regions() -> dict:
     """List available Brain Regions."""
     regions = [region.to_dict() for region in _load_regions(REGIONS_DIR)]
     return {"regions": regions}
+
+
+# ── Phase 4:Skill/Region Manifest + Registry(三级结构地基;list_skills = discovery surface)──
+# lazy bootstrap(首次访问建):ProviderRegistry 注册 MemoryProvider → load skill YAML(校验 provider ref)
+# → SkillRegistry。declares skills 但**不接 production routing**(status=experimental;与硬编码 map 共存)。
+_skill_registry_singleton: _SkillRegistry | None = None
+
+
+def _skill_registry() -> _SkillRegistry:
+    """Build-once SkillRegistry(模块级 lazy;bootstrap 顺序:provider 先于 skill YAML 校验)。"""
+    global _skill_registry_singleton
+    if _skill_registry_singleton is not None:
+        return _skill_registry_singleton
+    _default_provider_registry.register("memory", MemoryProvider.from_store())   # drift:与 server 内联 wiring 同源
+    region_ids = {r.id for r in _load_regions(REGIONS_DIR)}
+    manifests = _load_skills(
+        _SKILLS_DIR,
+        region_exists=lambda rid: rid in region_ids,
+        provider_exists=lambda name: _default_provider_registry.has(name),
+    )
+    reg = _SkillRegistry()
+    for m in manifests:
+        reg.register(m)
+    _skill_registry_singleton = reg
+    return reg
+
+
+@mcp.tool()
+def list_skills(region: str | None = None) -> dict:
+    """List registered Skill manifests(manifest-only, sanitized;status=experimental = 未接 production routing)。
+
+    Phase 4 discovery surface(Router API 调用点);不泄露 body ref,不触发 resolve。
+    """
+    reg = _skill_registry()
+    manifests = reg.by_region(region) if region else reg.all_manifests()
+    return {"skills": [m.to_public_dict() for m in manifests], "count": len(manifests)}
 
 
 @mcp.tool()

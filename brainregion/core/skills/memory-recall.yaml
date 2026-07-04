@@ -1,0 +1,13 @@
+id: memory-recall
+name: Memory Recall
+region: memory
+kind: provider
+description: >-
+  Recall recorded project experience (decisions, failures, constraints, feedback, advice) via
+  keyword search over the memory store, scoped to activated regions. The main brain uses this to
+  avoid re-deriving hard-won project-specific knowledge.
+tags: [memory, experience, recall, history, decisions]
+version: {}
+ref: memory
+status: experimental
+metadata: {}
