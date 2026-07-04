@@ -63,6 +63,7 @@ from .knowledge import YamlKnowledgeProvider  # noqa: E402
 from .core.context import ContextQuery as _ContextQuery  # noqa: E402
 from .core.context import default_provider_registry as _default_provider_registry  # noqa: E402
 from .memory import MemoryProvider, MemoryScope, governance, store as memory_store  # noqa: E402
+from .git import GitProvider  # noqa: E402
 from .privacy import build_policy  # noqa: E402
 from .providers import LiteLLMBackend  # noqa: E402
 
@@ -1465,6 +1466,7 @@ def _skill_registry() -> _SkillRegistry:
     if _skill_registry_singleton is not None:
         return _skill_registry_singleton
     _default_provider_registry.register("memory", MemoryProvider.from_store())   # drift:与 server 内联 wiring 同源
+    _default_provider_registry.register("git", GitProvider.from_repo())  # Phase 6:零成本注册(git 惰性跑)
     region_ids = {r.id for r in _load_regions(REGIONS_DIR)}
     manifests = _load_skills(
         _SKILLS_DIR,

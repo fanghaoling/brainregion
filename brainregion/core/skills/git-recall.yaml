@@ -1,0 +1,13 @@
+id: git-recall
+name: Git History Recall
+region: review
+kind: provider
+description: >-
+  Recall recent git history (commits and changed files) via keyword search over the
+  repository's commit log. Surfaces what recently changed around the query — useful when
+  reviewing recent changes or tracing when something broke.
+tags: [git, history, commits, changes, diff, vcs, recent]
+version: {}
+ref: git
+status: experimental
+metadata: {}
