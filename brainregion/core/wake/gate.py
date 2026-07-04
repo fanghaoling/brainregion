@@ -24,6 +24,7 @@ from typing import Any
 
 from ..regions import REGIONS_DIR, RegionDefinition, load_regions, route_regions
 from ..regions.loader import _normalize
+from ..regions.router import KeywordRouter, use_router_api
 from ..workflow import _build_actions
 
 # 内置 sentinel fallback（region yaml 无 sentinel_keywords 时用）。key 必须是已加载的 region id，
@@ -119,15 +120,22 @@ def wake_gate(
 
     regions = regions if regions is not None else load_regions(regions_dir)
     region_ids = {r.id for r in regions}
-    routing = route_regions(
-        goal=goal,
-        problem=problem,
-        context=context,
-        files=files,
-        top_k=top_k,
-        regions=regions,
-        regions_dir=regions_dir,
-    )
+    router_api = use_router_api()
+    if router_api:
+        # USE_ROUTER_API seam:关=route_regions 现状;开=KeywordRouter(==route_regions,等价回归保证)。
+        # 以后换 manifest/LLM router 改这一处(全 runtime 换)。GPT round-2:无消费者的 Router API 无意义。
+        routing = KeywordRouter(regions).route(
+            goal=goal, problem=problem, context=context, files=files, top_k=top_k)
+    else:
+        routing = route_regions(
+            goal=goal,
+            problem=problem,
+            context=context,
+            files=files,
+            top_k=top_k,
+            regions=regions,
+            regions_dir=regions_dir,
+        )
     candidates = list(routing.get("candidates", []))
 
     # --- retrieve（不调模型；route_regions 已做 negative_triggers 降噪）---
@@ -237,6 +245,7 @@ def wake_gate(
             "shadow_promoted": shadow_promoted,
             "models_called": False,
             "reverse_wake_triggered": reverse["triggered"],
+            "use_router_api": router_api,
             "routing_trace": routing.get("trace", {}),
         },
     }

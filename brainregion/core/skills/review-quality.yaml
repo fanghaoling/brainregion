@@ -1,0 +1,12 @@
+id: review-quality
+name: Review Quality Consultant
+region: review
+kind: consultant
+description: >-
+  Review code and documents for correctness, completeness, edge cases, actionability,
+  and clarity. Surface defects and propose concrete improvements.
+tags: [review, correctness, completeness, edge_case, actionability, clarity, defect]
+version: {}
+ref: ""
+status: experimental
+metadata: {}

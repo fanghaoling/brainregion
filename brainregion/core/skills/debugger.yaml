@@ -1,0 +1,12 @@
+id: debugger
+name: Debugger Consultant
+region: debugging
+kind: consultant
+description: >-
+  Diagnose bugs, crashes, errors, stack traces, exceptions, race conditions, deadlocks,
+  null references, and logic failures. Propose root-cause hypotheses and targeted fixes.
+tags: [bug, crash, error, exception, stacktrace, race, deadlock, null, fix, debugging]
+version: {}
+ref: ""
+status: experimental
+metadata: {}

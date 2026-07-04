@@ -1,0 +1,12 @@
+id: security-audit
+name: Security Audit Consultant
+region: security
+kind: consultant
+description: >-
+  Audit for injection (SQLi/XSS), auth and authorization flaws, secret or credential
+  leakage, unsafe deserialization, and privilege escalation. Recommend hardening.
+tags: [security, injection, sqli, xss, auth, secret, credential, privilege, vulnerability]
+version: {}
+ref: ""
+status: experimental
+metadata: {}

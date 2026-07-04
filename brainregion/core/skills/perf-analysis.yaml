@@ -1,0 +1,12 @@
+id: perf-analysis
+name: Performance Analysis Consultant
+region: performance
+kind: consultant
+description: >-
+  Analyze performance bottlenecks, latency, frame time, memory allocations, GC pressure,
+  and algorithmic complexity. Suggest optimizations and profiling targets.
+tags: [performance, latency, framerate, memory, gc, allocation, bottleneck, optimization, profiling]
+version: {}
+ref: ""
+status: experimental
+metadata: {}
