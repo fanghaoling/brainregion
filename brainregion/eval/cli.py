@@ -450,6 +450,8 @@ async def _run_capability_skill_bloat(args, dd) -> dict:
     if not ks or any(k < 1 for k in ks):
         raise SystemExit(f"--sb-inventory 需正整数列表,got {args.sb_inventory}")
     arms = [a.strip() for a in str(args.sb_arms or "").split(",") if a.strip()]
+    if not arms:
+        arms = list(_SB_ARMS)
     bad = [a for a in arms if a not in _SB_ARMS]
     if bad:
         raise SystemExit(f"--sb-arms 非法 {bad}(合法: {list(_SB_ARMS)})")

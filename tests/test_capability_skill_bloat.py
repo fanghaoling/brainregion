@@ -374,11 +374,19 @@ async def test_route_family_llm_parses_and_fails(monkeypatch, tmp_path):
 
     class _B:
         async def complete(self, **kw):
-            return ModelResponse(model=kw["model"], content="decode", usage={"prompt_tokens": 40},
+            return ModelResponse(model=kw["model"], content='{"family": "decode"}', usage={"prompt_tokens": 40},
                                  cost_usd=0.001)
     routed, r_in, r_cost, r_fail, raw = await cap.route_family_llm(_B(), {"model": "r", "endpoint_id": None},
                                                                    task, ["decode", "filter"])
     assert routed == "decode" and r_fail is False and r_cost == 0.001 and r_in == 40
+
+    class _BPlain:                                            # 非 JSON 输出 → 回退扫描家族名(防御解析)
+        async def complete(self, **kw):
+            return ModelResponse(model=kw["model"], content="家族是 filter", usage={"prompt_tokens": 40},
+                                 cost_usd=0.0)
+    routed_p, _, _, r_fail_p, _ = await cap.route_family_llm(_BPlain(), {"model": "r", "endpoint_id": None},
+                                                             task, ["decode", "filter"])
+    assert routed_p == "filter" and r_fail_p is False
 
     class _BFail:                                              # 路由调用抛错 → failed tuple
         async def complete(self, **kw):

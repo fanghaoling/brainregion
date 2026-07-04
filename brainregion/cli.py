@@ -163,8 +163,9 @@ def build_parser() -> argparse.ArgumentParser:
                        help="逗号分隔家族(registry:decode=map/filter=subset 跨模型通用;sort=reorder 仅推理"
                             "模型(deepseek)能执行,glm 非 oracle<0.9 floor)")
     p_cap.add_argument("--sb-inventory", default="2,8,32", help="逗号分隔库存大小 K(Stage 1 早拐点;formal 可扩 64)")
-    p_cap.add_argument("--sb-arms", default="oracle,plausible,garbage,random_subset",
-                       help="逗号分隔臂子集(oracle=upper bound / plausible=bloat / garbage=token 对照 / random_subset=coverage)")
+    p_cap.add_argument("--sb-arms", default=None,
+                       help="逗号分隔臂子集(不传则按 --sb-pool 取全默认:single=oracle/plausible/garbage/random_subset;"
+                            "mixed=oracle/mixed_all/router_gold/router)")
     p_cap.add_argument("--sb-table-size", type=int, default=12,
                        help="alphabet 符号数(校准值 12:oracle≈1 + 退化可见;>3×--sb-examples 保 skill 必要)")
     p_cap.add_argument("--sb-examples", type=int, default=2, help="一致性示例数(校准值 2;揭示部分 alphabet 供选择)")

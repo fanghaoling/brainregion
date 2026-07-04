@@ -1553,13 +1553,13 @@ async def route_family_llm(backend, router_entry: dict, task: SkillBloatTask, fa
         "filter": "filter:保留子集(输出是输入的子序列,可能更短,丢弃部分符号)",
         "sort": "sort:优先级排序(输出与输入含相同符号,仅顺序改变)",
     }
-    system = ("你是一个技能路由器。给定任务示例(输入序列→正确输出序列),判断它属于下列哪个家族,"
-              "**只输出家族名(小写英文)**,不要解释、不要标点。\n候选家族:\n"
+    system = ("你是一个技能路由器。给定任务示例(输入序列→正确输出序列),判断它属于下列哪个家族。"
+              "**只输出 JSON {\"family\": \"<家族名>\"}**,不要解释、不要其他字段。\n候选家族:\n"
               + "\n".join(f"- {fam_desc.get(f, f)}" for f in families))
     lines = ["任务示例:"]
     for i, (inp, out) in enumerate(task.examples, 1):
         lines.append(f"  ({i}) 输入: {' '.join(inp)}    输出: {' '.join(out)}")
-    lines.append(f"从 {list(families)} 中选一个家族名。")
+    lines.append(f"从 {list(families)} 中选一个家族名,输出 JSON。")
     try:
         resp = await backend.complete(model=router_entry["model"], system=system, user="\n".join(lines),
                                        temperature=0.0, max_tokens=max_tokens, effort=None,
@@ -1571,7 +1571,18 @@ async def route_family_llm(backend, router_entry: dict, task: SkillBloatTask, fa
         return "", 0, cost, True, getattr(resp, "error", "") or "empty content"
     r_in, _, _ = _token_counts(getattr(resp, "usage", {}) or {})
     raw = (resp.content or "").strip().lower()
-    routed = next((f for f in families if f in raw), "")
+    routed = ""                                               # 先抽 JSON.family,回退扫描家族名(防御)
+    m = re.search(r"\{.*\}", raw, re.S)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            val = obj.get("family") if isinstance(obj, dict) else None
+            if val in families:
+                routed = val
+        except Exception:                                     # noqa: BLE001
+            pass
+    if not routed:
+        routed = next((f for f in families if f in raw), "")
     return routed, r_in, cost, False, raw
 
 
