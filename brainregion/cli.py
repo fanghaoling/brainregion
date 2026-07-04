@@ -156,6 +156,29 @@ def build_parser() -> argparse.ArgumentParser:
     p_cap.add_argument("--export", default=None, help="导出本次 run 为 JSONL 路径")
     p_cap.add_argument("--output", dest="output_format", default="json", choices=["json", "markdown"])
     p_cap.add_argument("--output-file", default=None)
+    # Phase 3D:skill-inventory bloat × region-scoping(架构提升 A/B)
+    p_cap.add_argument("--skill-bloat", action="store_true",
+                       help="Phase 3D:多家族 skill 库 bloat × region-scoping A/B(§0 generality + region 地基)")
+    p_cap.add_argument("--sb-families", default="decode,filter",
+                       help="逗号分隔家族(registry:decode=map/filter=subset 跨模型通用;sort=reorder 仅推理"
+                            "模型(deepseek)能执行,glm 非 oracle<0.9 floor)")
+    p_cap.add_argument("--sb-inventory", default="2,8,32", help="逗号分隔库存大小 K(Stage 1 早拐点;formal 可扩 64)")
+    p_cap.add_argument("--sb-arms", default=None,
+                       help="逗号分隔臂子集(不传则按 --sb-pool 取全默认:single=oracle/plausible/garbage/random_subset;"
+                            "mixed=oracle/mixed_all/router_gold/router)")
+    p_cap.add_argument("--sb-table-size", type=int, default=12,
+                       help="alphabet 符号数(校准值 12:oracle≈1 + 退化可见;>3×--sb-examples 保 skill 必要)")
+    p_cap.add_argument("--sb-examples", type=int, default=2, help="一致性示例数(校准值 2;揭示部分 alphabet 供选择)")
+    p_cap.add_argument("--sb-skills", type=int, default=128, help="pool 大小(≥ max K;random_subset 命中概率=K/pool)")
+    p_cap.add_argument("--sb-max-tokens", type=int, default=4096, help="输出 max_tokens(全 cell 固定)")
+    p_cap.add_argument("--sb-pool", default="single", choices=["single", "mixed"],
+                       help="single=§0 单家族 bloat(默认);mixed=Phase 3E 跨区域 router(混合家族 pool + 现实路由)")
+    p_cap.add_argument("--sb-n-within", type=int, default=8,
+                       help="[mixed] 正确家族内同族异参 distractor 数(= §0 同族内 bloat)")
+    p_cap.add_argument("--sb-n-cross", type=int, default=8,
+                       help="[mixed] 每个别家族的 cross-family distractor 数(= 跨区域噪声)")
+    p_cap.add_argument("--sb-router-model", default="modelbridge_openai/gpt-5.4-mini",
+                       help="[mixed] 现实路由小模型(读示例+家族描述→家族;默认 gpt-5.4-mini;haiku/flash 备选)")
 
     p_ins = sub.add_parser(
         "inspect",
@@ -366,6 +389,146 @@ def _capability_markdown(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _capability_skill_bloat_markdown(result: dict) -> str:
+    """Phase 3D 多家族 skill-bloat 汇总:overall(跨族 generality 头条)+ per-family(K×臂 + contrasts + 诊断)。"""
+    s = result.get("summary", {})
+    ks = s.get("ks") or []
+    families = s.get("families") or []
+    solvers = result.get("solvers") or []
+    lines = [
+        f"# Capability eval (skill-bloat,多家族) {result.get('run_id', '')}", "",
+        f"声明范围: {result.get('claim_scope', '')}",
+        f"solvers={solvers} families={families} ks={ks} arms={s.get('arms')} n={result.get('n_instances')} "
+        f"table_size={s.get('table_size')} n_examples={s.get('n_examples')} pool={s.get('n_skills')} "
+        f"base_seed={s.get('base_seed')} max_tokens={s.get('max_tokens')}", "",
+    ]
+    overall = s.get("overall") or {}
+    macro = overall.get("macro_mean") or {}
+    gen = overall.get("generalization") or {}
+    lines.append("## Overall(跨家族;§0 generality 头条)")
+    lines.append("| contrast | " + " | ".join(solvers) + " |")
+    lines.append("|" + "|".join(["---"] * (1 + len(solvers))) + "|")
+    labels = ([f"degradation_at_k{k}" for k in ks] + [f"plausibility_effect_at_k{k}" for k in ks]
+              + [f"reasoning_cost_at_k{k}" for k in ks] + [f"coverage_value_at_k{k}" for k in ks])
+    for label in labels:
+        row = [label]
+        for slv in solvers:
+            mm = (macro.get(label) or {}).get(slv)
+            g = (gen.get(label) or {}).get(slv) or {}
+            star = "✅" if g.get("generalizes") else ("⚠️" if g.get("n_ci_excludes_0", 0) else "·")
+            row.append(f"{star} mean={mm} ({g.get('n_ci_excludes_0')}/{g.get('n_families')} 族 CI排0)")
+        lines.append("| " + " | ".join(row) + " |")
+    lines.append("")
+
+    def _rd(ps: dict) -> str:
+        rd = ps.get("risk_difference") or {}
+        return f"Δ={rd.get('point')} CI[{rd.get('low')},{rd.get('high')}] n={ps.get('n')}"
+
+    for fam in families:
+        fa = (s.get("per_family") or {}).get(fam) or {}
+        kc, contrasts, per_cell = fa.get("k_curve") or {}, fa.get("contrasts") or {}, fa.get("per_cell") or {}
+        lines.append(f"## family={fam}")
+        for slv in solvers:
+            curve = kc.get(slv) or {}
+            header = ["arm"] + [f"K={k}" for k in ks]
+            lines.append(f"_solver={slv}_  oracle(upper bound)={curve.get('oracle')}")
+            lines.append("| " + " | ".join(header) + " |")
+            lines.append("|" + "|".join(["---"] * len(header)) + "|")
+            for arm in ("plausible", "garbage", "random_subset"):
+                lines.append("| " + " | ".join([arm] + [str((curve.get(arm) or {}).get(str(k))) for k in ks]) + " |")
+        for k in ks:
+            for slv in solvers:
+                ps = (contrasts.get(f"degradation_at_k{k}") or {}).get(slv)
+                if ps:
+                    lines.append(f"- degradation_k{k}[{slv}] {_rd(ps)}")
+                ps = (contrasts.get(f"reasoning_cost_at_k{k}") or {}).get(slv)
+                if ps:
+                    md = ps.get("mean_diff") or {}
+                    lines.append(f"- reasoning_cost_k{k}[{slv}] Δ={md.get('point')} CI[{md.get('low')},{md.get('high')}]")
+        for cell, m in per_cell.items():
+            if "|plausible_k" in cell:
+                lines.append(f"- {cell}: wrong_sel={m.get('wrong_selection_rate')} "
+                             f"top={m.get('top_distractor')} entropy={m.get('selection_entropy')} "
+                             f"inv_tok={m.get('inventory_tokens_mean')}")
+        lines.append("")
+    budget = s.get("budget") or {}
+    if budget.get("incomplete"):
+        lines += [f"⚠️ 预算超限:dropped {len(budget.get('dropped_cells') or [])} cells "
+                  f"(spent={budget.get('spent_usd')}/{budget.get('max_usd')})"]
+    lines += ["", f"_{s.get('note')}_"]
+    return "\n".join(lines)
+
+
+def _capability_mixed_router_markdown(result: dict) -> str:
+    """Phase 3E mixed-pool 跨区域 router 汇总:overall(分解 contrast 头条)+ per correct_family(4 arm 原始 + 分解)。"""
+    s = result.get("summary", {})
+    families = s.get("families") or []
+    solvers = result.get("solvers") or []
+    lines = [
+        f"# Capability eval (skill-bloat mixed,跨区域 router) {result.get('run_id', '')}", "",
+        f"声明范围: {result.get('claim_scope', '')}",
+        f"solvers={solvers} router={result.get('router_model')} families={families} "
+        f"n={result.get('n_instances')} table_size={s.get('table_size')} n_examples={s.get('n_examples')} "
+        f"n_within={s.get('n_within')} n_cross/fam={s.get('n_cross_per_family')} base_seed={s.get('base_seed')}", "",
+        "分解(oracle gap):mixed_all→router_gold=跨区域 scoping(头条,router 可修);"
+        "router_gold→oracle=同族内 bloat(router 修不了,诚实);router vs router_gold=误路由代价。", "",
+    ]
+    overall = s.get("overall") or {}
+    macro = overall.get("macro_mean") or {}
+    route_acc = overall.get("route_accuracy") or {}
+    lines.append("## Overall(跨 correct_family macro-mean)")
+    lines.append("| contrast | " + " | ".join(solvers) + " |")
+    lines.append("|" + "|".join(["---"] * (1 + len(solvers))) + "|")
+    for lab, desc in [
+        ("cross_region_value", "跨区域 scoping(router_gold−mixed_all)"),
+        ("within_region_bloat", "同族内 bloat(oracle−router_gold)"),
+        ("routing_error_cost_solve", "误路由代价(router_gold−router)"),
+        ("cross_region_reasoning", "跨区域 reasoning(mixed_all−router_gold)"),
+        ("within_region_reasoning", "同族内 reasoning(router_gold−oracle)"),
+    ]:
+        row = [desc]
+        for slv in solvers:
+            row.append(str((macro.get(lab) or {}).get(slv)))
+        lines.append("| " + " | ".join(row) + " |")
+    acc_row = ["route_accuracy"]
+    for slv in solvers:
+        acc_row.append(str(route_acc.get(slv)))
+    lines.append("| " + " | ".join(acc_row) + " |")
+    lines.append("")
+
+    def _rd(ps: dict) -> str:
+        rd = (ps or {}).get("risk_difference") or (ps or {}).get("mean_diff") or {}
+        return f"Δ={rd.get('point')} CI[{rd.get('low')},{rd.get('high')}] n={ps.get('n')}"
+
+    for fam in families:
+        fa = (s.get("per_family") or {}).get(fam) or {}
+        pc = fa.get("per_cell") or {}
+        contrasts = fa.get("contrasts") or {}
+        racc = fa.get("route_accuracy") or {}
+        lines.append(f"## correct_family={fam}")
+        for slv in solvers:
+            lines.append(f"_solver={slv}_  route_accuracy={racc.get(slv)}")
+            lines.append("| arm | solve | reasoning_tok | inv_tok | cost |")
+            lines.append("|---|---|---|---|---|")
+            for arm in ("oracle", "router_gold", "mixed_all", "router"):
+                m = pc.get(f"{slv}|{arm}") or {}
+                lines.append(f"| {arm} | {m.get('solve_rate')} | {m.get('reasoning_tokens_mean')} | "
+                             f"{m.get('inventory_tokens_mean')} | {m.get('cost_mean')} |")
+        for lab, desc in [("cross_region_value", "跨区域"), ("within_region_bloat", "同族内"),
+                          ("routing_error_cost_solve", "误路由")]:
+            for slv in solvers:
+                ps = (contrasts.get(lab) or {}).get(slv)
+                if ps:
+                    lines.append(f"- {desc}[{slv}] {_rd(ps)}")
+        lines.append("")
+    budget = s.get("budget") or {}
+    if budget.get("incomplete"):
+        lines += [f"⚠️ 预算超限:dropped {len(budget.get('dropped_cells') or [])} cells "
+                  f"(spent={budget.get('spent_usd')}/{budget.get('max_usd')})"]
+    lines += ["", f"_{s.get('note')}_"]
+    return "\n".join(lines)
+
+
 def run_inspect(args) -> None:
     """inspect 子命令：只读调试窗口，json 输出（结构化 debug 数据，无需 markdown）。"""
     from brainregion.inspector import inspect as inspect_facade
@@ -477,7 +640,13 @@ def main() -> None:
     if args.command == "capability":
         result = asyncio.run(eval_cli.run_capability(args))
         if args.output_format != "json":
-            result["rendered"] = _capability_markdown(result)
+            if result.get("mode") == "skill_bloat_mixed":
+                md = _capability_mixed_router_markdown
+            elif result.get("mode") == "skill_bloat":
+                md = _capability_skill_bloat_markdown
+            else:
+                md = _capability_markdown
+            result["rendered"] = md(result)
         _emit(result, args)
         return
     if args.command == "inspect":
