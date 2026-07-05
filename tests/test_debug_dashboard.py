@@ -14,7 +14,7 @@ def test_debug_dashboard_html_is_self_contained():
     )
 
     assert html.startswith("<!DOCTYPE html>")
-    assert "BrainRegion Debug" in html
+    assert "BrainRegion 调试面板" in html
     assert "/api/snapshot" in html
     assert "data-refresh-ms=\"1200\"" in html
     assert "&lt;wake?&gt;" in html
@@ -22,7 +22,10 @@ def test_debug_dashboard_html_is_self_contained():
     assert "function esc" in html
     assert "esc(r.region)" in html
     assert "esc(tools)" in html
-    assert "Missed Wake" in html
+    assert "漏唤醒" in html
+    assert "调用状态" in html
+    assert "脑区状态" in html
+    assert "激活强度" in html
     assert "src=" not in html
     assert "https://" not in html
 

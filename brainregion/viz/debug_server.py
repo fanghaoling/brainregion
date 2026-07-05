@@ -99,7 +99,7 @@ def build_debug_dashboard_html(options: DebugDashboardOptions) -> str:
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>BrainRegion Debug</title>
+<title>BrainRegion 调试面板</title>
 <style>
 :root {{
   --bg: #f7f8f5;
@@ -275,45 +275,45 @@ pre {{
 </head>
 <body data-refresh-ms="{refresh}">
 <header>
-  <h1>BrainRegion Debug</h1>
-  <div class="status"><span id="live-dot" class="dot"></span><span id="status">starting</span></div>
+  <h1>BrainRegion 调试面板</h1>
+  <div class="status"><span id="live-dot" class="dot"></span><span id="status">启动中</span></div>
 </header>
 <main>
   <aside>
     <section>
-      <h2>Query</h2>
-      <label>Problem<input id="problem" value="{problem}"></label>
-      <label>Goal<input id="goal" value="{goal}"></label>
-      <label>Gold Regions<input id="gold" value="{gold}"></label>
-      <label>Top K<input id="top-k" type="number" min="1" max="32" value="{top_k}"></label>
-      <label>Context<textarea id="context">{context}</textarea></label>
+      <h2>查询输入</h2>
+      <label>问题<input id="problem" value="{problem}"></label>
+      <label>目标<input id="goal" value="{goal}"></label>
+      <label>期望脑区<input id="gold" value="{gold}"></label>
+      <label>召回数量 Top K<input id="top-k" type="number" min="1" max="32" value="{top_k}"></label>
+      <label>上下文<textarea id="context">{context}</textarea></label>
       <div class="row">
-        <button id="refresh" class="primary">Refresh</button>
-        <button id="pause">Pause</button>
+        <button id="refresh" class="primary">刷新</button>
+        <button id="pause">暂停</button>
       </div>
     </section>
     <section style="margin-top: 12px;">
-      <h2>Issue Notes</h2>
+      <h2>问题记录</h2>
       <div class="row" style="margin-bottom: 8px;">
-        <button data-note="missed wake">Missed Wake</button>
-        <button data-note="false wake">False Wake</button>
-        <button data-note="memory not recalled">Memory</button>
-        <button data-note="tool suggestion wrong">Tool</button>
+        <button data-note="漏唤醒">漏唤醒</button>
+        <button data-note="误唤醒">误唤醒</button>
+        <button data-note="记忆未召回">记忆未召回</button>
+        <button data-note="工具建议错误">工具建议错误</button>
       </div>
       <textarea id="notes" class="log"></textarea>
     </section>
   </aside>
   <div>
     <section>
-      <h2>Calls</h2>
+      <h2>调用状态</h2>
       <div id="metrics" class="grid"></div>
     </section>
     <section style="margin-top: 12px;">
-      <h2>Regions</h2>
+      <h2>脑区状态</h2>
       <div id="regions" class="regions"></div>
     </section>
     <section style="margin-top: 12px;">
-      <h2>Raw Snapshot</h2>
+      <h2>原始快照</h2>
       <pre id="raw">{{}}</pre>
     </section>
   </div>
@@ -364,14 +364,14 @@ function setStatus(text, mode) {{
 function renderMetrics(snapshot) {{
   const call = (snapshot.activation && snapshot.activation.call_status) || {{}};
   const items = [
-    ["models_called", call.models_called ? "yes" : "no"],
-    ["woken", call.woken_count || 0],
-    ["escalated", call.escalated_count || 0],
-    ["actions", call.suggested_actions_count || 0],
-    ["approval", call.requires_user_approval_count || 0],
-    ["metrics", call.metrics_status || "unknown"],
-    ["tools", (call.action_tools || []).join(", ") || "-"],
-    ["schema", snapshot.schema_version || "-"],
+    ["模型调用", call.models_called ? "是" : "否"],
+    ["已唤醒", call.woken_count || 0],
+    ["已升级", call.escalated_count || 0],
+    ["建议动作", call.suggested_actions_count || 0],
+    ["需批准", call.requires_user_approval_count || 0],
+    ["评估状态", call.metrics_status || "unknown"],
+    ["建议工具", (call.action_tools || []).join(", ") || "-"],
+    ["Schema", snapshot.schema_version || "-"],
   ];
   $("metrics").innerHTML = items.map(([label, value]) => `<div class="metric"><span class="small">${{esc(label)}}</span><b>${{esc(value)}}</b></div>`).join("");
 }}
@@ -385,8 +385,8 @@ function renderRegions(snapshot) {{
     return `<div class="region">
       <div class="top"><strong>${{esc(r.region)}}</strong><span class="phase ${{phaseClass}}">${{esc(phase)}}</span></div>
       <div class="bar ${{phaseClass}}"><span style="width:${{width}}%"></span></div>
-      <div class="small">intensity ${{width}}% · score ${{esc(r.score || 0)}} · confidence ${{esc(Number(r.confidence || 0).toFixed(2))}}</div>
-      <div class="small">memory ${{esc(r.recallable || 0)}}/${{esc(r.total || 0)}} · actions ${{esc(r.suggested_actions || 0)}}</div>
+      <div class="small">激活强度 ${{width}}% · 分数 ${{esc(r.score || 0)}} · 置信度 ${{esc(Number(r.confidence || 0).toFixed(2))}}</div>
+      <div class="small">记忆 ${{esc(r.recallable || 0)}}/${{esc(r.total || 0)}} · 动作 ${{esc(r.suggested_actions || 0)}}</div>
       ${{tools ? `<div class="tools">${{esc(tools)}}</div>` : ""}}
     </div>`;
   }}).join("");
@@ -400,7 +400,7 @@ async function loadSnapshot() {{
     renderMetrics(snapshot);
     renderRegions(snapshot);
     $("raw").textContent = JSON.stringify(snapshot.activation || snapshot.debug || snapshot, null, 2);
-    setStatus("live " + new Date().toLocaleTimeString(), "live");
+    setStatus("实时刷新 " + new Date().toLocaleTimeString(), "live");
   }} catch (err) {{
     setStatus(String(err), "error");
   }}
@@ -408,7 +408,7 @@ async function loadSnapshot() {{
 $("refresh").addEventListener("click", loadSnapshot);
 $("pause").addEventListener("click", () => {{
   paused = !paused;
-  $("pause").textContent = paused ? "Resume" : "Pause";
+  $("pause").textContent = paused ? "继续" : "暂停";
   if (!paused) loadSnapshot();
 }});
 timer = setInterval(loadSnapshot, refreshMs);
