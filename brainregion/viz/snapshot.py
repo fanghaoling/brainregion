@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from brainregion import __version__
 from brainregion.inspector import inspect as _inspect
 
-SNAPSHOT_SCHEMA_VERSION = 2
+SNAPSHOT_SCHEMA_VERSION = 3
 
 # KPI 染色状态(HTML renderer 据此上色)
 _OK = "ok"
@@ -100,15 +100,28 @@ class RegionSnapshot:
     total: int
     recallable: int
     woke: str = "unknown"
+    score: int = 0
+    confidence: float = 0.0
+    phase: str = "unknown"
+    suggested_actions: int = 0
+    action_tools: tuple[str, ...] = ()
 
     def to_dict(self) -> dict:
         return {"region": self.region, "total": self.total,
-                "recallable": self.recallable, "woke": self.woke}
+                "recallable": self.recallable, "woke": self.woke,
+                "score": self.score, "confidence": self.confidence,
+                "phase": self.phase, "suggested_actions": self.suggested_actions,
+                "action_tools": list(self.action_tools)}
 
     @classmethod
     def from_dict(cls, d: dict) -> "RegionSnapshot":
         return cls(region=d.get("region", ""), total=int(d.get("total", 0)),
-                   recallable=int(d.get("recallable", 0)), woke=d.get("woke", "unknown"))
+                   recallable=int(d.get("recallable", 0)), woke=d.get("woke", "unknown"),
+                   score=int(d.get("score", 0) or 0),
+                   confidence=float(d.get("confidence", 0.0) or 0.0),
+                   phase=d.get("phase", "unknown"),
+                   suggested_actions=int(d.get("suggested_actions", 0) or 0),
+                   action_tools=tuple(d.get("action_tools") or ()))
 
 
 @dataclass(frozen=True)
@@ -214,16 +227,33 @@ def _build_regions(memory: dict, activation: dict | None) -> list[RegionSnapshot
     by_region = memory.get("by_region") or {}
     by_region_recallable = memory.get("by_region_recallable") or {}
     woken = set((activation or {}).get("woken") or [])
+    matrix = {
+        row.get("id"): row
+        for row in ((activation or {}).get("region_matrix") or [])
+        if row.get("id")
+    }
     has_query = activation is not None
+    region_ids = list(dict.fromkeys([*matrix.keys(), *by_region.keys()]))
     out = []
-    for r, total in by_region.items():
+    for r in region_ids:
+        total = int(by_region.get(r, 0))
+        row = matrix.get(r) or {}
+        phase = row.get("phase") or ("woken" if r in woken else ("quiet" if has_query else "unknown"))
         out.append(RegionSnapshot(
             region=r,
-            total=int(total),
+            total=total,
             recallable=int(by_region_recallable.get(r, 0)),
             woke=("yes" if r in woken else ("no" if has_query else "unknown")),
+            score=int(row.get("score") or 0),
+            confidence=float(row.get("confidence") or 0.0),
+            phase=phase,
+            suggested_actions=int(row.get("suggested_actions") or 0),
+            action_tools=tuple(row.get("action_tools") or ()),
         ))
-    out.sort(key=lambda x: x.total, reverse=True)
+    if has_query:
+        out.sort(key=lambda x: (-x.confidence, -x.score, x.region))
+    else:
+        out.sort(key=lambda x: x.total, reverse=True)
     return out
 
 

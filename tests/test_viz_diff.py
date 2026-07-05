@@ -90,22 +90,22 @@ def test_inspect_memory_manifest_opt_in(root):
     assert e["triggers"] == ["a", "b"]
 
 
-def test_build_snapshot_has_manifest_query_label_schema2(root):
+def test_build_snapshot_has_manifest_query_label_schema3(root):
     memory_store.record_experience(summary="x", triggers=["k"], region="unity_ecs")
     snap = build_snapshot(problem="unity 寻路 task")
-    assert snap.schema_version == 2 == SNAPSHOT_SCHEMA_VERSION
+    assert snap.schema_version == 3 == SNAPSHOT_SCHEMA_VERSION
     assert len(snap.manifest) == 1 and snap.manifest[0].region == "unity_ecs"
     assert snap.query_label == "unity 寻路 task"
 
 
-def test_schema_roundtrip_v2_and_v1_compat():
+def test_schema_roundtrip_v3_and_legacy_compat():
     snap = _snap([_me("1")], query_label="q")
     d = snap.to_dict()
-    assert d["schema_version"] == 2 and d["query_label"] == "q" and len(d["manifest"]) == 1
-    # v2 往返
+    assert d["schema_version"] == 3 and d["query_label"] == "q" and len(d["manifest"]) == 1
+    # v3 往返
     snap2 = BrainSnapshot.from_dict(d)
     assert len(snap2.manifest) == 1 and snap2.query_label == "q"
-    # v1 缺 manifest/query_label → 默认空,不报错
+    # v1/v2 缺新增字段 → 默认空,不报错
     v1 = BrainSnapshot.from_dict({"schema_version": 1, "kpis": [], "regions": []})
     assert v1.manifest == [] and v1.query_label == ""
     # 过新 → 拒

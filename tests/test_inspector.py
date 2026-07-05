@@ -252,6 +252,45 @@ def test_activation_summarize_missed_and_unscored(eval_root, monkeypatch):
     assert "unscored" in r2["explain"]
 
 
+def test_activation_reports_region_matrix_and_call_status(eval_root, monkeypatch):
+    def fake_wake(**_k):
+        return {
+            "activated_regions": {
+                "woken": ["memory"],
+                "retrieved": [
+                    {"id": "memory", "score": 8, "source": "text"},
+                    {"id": "review", "score": 2, "source": "text"},
+                ],
+                "escalated": ["memory"],
+                "shadow": [{"id": "review", "score": 2, "confidence": 0.25,
+                            "promoted": False, "reason": "below shadow threshold"}],
+                "reasons": {"memory": "matched 4 trigger(s)", "review": "matched 1 trigger(s)"},
+                "confidence": {"memory": 1.0, "review": 0.25},
+            },
+            "wake_metrics": {"hit": ["memory"], "missed": [], "false_wake": [],
+                             "metrics_status": "scored"},
+            "suggested_actions": [
+                {"tool": "recall_experiences", "source_regions": ["memory"],
+                 "requires_user_approval": True},
+            ],
+            "trace": {"shadow_promoted": 0, "sentinel_hits": [], "models_called": False},
+        }
+
+    monkeypatch.setattr("brainregion.inspector.activation.wake_gate", fake_wake)
+    res = activation.inspect_activation(problem="project understanding", gold_regions=["memory"])
+
+    by_id = {row["id"]: row for row in res["region_matrix"]}
+    assert by_id["memory"]["phase"] == "woken"
+    assert by_id["memory"]["confidence"] == 1.0
+    assert by_id["memory"]["suggested_actions"] == 1
+    assert by_id["memory"]["action_tools"] == ["recall_experiences"]
+    assert by_id["review"]["phase"] == "shadow"
+    assert by_id["debugging"]["phase"] == "quiet"
+    assert res["call_status"]["models_called"] is False
+    assert res["call_status"]["suggested_actions_count"] == 1
+    assert res["call_status"]["requires_user_approval_count"] == 1
+
+
 # ── memory view ───────────────────────────────────────────────────────────────
 
 def test_inspect_memory_counts_age_preview(eval_root):

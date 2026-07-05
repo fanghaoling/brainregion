@@ -27,6 +27,17 @@ _STAGE_LABELS = {"wake": "唤醒", "retrieve": "检索", "memory": "记忆",
                  "consult": "会诊", "judge": "评审"}
 _STAGE_STATUS_LABELS = {"SUCCESS": "成功", "FAILED": "失败", "SKIPPED": "跳过",
                         "UNKNOWN": "未知", "NOT_INSTRUMENTED": "未埋点"}
+_PHASE_LABELS = {
+    "woken": "已唤醒",
+    "escalated": "已升级",
+    "shadow_promoted": "shadow 唤醒",
+    "shadow": "接近阈值",
+    "retrieved": "已检索",
+    "missed": "漏唤醒",
+    "false_wake": "误唤醒",
+    "quiet": "静默",
+    "unknown": "未知",
+}
 
 
 def _esc(v) -> str:
@@ -44,6 +55,10 @@ def _stage_label(name: str) -> str:
 
 def _stage_status_label(name: str) -> str:
     return _STAGE_STATUS_LABELS.get(name or "", name or "")
+
+
+def _phase_label(name: str) -> str:
+    return _PHASE_LABELS.get(name or "", name or "")
 
 
 def _fmt_ts(iso: str) -> str:
@@ -87,10 +102,18 @@ section h2 { margin: 0 0 12px; font-size: 15px; color: #4a5159;
 .region .name { font-weight: 600; font-size: 14px; margin-bottom: 6px; word-break: break-all; }
 .region .nums { font-size: 12px; color: #5a626c; }
 .region .nums b { color: #1f2329; }
+.region .act { margin-top: 8px; font-size: 12px; color: #5a626c; }
+.bar { height: 7px; background: #e8eaed; border-radius: 999px; overflow: hidden; margin: 6px 0 4px; }
+.bar span { display: block; height: 100%; background: #0969da; border-radius: 999px; }
+.bar.missed span { background: #cf222e; }
+.bar.false_wake span { background: #b08800; }
+.bar.quiet span { background: #c9ced6; }
 .badge { display: inline-block; font-size: 11px; padding: 1px 7px; border-radius: 10px;
          font-weight: 600; margin-left: 6px; vertical-align: middle; }
 .badge.woke { background: #e6f4ea; color: #1a7f37; }
 .badge.quiet { background: #f0f1f3; color: #8a9099; }
+.badge.missed { background: #ffebe9; color: #cf222e; }
+.badge.false_wake { background: #fff8c5; color: #7d5e00; }
 /* 通用表 */
 table { border-collapse: collapse; width: 100%; font-size: 13px; }
 th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid #eef0f2; }
@@ -186,8 +209,20 @@ class HtmlRenderer:
             nums = f"<b>{_esc(r.total)}</b> 条 · <b>{_esc(r.recallable)}</b> 可召回"
             if inactive:
                 nums += f" · <span class=\"muted\">{_esc(inactive)} 失效</span>"
+            act = ""
+            if has_query:
+                pct = int(max(0.0, min(1.0, float(getattr(r, "confidence", 0.0)))) * 100)
+                phase = getattr(r, "phase", "") or ("woken" if r.woke == "yes" else "quiet")
+                tools = ", ".join(getattr(r, "action_tools", ()) or ())
+                action_hint = f" · actions {getattr(r, 'suggested_actions', 0)}" if getattr(r, "suggested_actions", 0) else ""
+                tools_hint = f" · {_esc(tools)}" if tools else ""
+                act = (
+                    f"<div class=\"act\"><div class=\"bar {_esc(phase)}\"><span style=\"width:{_esc(pct)}%\"></span></div>"
+                    f"{_esc(_phase_label(phase))} · intensity {_esc(pct)}% · score {_esc(getattr(r, 'score', 0))}"
+                    f"{action_hint}{tools_hint}</div>"
+                )
             cards.append(f"<div class=\"region\"><div class=\"name\">{_esc(r.region)}{badge}</div>"
-                         f"<div class=\"nums\">{nums}</div></div>")
+                         f"<div class=\"nums\">{nums}</div>{act}</div>")
         return f"<section><h2>脑区</h2><div class=\"regions\">{''.join(cards)}</div></section>"
 
     def _memory(self, memory: dict) -> str:
@@ -320,6 +355,7 @@ class HtmlRenderer:
     def _activation(self, act: dict) -> str:
         metrics = act.get("wake_metrics") or {}
         woken = act.get("woken") or []
+        call = act.get("call_status") or {}
         rows = [
             ("唤醒", ", ".join(woken)),
             ("命中", ", ".join(metrics.get("hit") or [])),
@@ -327,6 +363,12 @@ class HtmlRenderer:
             ("误唤醒", ", ".join(metrics.get("false_wake") or [])),
             ("评分状态", metrics.get("metrics_status")),
         ]
+        rows.extend([
+            ("models_called", call.get("models_called")),
+            ("suggested_actions", call.get("suggested_actions_count")),
+            ("requires_user_approval", call.get("requires_user_approval_count")),
+            ("action_tools", ", ".join(call.get("action_tools") or [])),
+        ])
         body = "".join(
             f"<tr><td>{_esc(label)}</td><td>{_esc(val) or '—'}</td></tr>" for label, val in rows
         )
