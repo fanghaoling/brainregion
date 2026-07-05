@@ -59,6 +59,7 @@ def test_suggest_workflow_recommends_review_document_without_files():
 def test_suggest_workflow_recommends_memory_actions():
     result = suggest_workflow(
         problem="整理 BrainRegion 项目理解、记忆卡片和上下文压缩经验。",
+        goal="决定下一步是否先召回已有项目理解，再写入新的 seed memory",
         top_k=4,
     )
 
@@ -75,6 +76,7 @@ def test_suggest_workflow_recommends_memory_actions():
     record = result["next_actions"][2]
     assert record["suggested_args"]["region"] == "memory"
     assert record["suggested_args"]["status"] == "pending"
+    assert not any(action["source_regions"] == ["performance"] for action in result["next_actions"])
     assert all(action["requires_user_approval"] is True for action in result["next_actions"])
 
 

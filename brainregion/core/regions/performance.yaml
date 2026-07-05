@@ -6,7 +6,9 @@ triggers:
   - latency
   - throughput
   - slow
-  - memory
+  - memory usage
+  - memory allocation
+  - memory leak
   - allocation
   - allocator
   - cache
