@@ -16,6 +16,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from brainregion.runtime import emit_event, list_events, wait_events
+
 from .snapshot import build_snapshot
 
 
@@ -57,6 +59,51 @@ def _int_param(params: dict[str, list[str]], name: str, default: int) -> int:
         return default
 
 
+def _nonnegative_int_param(params: dict[str, list[str]], name: str, default: int = 0) -> int:
+    raw = _first(params, name)
+    if raw is None:
+        return max(0, default)
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return max(0, default)
+
+
+def _emit_snapshot_events(data: dict[str, Any]) -> None:
+    debug = data.get("debug") or {}
+    query = debug.get("query") or {}
+    activation = data.get("activation") or {}
+    call_status = activation.get("call_status") or {}
+    regions = data.get("regions") or []
+    emit_event(
+        "dashboard.snapshot_built",
+        payload={
+            "has_query": data.get("has_query"),
+            "query": query,
+            "region_count": len(regions),
+            "woken_count": call_status.get("woken_count", 0),
+            "suggested_actions_count": call_status.get("suggested_actions_count", 0),
+        },
+    )
+    if call_status:
+        emit_event("dashboard.call_status", payload=call_status)
+    for region in regions:
+        phase = region.get("phase") or region.get("woke") or "unknown"
+        if phase == "quiet" and not region.get("score") and not region.get("confidence"):
+            continue
+        emit_event(
+            "region.activation",
+            region_id=region.get("region"),
+            payload={
+                "phase": phase,
+                "score": region.get("score", 0),
+                "confidence": region.get("confidence", 0.0),
+                "suggested_actions": region.get("suggested_actions", 0),
+                "action_tools": region.get("action_tools", []),
+            },
+        )
+
+
 def build_snapshot_payload(options: DebugDashboardOptions, params: dict[str, list[str]] | None = None) -> dict[str, Any]:
     params = params or {}
     gold_raw = _first(params, "gold_regions", ",".join(options.gold_regions))
@@ -84,6 +131,7 @@ def build_snapshot_payload(options: DebugDashboardOptions, params: dict[str, lis
             "top_k": _int_param(params, "top_k", options.top_k),
         },
     }
+    _emit_snapshot_events(data)
     return data
 
 
@@ -258,6 +306,28 @@ button.primary {{
   font-family: ui-monospace, SFMono-Regular, Consolas, "Liberation Mono", monospace;
   font-size: 12px;
 }}
+.timeline {{
+  display: grid;
+  gap: 7px;
+  max-height: 280px;
+  overflow: auto;
+}}
+.event {{
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 7px 8px;
+  background: #fbfcfa;
+}}
+.event .event-top {{
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}}
+.event code {{
+  color: var(--blue);
+}}
 pre {{
   overflow: auto;
   margin: 0;
@@ -311,6 +381,10 @@ pre {{
     <section style="margin-top: 12px;">
       <h2>脑区状态</h2>
       <div id="regions" class="regions"></div>
+    </section>
+    <section style="margin-top: 12px;">
+      <h2>实时事件</h2>
+      <div id="events" class="timeline"></div>
     </section>
     <section style="margin-top: 12px;">
       <h2>原始快照</h2>
@@ -391,6 +465,60 @@ function renderRegions(snapshot) {{
     </div>`;
   }}).join("");
 }}
+let lastEventSequence = 0;
+const eventWindow = [];
+function pushEvent(event) {{
+  const seq = Number(event.sequence || 0);
+  if (seq && seq <= lastEventSequence) return;
+  if (seq) lastEventSequence = seq;
+  eventWindow.unshift(event);
+  while (eventWindow.length > 100) eventWindow.pop();
+  renderEvents();
+}}
+function renderEvents() {{
+  const box = $("events");
+  if (!box) return;
+  if (!eventWindow.length) {{
+    box.innerHTML = `<div class="small">等待运行事件...</div>`;
+    return;
+  }}
+  box.innerHTML = eventWindow.map((event) => {{
+    const payload = event.payload ? JSON.stringify(event.payload) : "";
+    const ts = String(event.timestamp || "").replace("T", " ").replace("+00:00", "Z");
+    return `<div class="event">
+      <div class="event-top"><code>${{esc(event.type || "event")}}</code><span>#${{esc(event.sequence || "-")}} · ${{esc(ts)}}</span></div>
+      <div class="small">${{event.region_id ? `region=${{esc(event.region_id)}}` : ""}}</div>
+      ${{payload ? `<pre>${{esc(payload)}}</pre>` : ""}}
+    </div>`;
+  }}).join("");
+}}
+async function loadInitialEvents() {{
+  try {{
+    const res = await fetch("/api/events?limit=50", {{cache: "no-store"}});
+    if (!res.ok) return;
+    const data = await res.json();
+    (data.events || []).forEach(pushEvent);
+  }} catch (err) {{
+    return;
+  }}
+}}
+function connectEvents() {{
+  if (!window.EventSource) {{
+    pushEvent({{type: "dashboard.sse_unavailable", payload: {{"message": "EventSource unavailable"}}}});
+    return;
+  }}
+  const source = new EventSource("/api/events/stream?after=" + encodeURIComponent(String(lastEventSequence)));
+  source.onmessage = (message) => {{
+    try {{
+      pushEvent(JSON.parse(message.data));
+    }} catch (err) {{
+      pushEvent({{type: "dashboard.sse_parse_error", payload: {{"message": String(err)}}}});
+    }}
+  }};
+  source.onerror = () => {{
+    setStatus("事件流重连中 " + new Date().toLocaleTimeString(), "error");
+  }};
+}}
 async function loadSnapshot() {{
   if (paused) return;
   try {{
@@ -411,6 +539,7 @@ $("pause").addEventListener("click", () => {{
   $("pause").textContent = paused ? "继续" : "暂停";
   if (!paused) loadSnapshot();
 }});
+loadInitialEvents().then(connectEvents);
 timer = setInterval(loadSnapshot, refreshMs);
 loadSnapshot();
 </script>
@@ -432,6 +561,15 @@ class _DebugHandler(BaseHTTPRequestHandler):
         if parsed.path == "/api/health":
             self._send_json({"ok": True})
             return
+        if parsed.path == "/api/events":
+            params = parse_qs(parsed.query, keep_blank_values=True)
+            after = _nonnegative_int_param(params, "after", 0)
+            limit = _int_param(params, "limit", 100)
+            self._send_json({"ok": True, "events": list_events(after_sequence=after, limit=limit)})
+            return
+        if parsed.path == "/api/events/stream":
+            self._send_sse(parse_qs(parsed.query, keep_blank_values=True))
+            return
         if parsed.path == "/api/snapshot":
             try:
                 payload = build_snapshot_payload(self.server.options, parse_qs(parsed.query, keep_blank_values=True))
@@ -450,8 +588,38 @@ class _DebugHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _send_sse(self, params: dict[str, list[str]]) -> None:
+        after = _nonnegative_int_param(params, "after", 0)
+        last_id = self.headers.get("Last-Event-ID")
+        if last_id:
+            try:
+                after = int(last_id)
+            except ValueError:
+                pass
+        self.send_response(HTTPStatus.OK)
+        self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+        self.send_header("Cache-Control", "no-cache")
+        self.send_header("Connection", "keep-alive")
+        self.end_headers()
+        sequence = max(0, after)
+        try:
+            while True:
+                events = wait_events(after_sequence=sequence, timeout=15.0, limit=100)
+                if not events:
+                    self.wfile.write(b": heartbeat\n\n")
+                    self.wfile.flush()
+                    continue
+                for event in events:
+                    sequence = max(sequence, int(event.get("sequence", 0)))
+                    data = json.dumps(event, ensure_ascii=False, separators=(",", ":"), default=str)
+                    self.wfile.write(f"id: {sequence}\n".encode("utf-8"))
+                    self.wfile.write(f"data: {data}\n\n".encode("utf-8"))
+                    self.wfile.flush()
+        except (BrokenPipeError, ConnectionResetError, TimeoutError):
+            return
+
     def _send_json(self, data: dict[str, Any], status: HTTPStatus = HTTPStatus.OK) -> None:
-        body = json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8")
+        body = json.dumps(data, ensure_ascii=False, indent=2, default=str).encode("utf-8")
         self.send_response(status)
         self.send_header("Content-Type", "application/json; charset=utf-8")
         self.send_header("Cache-Control", "no-store")

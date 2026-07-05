@@ -19,6 +19,9 @@ def test_debug_dashboard_html_is_self_contained():
     assert "data-refresh-ms=\"1200\"" in html
     assert "&lt;wake?&gt;" in html
     assert "localStorage" in html
+    assert "EventSource" in html
+    assert "/api/events/stream" in html
+    assert "/api/events?limit=50" in html
     assert "function esc" in html
     assert "esc(r.region)" in html
     assert "esc(tools)" in html
@@ -32,6 +35,7 @@ def test_debug_dashboard_html_is_self_contained():
 
 def test_debug_snapshot_payload_merges_query_params(monkeypatch):
     calls = {}
+    emitted = []
 
     class FakeSnapshot:
         def to_dict(self):
@@ -46,6 +50,10 @@ def test_debug_snapshot_payload_merges_query_params(monkeypatch):
         return FakeSnapshot()
 
     monkeypatch.setattr("brainregion.viz.debug_server.build_snapshot", fake_build_snapshot)
+    monkeypatch.setattr(
+        "brainregion.viz.debug_server.emit_event",
+        lambda event_type, **fields: emitted.append((event_type, fields)),
+    )
     options = DebugDashboardOptions(problem="default", gold_regions=("debugging",), top_k=3)
 
     payload = build_snapshot_payload(
@@ -60,6 +68,11 @@ def test_debug_snapshot_payload_merges_query_params(monkeypatch):
     assert payload["debug"]["query"]["gold_regions"] == ["memory", "review"]
     assert payload["debug"]["query"]["top_k"] == 8
     assert payload["debug"]["refresh_ms"] == options.refresh_ms
+    assert [event[0] for event in emitted] == [
+        "dashboard.snapshot_built",
+        "dashboard.call_status",
+        "region.activation",
+    ]
 
 
 def test_cli_debug_subcommand_wires_to_dashboard(monkeypatch):
