@@ -30,6 +30,11 @@ brain_region_snapshot.html
 brain_region_snapshot.json
 brain_region_diff.html
 
+# Local eval outputs
+sb_*.log
+sb_*.jsonl
+sb_*.md
+
 # Local planning / issue / spec notes (not uploaded)
 docs/ai_collaboration_roadmap.zh-CN.md
 docs/roadmap_backups/

@@ -30,6 +30,8 @@ def _as_tuple(value: Any) -> tuple[str, ...]:
     vals = value if isinstance(value, list) else [value]
     out: list[str] = []
     for v in vals:
+        if v is None:
+            continue
         s = str(v).strip()
         if s and s not in out:
             out.append(s)

@@ -118,6 +118,18 @@ def test_loader_loads_seeded_memory_recall():
     assert m.region == "memory" and m.status == "experimental"
 
 
+def test_loader_filters_yaml_null_tags(tmp_path):
+    _write_yaml(
+        tmp_path,
+        "debugger",
+        "id: debugger\nname: Debugger\nregion: debugging\nkind: consultant\ntags: [bug, null, fix]\n",
+    )
+
+    m = load_skill("debugger", tmp_path, region_exists=lambda r: r == "debugging")
+
+    assert m.tags == ("bug", "fix")
+
+
 def test_loader_missing_required_field(tmp_path):
     _write_yaml(tmp_path, "bad", "id: bad\nname: Bad\nregion: memory\n")  # 缺 kind
     with pytest.raises(ValueError, match="required field 'kind'"):
@@ -202,6 +214,20 @@ def test_list_skills_mcp_sanitized_no_ref():
     assert out["count"] >= 1
     assert any(s["id"] == "memory-recall" for s in out["skills"])
     assert all("ref" not in s for s in out["skills"])          # MCP 输出不泄 ref
+
+
+def test_list_skills_mcp_has_no_none_tags():
+    out = list_skills_mcp()
+
+    assert all("None" not in s["tags"] for s in out["skills"])
+
+
+def test_debugger_skill_tags_include_nullref_not_none():
+    out = list_skills_mcp(region="debugging")
+    debugger = next(s for s in out["skills"] if s["id"] == "debugger")
+
+    assert "nullref" in debugger["tags"]
+    assert "None" not in debugger["tags"]
 
 
 def test_list_skills_mcp_by_region():
