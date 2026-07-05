@@ -6,6 +6,13 @@ triggers:
   - advice memory
   - long term memory
   - knowledge flywheel
+  - experience memory
+  - project understanding
+  - understanding card
+  - knowledge card
+  - memory card
+  - context compression
+  - seed memory
   - knowledge
   - feedback
   - accepted
@@ -20,6 +27,13 @@ triggers:
   - 记忆
   - 知识
   - 经验
+  - 项目理解
+  - 理解卡片
+  - 知识卡片
+  - 记忆卡片
+  - 上下文压缩
+  - 经验记忆
+  - 种子记忆
   - 反馈
   - 沉淀
 negative_triggers: []

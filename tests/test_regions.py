@@ -63,6 +63,16 @@ def test_memory_allocation_routes_to_performance_not_memory_region():
     assert "memory" not in selected
 
 
+def test_project_understanding_routes_to_memory_region():
+    result = route_regions(
+        problem="整理 BrainRegion 项目理解、记忆卡片和上下文压缩经验。",
+        top_k=3,
+    )
+    selected = [item["id"] for item in result["selected"]]
+    assert selected[0] == "memory"
+    assert result["selected"][0]["score"] >= 6
+
+
 def test_route_regions_negative_triggers_can_filter_matches():
     regions = [
         RegionDefinition(

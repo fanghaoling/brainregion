@@ -56,6 +56,28 @@ def test_suggest_workflow_recommends_review_document_without_files():
     assert "architecture decision record" in action["suggested_args"]["content"]
 
 
+def test_suggest_workflow_recommends_memory_actions():
+    result = suggest_workflow(
+        problem="整理 BrainRegion 项目理解、记忆卡片和上下文压缩经验。",
+        top_k=4,
+    )
+
+    selected = [region["id"] for region in result["selected_regions"]]
+    assert selected[0] == "memory"
+
+    tools = _tools(result)
+    assert tools[:3] == ["recall_experiences", "inspect", "record_experience"]
+    recall = result["next_actions"][0]
+    assert recall["suggested_args"]["top_k"] == 5
+    assert "项目理解" in recall["suggested_args"]["text"]
+    inspect = result["next_actions"][1]
+    assert inspect["suggested_args"] == {"view": "memory", "memory_preview_k": 8}
+    record = result["next_actions"][2]
+    assert record["suggested_args"]["region"] == "memory"
+    assert record["suggested_args"]["status"] == "pending"
+    assert all(action["requires_user_approval"] is True for action in result["next_actions"])
+
+
 def test_suggest_workflow_recommends_unity_ecs_consultant():
     result = suggest_workflow(
         problem="Unity ECS FlowField system architecture needs DOTS guidance.",

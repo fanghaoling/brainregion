@@ -11,6 +11,7 @@ from typing import Any
 from .regions import REGIONS_DIR, route_regions
 
 _REGION_ORDER = {
+    "memory": 5,
     "planning": 10,
     "debugging": 20,
     "performance": 30,
@@ -88,6 +89,45 @@ def _build_actions(
     def _conf(*region_ids: str) -> float:
         values = [confidence_by_id.get(rid, 0.0) for rid in region_ids]
         return max(values) if values else 0.0
+
+    if "memory" in selected_set:
+        query_text = _base_text(goal, problem, context)
+        _append_once(
+            actions,
+            _action(
+                tool="recall_experiences",
+                reason="Memory Region matched: recall relevant project experience before planning, consulting, or editing.",
+                suggested_args={"text": query_text, "top_k": 5},
+                source_regions=["memory"],
+                confidence=_conf("memory"),
+            ),
+        )
+        _append_once(
+            actions,
+            _action(
+                tool="inspect",
+                reason="Memory Region matched: inspect memory health and recent experience before adding or promoting knowledge.",
+                suggested_args={"view": "memory", "memory_preview_k": 8},
+                source_regions=["memory"],
+                confidence=_conf("memory"),
+            ),
+        )
+        _append_once(
+            actions,
+            _action(
+                tool="record_experience",
+                reason="Memory Region matched: after the result is verified, record the distilled lesson as an Experience Memory card.",
+                suggested_args={
+                    "summary": "",
+                    "details": "",
+                    "triggers": [],
+                    "region": "memory",
+                    "status": "pending",
+                },
+                source_regions=["memory"],
+                confidence=_conf("memory"),
+            ),
+        )
 
     if "planning" in selected_set:
         suggested_args: dict[str, Any] = {"goal": goal or problem or context}
