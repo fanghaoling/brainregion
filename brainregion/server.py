@@ -1050,9 +1050,10 @@ def record_experience(
     注入由 config memory_inject 门控（默认关）；召回检视见 recall_experiences；改状态见 set_experience_status。
     """
     try:
+        normalized_region = _normalize_experience_region(region)
         return memory_store.record_experience(
             summary=summary, details=details, triggers=triggers or [],
-            region=region, source=source, status=status,
+            region=normalized_region, source=source, status=status,
             valid_until_ts=valid_until_ts, supersedes=supersedes,
         )
     except ValueError:
@@ -1458,6 +1459,19 @@ def list_regions() -> dict:
     """List available Brain Regions."""
     regions = [region.to_dict() for region in _load_regions(REGIONS_DIR)]
     return {"regions": regions}
+
+
+def _normalize_experience_region(region: str | None) -> str:
+    """Normalize MCP-facing Experience Memory regions to registered brain regions."""
+    text = str(region or "").strip()
+    if not text:
+        return ""
+    normalized = re.sub(r"[\s-]+", "_", text.casefold())
+    available = {r.id for r in _load_regions(REGIONS_DIR)}
+    if normalized in available:
+        return normalized
+    choices = ", ".join(["(global)", *sorted(available)])
+    raise ValueError(f"unknown experience region: {text!r}; available: {choices}")
 
 
 # ── Phase 4:Skill/Region Manifest + Registry(三级结构地基;list_skills = discovery surface)──
