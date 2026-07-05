@@ -225,6 +225,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_snap.add_argument("--label-b", default="B", help="diff 页 B 侧标签")
     p_snap.add_argument("--open", dest="open_browser", action="store_true", help="写完后用浏览器打开 HTML")
 
+    p_debug = sub.add_parser(
+        "debug",
+        help="本地调试仪表盘：持续刷新脑区激活强度、调用状态和建议工具",
+    )
+    p_debug.add_argument("--host", default="127.0.0.1")
+    p_debug.add_argument("--port", type=int, default=8765)
+    p_debug.add_argument("--goal", default=None)
+    p_debug.add_argument("--problem", default=None)
+    p_debug.add_argument("--context", default=None)
+    p_debug.add_argument("--gold-regions", default=None, help="逗号分隔 gold region，用于观察漏唤醒")
+    p_debug.add_argument("--run", default=None)
+    p_debug.add_argument("--region", default=None)
+    p_debug.add_argument("--judge", default=None)
+    p_debug.add_argument("--history-limit", type=int, default=20)
+    p_debug.add_argument("--memory-preview-k", type=int, default=5)
+    p_debug.add_argument("--top-k", type=int, default=5)
+    p_debug.add_argument("--refresh-ms", type=int, default=2000)
+    p_debug.add_argument("--open", dest="open_browser", action="store_true")
+
     return parser
 
 
@@ -604,6 +623,28 @@ def run_snapshot(args) -> None:
         webbrowser.open(out_path.resolve().as_uri())
 
 
+def run_debug(args) -> None:
+    """启动本地 HTTP 调试仪表盘。"""
+    from brainregion.viz.debug_server import DebugDashboardOptions, parse_gold_regions, serve_debug_dashboard
+
+    options = DebugDashboardOptions(
+        host=args.host,
+        port=args.port,
+        goal=args.goal or "",
+        problem=args.problem or "",
+        context=args.context or "",
+        gold_regions=parse_gold_regions(args.gold_regions),
+        run_id=args.run or None,
+        region=args.region or None,
+        judge_id=args.judge or None,
+        history_limit=args.history_limit,
+        memory_preview_k=args.memory_preview_k,
+        top_k=args.top_k,
+        refresh_ms=args.refresh_ms,
+    )
+    serve_debug_dashboard(options, open_browser=args.open_browser)
+
+
 def main() -> None:
     # Windows GBK 控制台无法 print emoji（🔴⚠️ 等，output/markdown 与 eval 都会用到）→ 重配 stdout
     # 为 utf-8 + errors=replace，至少不崩（实际显示取决于终端 codepage）。
@@ -654,6 +695,9 @@ def main() -> None:
         return
     if args.command == "snapshot":
         run_snapshot(args)
+        return
+    if args.command == "debug":
+        run_debug(args)
         return
     common = dict(
         adapter=args.adapter, panel=args.panel, dimensions=args.dimensions,
