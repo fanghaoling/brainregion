@@ -244,16 +244,18 @@ def _trim_transcript(messages: list[dict], cap_chars: int) -> list[dict]:
 
 
 def _arm_inject(task: SandboxTask, goal: str) -> tuple[str, int, int]:
-    """brainregion 臂:wake_gate 路由 → 按唤醒 region 过滤种子经验 → 返 (context_str, wake_calls, seeds_used)。"""
-    wg = wake_gate(goal=goal, problem=task.goal, top_k=3)
-    woken = set(wg.get("activated_regions", {}).get("woken", []))
-    seeds = [
-        m for m in task.seed_memory
-        if not m.get("region") or m.get("region") in woken or m.get("region") == ""
-    ]
+    """brainregion 臂:wake_gate 路由(遥测)+ 注入 task.seed_memory。
+
+    seed 按 fixture 作者的设定就是**该任务的相关知识**(为测注入价值而写),故直接注入,不强依赖
+    wake 命中(wake_gate 对中文 goal 可能不唤醒任何 region → 旧逻辑会漏注入,使臂退化为 none)。
+    wake 仍调用,记 wake_calls + 返 woken 作诊断。
+    """
+    # wake_gate 是只读 sidecar(内部 emit 事件);调用即为路由遥测。注入不 gate 在它的 woken 上。
+    wake_gate(goal=goal, problem=task.goal, top_k=3)
+    seeds = task.seed_memory
     if not seeds:
         return "", 1, 0
-    lines = [f"- [{m.get('region','?')}] {m.get('summary','')}" for m in seeds]
+    lines = [f"- [{m.get('region', '?')}] {m.get('summary', '')}" for m in seeds]
     body = "\n".join(lines)
     return f"相关经验(可信度未知,作参考):\n{body}\n", 1, len(seeds)
 

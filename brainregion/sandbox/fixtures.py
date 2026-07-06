@@ -98,6 +98,69 @@ def test_single():
 ''',
 }
 
+# --- fixture 4:可变默认参数(跨调用共享状态)—— 难 bug + seed ---
+_F4_FILES = {
+    "registry.py": '''"""名称注册器(每个调用应独立)。"""
+
+
+def register(name, seen=[]):
+    """把 name 加入已见列表(去重),返回当前已见名字。
+
+    多次调用应各自独立:register("a") 返回 ["a"];再独立调 register("b") 返回 ["b"]。
+    """
+    if name not in seen:
+        seen.append(name)
+    return list(seen)
+''',
+}
+_F4_TESTS = {
+    "test_registry.py": '''from registry import register
+
+
+def test_first_call():
+    assert register("a") == ["a"]
+
+
+def test_second_call_should_be_independent():
+    # 这个调用不应带上 test_first_call 的状态
+    assert register("b") == ["b"]
+''',
+}
+
+# --- fixture 5:str 不可变(replace 没赋值回去)—— 难 bug + seed ---
+_F5_FILES = {
+    "normalizer.py": '''"""文本规范化。"""
+
+_VOWELS = "aeiouAEIOU"
+
+
+def remove_vowels(text):
+    """删掉 text 里所有元音字母,返回结果。
+
+    例:remove_vowels("Hello") == "Hll";remove_vowels("APPLE") == "PPL"。
+    """
+    for v in _VOWELS:
+        text.replace(v, "")
+    return text
+''',
+}
+_F5_TESTS = {
+    "test_normalizer.py": '''from normalizer import remove_vowels
+
+
+def test_lowercase():
+    assert remove_vowels("hello") == "hll"
+
+
+def test_uppercase():
+    assert remove_vowels("APPLE") == "ppl".upper()
+
+
+def test_no_vowels_unchanged():
+    assert remove_vowels("hll") == "hll"
+''',
+}
+
 SANDBOX_FIXTURES: list[SandboxTask] = [
     SandboxTask(
         id="off_by_one",
@@ -125,6 +188,38 @@ SANDBOX_FIXTURES: list[SandboxTask] = [
         gold_diff="空列表守卫:if not values: return 0.0",
         gold_regions=["debugging"],
         notes="边界处理缺失。",
+    ),
+    SandboxTask(
+        id="mutable_default",
+        goal="registry.py 的 register 第二次调用带上了第一次的状态(应各自独立),让 test_registry.py 转绿。",
+        files=_F4_FILES,
+        tests=_F4_TESTS,
+        gold_diff="seen=[] → seen=None;函数体加 if seen is None: seen = []",
+        gold_regions=["debugging"],
+        seed_memory=[
+            {
+                "region": "debugging",
+                "summary": "可变默认参数(如 seen=[])在多次调用间共享同一对象、累积状态——"
+                "用 None 哨兵 + 函数体内初始化修复(def f(seen=None): if seen is None: seen=[])",
+            }
+        ],
+        notes="难 bug:测试失败信号『多了元素』非直觉指向默认参共享;seed 直接点出 mutable-default gotcha。",
+    ),
+    SandboxTask(
+        id="string_immutable",
+        goal="normalizer.py 的 remove_vowels 没真删元音(返回原串),让 test_normalizer.py 转绿。",
+        files=_F5_FILES,
+        tests=_F5_TESTS,
+        gold_diff="text.replace(v, '') 没赋值回 → 改成 text = text.replace(v, '')",
+        gold_regions=["debugging"],
+        seed_memory=[
+            {
+                "region": "debugging",
+                "summary": "Python str 不可变:replace/strip/upper 等返回新串,必须赋值回去"
+                "(text = text.replace(...));不赋值=空操作,原串不变。",
+            }
+        ],
+        notes="难 bug:循环里 replace 看着对但没赋值;seed 点出 str 不可变需重赋值。",
     ),
 ]
 
