@@ -110,6 +110,47 @@ def test_normalize_one_str_and_dict():
     }
 
 
+# ===== QoL:bare 模型名自动归端(单模型路径) =====
+
+def test_normalize_one_bare_model_auto_resolves_to_unique_endpoint():
+    """bare 模型名唯一匹配某 endpoint.models → 自动归端(省手写 endpoint/model)。"""
+    cfg = {
+        "deepseek_openai": {"models": ["deepseek-v4-flash", "deepseek-v4-pro"]},
+        "zhipu": {"models": ["glm-5.2"]},
+    }
+    eids = {"deepseek_openai", "zhipu"}
+    assert _normalize_one("deepseek-v4-flash", eids, cfg) == {
+        "label": "deepseek_openai/deepseek-v4-flash",
+        "model": "deepseek-v4-flash",
+        "endpoint_id": "deepseek_openai",
+    }
+
+
+def test_normalize_one_bare_model_ambiguous_multiple_endpoints_raises():
+    """bare 模型名在多个 endpoint 命中 → 清晰报错(让用户用 endpoint/model 消歧)。"""
+    cfg = {"relay_a": {"models": ["gpt-5.5"]}, "relay_b": {"models": ["gpt-5.5"]}}
+    with pytest.raises(ValueError, match="多个 endpoint"):
+        _normalize_one("gpt-5.5", {"relay_a", "relay_b"}, cfg)
+
+
+def test_normalize_one_bare_model_no_match_falls_through_native():
+    """bare 模型名 0 命中 endpoint.models → 走 litellm 原生(endpoint_id=None,不变)。"""
+    cfg = {"deepseek_openai": {"models": ["deepseek-v4-flash"]}}
+    assert _normalize_one("gpt-4o", {"deepseek_openai"}, cfg) == {
+        "label": "gpt-4o", "model": "gpt-4o", "endpoint_id": None
+    }
+
+
+def test_normalize_one_explicit_short_ref_unaffected_by_auto_resolve():
+    """显式 endpoint/model 短引用仍正常(不走 auto-resolve 分支)。"""
+    cfg = {"deepseek_openai": {"models": ["deepseek-v4-flash"]}}
+    assert _normalize_one("deepseek_openai/deepseek-v4-flash", {"deepseek_openai"}, cfg) == {
+        "label": "deepseek_openai/deepseek-v4-flash",
+        "model": "deepseek-v4-flash",
+        "endpoint_id": "deepseek_openai",
+    }
+
+
 # ===== v2.3 短引用 endpoint_id/model + 全展开 endpoint_id =====
 
 def test_normalize_panel_short_ref():
