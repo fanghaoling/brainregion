@@ -88,17 +88,24 @@ def _resolve_executable(argv: list[str], cwd: Path, root: dict[str, str]) -> lis
     program = argv[0]
     if not any(sep in program for sep in ("/", "\\")) and not Path(program).is_absolute():
         return argv
-    path = Path(program)
-    if not path.is_absolute():
-        path = cwd / path
-    path = path.expanduser().resolve(strict=False)
+    original = Path(program)
+    if not original.is_absolute():
+        original = cwd / program
+    original = original.expanduser()  # 不 resolve —— 保留 venv symlink(见下)
+    resolved = original.resolve(strict=False)  # resolve —— 仅用于 root 收容 + python 识别校验
     root_path = Path(root["path"])
-    if _is_relative_to(path, root_path):
-        if not path.exists():
-            raise FileNotFoundError(str(path))
-        return [str(path), *argv[1:]]
-    if _looks_like_python(str(path)):
-        return [str(path), *argv[1:]]
+    if _is_relative_to(resolved, root_path):
+        if not resolved.exists():
+            raise FileNotFoundError(str(resolved))
+        return [str(resolved), *argv[1:]]
+    if _looks_like_python(str(resolved)):
+        # 用**原始路径**执行(非 resolved):Linux 上 .venv/bin/python 是 symlink → resolve 会跟到
+        # 基底 CPython(无 venv site-packages,`python -m pytest` 会 "No module named pytest",CI 全红)。
+        # 保留 symlink 让 venv(pyvenv.cfg)生效。Windows python.exe 非 symlink → original==resolved 无影响。
+        # 安全:_looks_like_python 判的是 resolved basename(target 是不是 python),target 非则早 PermissionError。
+        if not original.exists():
+            raise FileNotFoundError(str(original))
+        return [str(original), *argv[1:]]
     raise PermissionError("executable path is outside allowed workspace roots")
 
 

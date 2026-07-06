@@ -34,6 +34,24 @@ def test_looks_like_python_recognizes_versioned_names():
         assert not _looks_like_python(bad), bad
 
 
+def test_resolve_executable_preserves_venv_symlink(tmp_path, monkeypatch):
+    """Linux .venv/bin/python 是 symlink → resolve 跟到基底 CPython(丢 venv 包);须保留 symlink 执行。"""
+    import os as _os
+
+    link = tmp_path.parent / "python3_venv_link"
+    try:
+        _os.symlink(sys.executable, link)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink 不可建(Windows 无权限或非 symlink venv 模式)")
+    from brainregion.workspace.commands import _resolve_executable
+
+    monkeypatch.setenv("BRAIN_REGION_WORKSPACE_ROOTS", str(tmp_path))
+    # link 在 root 外;resolved basename = sys.executable 的 basename(python*)→ 放行;
+    # 但执行路径必须保留 link(symlink),不能 resolve 到基底 CPython。
+    cmd = _resolve_executable([str(link)], tmp_path, {"path": str(tmp_path)})
+    assert cmd[0] == str(link), f"应保留 venv symlink 执行,got {cmd[0]}"
+
+
 def test_workspace_run_check_supports_allowed_cwd(workspace_root):
     (workspace_root / "sub").mkdir()
 
