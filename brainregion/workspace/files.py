@@ -606,7 +606,18 @@ def apply_text_patch(
     changed = old_text != new_text
 
     if changed and not dry_run:
-        target.write_bytes(new_raw)
+        # 原子 + durable 写(ISS-016):写 temp → os.fsync → os.replace。
+        # os.replace 是原子重命名(POSIX 原子 / Windows 近似)→ crash 中途 target 要么旧要么新,不半截损坏;
+        # fsync 保证数据落盘后再换名 → 掉电不丢。失败时清 temp 不留孤儿。
+        tmp = target.with_name(target.name + ".tmp")
+        try:
+            with tmp.open("wb") as fh:
+                fh.write(new_raw)
+                os.fsync(fh.fileno())
+            os.replace(tmp, target)
+        except OSError:
+            tmp.unlink(missing_ok=True)
+            raise
 
     event_type = "workspace.file_patch_dry_run" if dry_run else "workspace.file_patch_applied"
     emit_event(
