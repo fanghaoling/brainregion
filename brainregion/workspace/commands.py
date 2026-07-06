@@ -129,6 +129,7 @@ def workspace_run_check(
 
     started = time.perf_counter()
     timed_out = False
+    launch_error: str | None = None
     exit_code: int | None
     stdout = ""
     stderr = ""
@@ -155,14 +156,30 @@ def workspace_run_check(
         exit_code = None
         stdout, stdout_truncated = _cap_output(exc.stdout, max_output_chars)
         stderr, stderr_truncated = _cap_output(exc.stderr, max_output_chars)
+    except (subprocess.SubprocessError, OSError) as exc:
+        # Missing/unrunnable executable or other launch failure: return a clean
+        # failed status instead of bubbling up and crashing the MCP call.
+        exit_code = None
+        launch_error = f"{type(exc).__name__}: {exc}"
+        stderr, stderr_truncated = _cap_output(launch_error, max_output_chars)
 
     duration_ms = round((time.perf_counter() - started) * 1000, 3)
+    if timed_out:
+        status = "timeout"
+    elif launch_error:
+        status = "launch_failed"
+    elif exit_code == 0:
+        status = "passed"
+    else:
+        status = "failed"
     event_payload = {
         "kind": kind,
         "cwd": _relative_cwd(cwd_path, root),
+        "status": status,
         "exit_code": exit_code,
         "duration_ms": duration_ms,
         "timed_out": timed_out,
+        "launch_error": launch_error,
         "stdout_chars": len(stdout),
         "stderr_chars": len(stderr),
         "stdout_truncated": stdout_truncated,
@@ -170,8 +187,8 @@ def workspace_run_check(
     }
     emit_event("workspace.check_run", payload=event_payload)
     return {
-        "ok": exit_code == 0 and not timed_out,
-        "status": "timeout" if timed_out else ("passed" if exit_code == 0 else "failed"),
+        "ok": status == "passed",
+        "status": status,
         "kind": kind,
         "argv": normalized_argv,
         "cwd": str(cwd_path),
@@ -179,6 +196,7 @@ def workspace_run_check(
         "exit_code": exit_code,
         "duration_ms": duration_ms,
         "timeout_sec": timeout_sec,
+        "launch_error": launch_error,
         "stdout": stdout,
         "stderr": stderr,
         "stdout_truncated": stdout_truncated,

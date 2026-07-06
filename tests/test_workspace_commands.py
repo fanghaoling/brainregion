@@ -79,6 +79,21 @@ def test_workspace_run_check_caps_output_and_redacts_event_argv(workspace_root, 
     assert "argv" not in payload
 
 
+def test_workspace_run_check_surfaces_missing_executable(workspace_root, monkeypatch):
+    def boom(*args, **kwargs):
+        raise FileNotFoundError("[Errno 2] No such file or directory: 'pytest'")
+
+    monkeypatch.setattr("brainregion.workspace.commands.subprocess.run", boom)
+
+    result = workspace_run_check([sys.executable, "-m", "pytest", "--version"])
+
+    assert result["ok"] is False
+    assert result["status"] == "launch_failed"
+    assert result["exit_code"] is None
+    assert "FileNotFoundError" in result["launch_error"]
+    assert "FileNotFoundError" in result["stderr"]
+
+
 def test_server_workspace_run_check_delegates(workspace_root):
     from brainregion import server
 

@@ -246,6 +246,25 @@ def test_search_text_rejects_invalid_regex(workspace_root):
         search_text("[", regex=True)
 
 
+def test_search_text_rejects_catastrophic_regex(workspace_root):
+    (workspace_root / "a.txt").write_text("aaaa\n", encoding="utf-8")
+
+    # Nested quantifiers (the textbook ReDoS family) are rejected before compile.
+    for evil in [r"(a+)+b", r"(a*)*", r"(a+)*b", r"(?:\d+)+"]:
+        with pytest.raises(ValueError, match="catastrophic backtracking"):
+            search_text(evil, regex=True)
+
+
+def test_search_text_allows_safe_quantified_regex(workspace_root):
+    (workspace_root / "a.txt").write_text("ab12\n", encoding="utf-8")
+
+    # A group with an inner quantifier but no trailing quantifier is linear/safe.
+    result = search_text(r"(\d+)", regex=True)
+
+    assert result["count"] == 1
+    assert result["matches"][0]["text"] == "ab12"
+
+
 def test_search_text_event_redacts_query(workspace_root, monkeypatch):
     emitted = []
     monkeypatch.setattr("brainregion.workspace.files.emit_event", lambda event_type, **fields: emitted.append((event_type, fields)))

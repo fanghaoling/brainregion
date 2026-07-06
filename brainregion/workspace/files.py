@@ -280,10 +280,31 @@ def _trim_line(text: str) -> tuple[str, bool]:
     return stripped[:MAX_MATCH_TEXT_CHARS], True
 
 
+# Heuristic guard against catastrophic backtracking (ReDoS). Catches the
+# textbook family: a group that itself contains a quantifier and is then
+# quantified — ``(a+)+``, ``(a*)*``, ``(a+)*b``, ``(?:\d+)+``. This does NOT
+# eliminate all ReDoS (stdlib ``re`` has no timeout/complexity limit), but it
+# blocks the common accidental patterns a model caller might emit. Full
+# protection needs a linear-time engine (re2), deliberately not a dependency.
+_CATASTROPHIC_REGEX = re.compile(r"\([^()]*[+*?][^()]*\)\s*[+*?]")
+
+
+def _detect_catastrophic_regex(query: str) -> str | None:
+    if _CATASTROPHIC_REGEX.search(query):
+        return (
+            "regex contains a nested quantifier that may cause catastrophic "
+            "backtracking; simplify it (e.g. avoid (a+)+)"
+        )
+    return None
+
+
 def _compile_matcher(query: str, *, regex: bool, case_sensitive: bool):
     if not query:
         raise ValueError("query must not be empty")
     if regex:
+        reason = _detect_catastrophic_regex(query)
+        if reason:
+            raise ValueError(reason)
         flags = 0 if case_sensitive else re.IGNORECASE
         try:
             pattern = re.compile(query, flags)
