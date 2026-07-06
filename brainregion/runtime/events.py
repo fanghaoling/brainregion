@@ -30,6 +30,10 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _event_sequence(previous: int = 0) -> int:
+    return max(previous + 1, time.time_ns())
+
+
 class RuntimeEventStore:
     def __init__(self, *, path: Path | None = None, max_events: int = _DEFAULT_MAX_EVENTS):
         self._path = path
@@ -44,7 +48,7 @@ class RuntimeEventStore:
 
     def emit(self, event_type: str, **fields: Any) -> dict[str, Any]:
         with self._condition:
-            self._sequence += 1
+            self._sequence = _event_sequence(self._sequence)
             event = {
                 "id": fields.pop("id", uuid.uuid4().hex),
                 "sequence": self._sequence,
@@ -62,21 +66,28 @@ class RuntimeEventStore:
 
     def list(self, *, after_sequence: int = 0, limit: int = 200) -> list[dict[str, Any]]:
         limit = max(1, limit)
+        file_events = self._read_jsonl_events(after_sequence=after_sequence, limit=limit)
         with self._condition:
-            events = [dict(e) for e in self._events if int(e.get("sequence", 0)) > after_sequence]
-            return events[-limit:]
+            memory_events = [dict(e) for e in self._events if int(e.get("sequence", 0)) > after_sequence]
+        return self._merge_events(memory_events, file_events, limit=limit)
 
     def wait(self, *, after_sequence: int = 0, timeout: float = 15.0, limit: int = 200) -> list[dict[str, Any]]:
         deadline = time.monotonic() + max(0.1, timeout)
-        with self._condition:
-            while True:
+        while True:
+            events = self.list(after_sequence=after_sequence, limit=limit)
+            if events:
+                return events
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return []
+            with self._condition:
                 events = [dict(e) for e in self._events if int(e.get("sequence", 0)) > after_sequence]
                 if events:
                     return events[-max(1, limit):]
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return []
-                self._condition.wait(timeout=remaining)
+                self._condition.wait(timeout=min(0.5, remaining))
 
     def clear_memory(self) -> None:
         with self._condition:
@@ -90,6 +101,40 @@ class RuntimeEventStore:
         with path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(event, ensure_ascii=False, separators=(",", ":"), default=str))
             f.write("\n")
+
+    def _read_jsonl_events(self, *, after_sequence: int, limit: int) -> list[dict[str, Any]]:
+        path = self.path
+        if not path.exists():
+            return []
+        events: list[dict[str, Any]] = []
+        try:
+            with path.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        event = json.loads(line)
+                    except json.JSONDecodeError:
+                        continue
+                    if int(event.get("sequence", 0) or 0) > after_sequence:
+                        events.append(event)
+        except OSError:
+            return []
+        return events[-max(1, limit):]
+
+    @staticmethod
+    def _merge_events(
+        memory_events: list[dict[str, Any]],
+        file_events: list[dict[str, Any]],
+        *,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        by_id: dict[str, dict[str, Any]] = {}
+        for event in [*file_events, *memory_events]:
+            key = str(event.get("id") or event.get("sequence"))
+            by_id[key] = dict(event)
+        return sorted(by_id.values(), key=lambda e: int(e.get("sequence", 0) or 0))[-max(1, limit):]
 
 
 _DEFAULT_STORE = RuntimeEventStore()

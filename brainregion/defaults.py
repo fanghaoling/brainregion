@@ -43,6 +43,7 @@ _BUILTINS = {
     "effort": None,
     "max_cost_usd": None,
     "endpoints": {},
+    "model_prices": {},
     "model_profiles": {},
     "privacy_policy": None,
     "context_modes": {},

@@ -12,8 +12,12 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 
 import litellm
+
+from brainregion.runtime import emit_event
+from brainregion.runtime.pricing import model_usage_payload
 
 from .base import ModelResponse
 
@@ -105,6 +109,7 @@ class LiteLLMBackend:
                 ep_kwargs["extra_headers"] = ep["headers"]
         # endpoint timeout 覆盖全局（慢中转站）
         call_timeout = ep.get("timeout") if ep and ep.get("timeout") else self.timeout
+        provider_for_event = (ep or {}).get("provider")
 
         # OpenAI 推理模型（o 系列 + gpt-5 系列）不支持 temperature/top_p（只支持默认 1），传了报 400；
         # litellm drop_params 兜不住，按模型名显式跳过采样参数。
@@ -118,6 +123,19 @@ class LiteLLMBackend:
         else:
             sampling = {"temperature": temperature, "top_p": top_p}
 
+        emit_event(
+            "model.call_started",
+            model=model,
+            provider=provider_for_event,
+            payload={
+                "resolved_model": litellm_model,
+                "endpoint_id": endpoint_id,
+                "effort": effort,
+                "max_tokens": max_tokens,
+                "timeout": call_timeout,
+            },
+        )
+        started = time.perf_counter()
         try:
             resp = await litellm.acompletion(
                 model=litellm_model,
@@ -136,16 +154,51 @@ class LiteLLMBackend:
             usage = resp.usage.model_dump() if getattr(resp, "usage", None) else {}
             hp = getattr(resp, "_hidden_params", None) or {}
             content = resp.choices[0].message.content or ""
+            latency_ms = round((time.perf_counter() - started) * 1000, 3)
+            cost_usd = hp.get("response_cost")
+            emit_event(
+                "model.call_finished",
+                model=model,
+                provider=provider_for_event,
+                payload=model_usage_payload(
+                    provider=provider_for_event,
+                    model=model,
+                    resolved_model=litellm_model,
+                    endpoint_id=endpoint_id,
+                    usage=usage,
+                    cost_usd=cost_usd,
+                    latency_ms=latency_ms,
+                    status="ok",
+                ),
+            )
             return ModelResponse(
                 model=model,
                 content=content,
                 usage=usage,
-                cost_usd=hp.get("response_cost"),
+                cost_usd=cost_usd,
             )
         except Exception as e:  # noqa: BLE001 — 失败隔离，不向上抛
             logger.warning("LiteLLMBackend 调用失败 model=%s: %s: %s", model, type(e).__name__, e)
+            latency_ms = round((time.perf_counter() - started) * 1000, 3)
+            error = f"{type(e).__name__}: {e}"
+            emit_event(
+                "model.call_failed",
+                model=model,
+                provider=provider_for_event,
+                payload=model_usage_payload(
+                    provider=provider_for_event,
+                    model=model,
+                    resolved_model=litellm_model,
+                    endpoint_id=endpoint_id,
+                    usage={},
+                    cost_usd=None,
+                    latency_ms=latency_ms,
+                    status="error",
+                    error=error,
+                ),
+            )
             return ModelResponse(
                 model=model,
                 content="",
-                error=f"{type(e).__name__}: {e}",
+                error=error,
             )

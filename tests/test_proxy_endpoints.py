@@ -389,6 +389,51 @@ def test_backend_no_endpoint_official(monkeypatch):
     assert "api_key" not in kw
 
 
+def test_backend_emits_model_usage_events(monkeypatch):
+    emitted = []
+
+    class _Msg:
+        content = '{"issues":[]}'
+
+    class _Choice:
+        message = _Msg()
+
+    class _Usage:
+        def model_dump(self):
+            return {"prompt_tokens": 100, "completion_tokens": 25, "total_tokens": 125}
+
+    class _Resp:
+        choices = [_Choice()]
+        usage = _Usage()
+        _hidden_params = {"response_cost": 0.0042}
+
+    async def fake_acompletion(**kw):
+        return _Resp()
+
+    import litellm
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(
+        "brainregion.providers.litellm.emit_event",
+        lambda event_type, **fields: emitted.append((event_type, fields)),
+    )
+    reg = {"r": {"provider": "anthropic", "base_url": "https://x", "api_key": "k", "headers": {}, "timeout": None}}
+    backend = LiteLLMBackend(endpoint_registry=reg)
+
+    resp = asyncio.run(backend.complete(model="claude-opus-4-8", system="s", user="u", endpoint_id="r"))
+
+    assert resp.cost_usd == 0.0042
+    assert [event[0] for event in emitted] == ["model.call_started", "model.call_finished"]
+    payload = emitted[1][1]["payload"]
+    assert payload["provider"] == "anthropic"
+    assert payload["model"] == "claude-opus-4-8"
+    assert payload["resolved_model"] == "anthropic/claude-opus-4-8"
+    assert payload["canonical_model"] == "claude-opus-4-8"
+    assert payload["usage"]["input_tokens"] == 100
+    assert payload["usage"]["output_tokens"] == 25
+    assert payload["cost_usd"] == 0.0042
+    assert payload["cost_source"] == "provider"
+
+
 def test_backend_multi_endpoint_no_crosstalk(monkeypatch):
     """多 endpoint 并存：各自收到自己的 base/key，不串。"""
     cap = _patch_litellm(monkeypatch)
