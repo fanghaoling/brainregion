@@ -16,7 +16,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
-from brainregion.runtime import emit_event, list_events, wait_events
+from brainregion.runtime import canonical_model_name, emit_event, list_events, wait_events
 
 from .snapshot import build_snapshot
 
@@ -102,6 +102,215 @@ def _emit_snapshot_events(data: dict[str, Any]) -> None:
                 "action_tools": region.get("action_tools", []),
             },
         )
+
+
+_MODEL_EVENT_TYPES = {"model.call_started", "model.call_finished", "model.call_failed"}
+
+
+def _safe_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _safe_int(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _event_payload(event: dict[str, Any]) -> dict[str, Any]:
+    payload = event.get("payload")
+    return payload if isinstance(payload, dict) else {}
+
+
+def _model_identity(event: dict[str, Any]) -> dict[str, str | None]:
+    payload = _event_payload(event)
+    model = payload.get("model") or event.get("model")
+    resolved_model = payload.get("resolved_model") or model
+    canonical = payload.get("canonical_model") or canonical_model_name(resolved_model or model)
+    provider = payload.get("provider") or event.get("provider")
+    endpoint_id = payload.get("endpoint_id")
+    route = endpoint_id or provider or "official"
+    label = f"{route}/{canonical}" if route != "official" and canonical else canonical or model or "unknown"
+    return {
+        "key": f"{route}:{canonical or model or 'unknown'}",
+        "label": label,
+        "model": model,
+        "resolved_model": resolved_model,
+        "canonical_model": canonical,
+        "provider": provider,
+        "endpoint_id": endpoint_id,
+        "route": route,
+    }
+
+
+def _empty_model_stats(identity: dict[str, str | None]) -> dict[str, Any]:
+    return {
+        **identity,
+        "started_calls": 0,
+        "successful_calls": 0,
+        "failed_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0.0,
+        "known_cost_calls": 0,
+        "missing_cost_calls": 0,
+        "latency_ms_total": 0.0,
+        "latency_samples": 0,
+        "avg_latency_ms": None,
+        "last_seen": None,
+        "last_sequence": 0,
+        "last_status": None,
+        "last_error": None,
+        "cost_sources": set(),
+    }
+
+
+def _add_usage(target: dict[str, Any], usage: dict[str, Any]) -> None:
+    target["input_tokens"] += _safe_int(usage.get("input_tokens"))
+    target["output_tokens"] += _safe_int(usage.get("output_tokens"))
+    target["total_tokens"] += _safe_int(usage.get("total_tokens"))
+    target["cached_tokens"] += _safe_int(usage.get("cached_tokens"))
+    target["reasoning_tokens"] += _safe_int(usage.get("reasoning_tokens"))
+
+
+def summarize_model_events(
+    events: list[dict[str, Any]],
+    *,
+    recent_limit: int = 20,
+) -> dict[str, Any]:
+    """Aggregate model call telemetry for the debug dashboard."""
+    model_events = [event for event in events if event.get("type") in _MODEL_EVENT_TYPES]
+    totals: dict[str, Any] = {
+        "event_count": len(model_events),
+        "started_calls": 0,
+        "successful_calls": 0,
+        "failed_calls": 0,
+        "in_flight_calls": 0,
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+        "cost_usd": 0.0,
+        "known_cost_calls": 0,
+        "missing_cost_calls": 0,
+        "latency_ms_total": 0.0,
+        "latency_samples": 0,
+        "avg_latency_ms": None,
+    }
+    by_model: dict[str, dict[str, Any]] = {}
+
+    for event in sorted(model_events, key=lambda item: int(item.get("sequence", 0) or 0)):
+        event_type = str(event.get("type") or "")
+        payload = _event_payload(event)
+        identity = _model_identity(event)
+        stats = by_model.setdefault(identity["key"] or "unknown", _empty_model_stats(identity))
+        stats["last_seen"] = event.get("timestamp")
+        stats["last_sequence"] = int(event.get("sequence", 0) or 0)
+        status = payload.get("status") or ("started" if event_type == "model.call_started" else "unknown")
+        stats["last_status"] = status
+
+        if event_type == "model.call_started":
+            stats["started_calls"] += 1
+            totals["started_calls"] += 1
+            continue
+        if event_type == "model.call_failed":
+            stats["failed_calls"] += 1
+            totals["failed_calls"] += 1
+            stats["last_error"] = payload.get("error")
+        elif event_type == "model.call_finished":
+            stats["successful_calls"] += 1
+            totals["successful_calls"] += 1
+
+        usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        _add_usage(stats, usage)
+        _add_usage(totals, usage)
+
+        cost = _safe_float(payload.get("cost_usd"))
+        if cost is None:
+            stats["missing_cost_calls"] += 1
+            totals["missing_cost_calls"] += 1
+        else:
+            stats["cost_usd"] += cost
+            totals["cost_usd"] += cost
+            stats["known_cost_calls"] += 1
+            totals["known_cost_calls"] += 1
+        if payload.get("cost_source"):
+            stats["cost_sources"].add(str(payload["cost_source"]))
+
+        latency = _safe_float(payload.get("latency_ms"))
+        if latency is not None:
+            stats["latency_ms_total"] += latency
+            stats["latency_samples"] += 1
+            totals["latency_ms_total"] += latency
+            totals["latency_samples"] += 1
+
+    totals["in_flight_calls"] = max(0, totals["started_calls"] - totals["successful_calls"] - totals["failed_calls"])
+    if totals["latency_samples"]:
+        totals["avg_latency_ms"] = round(totals["latency_ms_total"] / totals["latency_samples"], 3)
+
+    models: list[dict[str, Any]] = []
+    for stats in by_model.values():
+        if stats["latency_samples"]:
+            stats["avg_latency_ms"] = round(stats["latency_ms_total"] / stats["latency_samples"], 3)
+        stats["cost_usd"] = round(stats["cost_usd"], 8)
+        stats["cost_sources"] = sorted(stats["cost_sources"])
+        stats.pop("latency_ms_total", None)
+        models.append(stats)
+    models.sort(key=lambda item: (item["last_sequence"], item["total_tokens"], item["cost_usd"]), reverse=True)
+
+    recent: list[dict[str, Any]] = []
+    for event in sorted(model_events, key=lambda item: int(item.get("sequence", 0) or 0), reverse=True)[: max(1, recent_limit)]:
+        payload = _event_payload(event)
+        identity = _model_identity(event)
+        usage = payload.get("usage") if isinstance(payload.get("usage"), dict) else {}
+        recent.append(
+            {
+                "sequence": event.get("sequence"),
+                "timestamp": event.get("timestamp"),
+                "type": event.get("type"),
+                "status": payload.get("status") or ("started" if event.get("type") == "model.call_started" else "unknown"),
+                "label": identity["label"],
+                "model": identity["model"],
+                "canonical_model": identity["canonical_model"],
+                "provider": identity["provider"],
+                "endpoint_id": identity["endpoint_id"],
+                "usage": usage,
+                "cost_usd": payload.get("cost_usd"),
+                "cost_source": payload.get("cost_source"),
+                "latency_ms": payload.get("latency_ms"),
+                "error": payload.get("error"),
+            }
+        )
+
+    totals["cost_usd"] = round(totals["cost_usd"], 8)
+    totals.pop("latency_ms_total", None)
+    return {"ok": True, "totals": totals, "models": models, "recent": recent}
+
+
+def build_model_calls_payload(params: dict[str, list[str]] | None = None) -> dict[str, Any]:
+    params = params or {}
+    after = _nonnegative_int_param(params, "after", 0)
+    limit = min(_int_param(params, "limit", 5000), 5000)
+    recent_limit = min(_int_param(params, "recent", 20), 200)
+    events = list_events(after_sequence=after, limit=limit)
+    data = summarize_model_events(events, recent_limit=recent_limit)
+    data["debug"] = {
+        "generated_at_ms": int(time.time() * 1000),
+        "after_sequence": after,
+        "event_limit": limit,
+        "recent_limit": recent_limit,
+    }
+    return data
 
 
 def build_snapshot_payload(options: DebugDashboardOptions, params: dict[str, list[str]] | None = None) -> dict[str, Any]:
@@ -312,6 +521,32 @@ button.primary {{
   max-height: 280px;
   overflow: auto;
 }}
+.table-wrap {{
+  overflow: auto;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}}
+table {{
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 760px;
+  font-size: 12px;
+}}
+th, td {{
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--line);
+  text-align: left;
+  vertical-align: top;
+}}
+th {{
+  color: var(--muted);
+  font-weight: 600;
+  background: #f4f6f2;
+}}
+tr:last-child td {{ border-bottom: 0; }}
+.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
+.model-name {{ font-weight: 700; color: var(--ink); }}
+.error-text {{ color: var(--bad); }}
 .event {{
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -379,6 +614,44 @@ pre {{
       <div id="metrics" class="grid"></div>
     </section>
     <section style="margin-top: 12px;">
+      <h2>模型调用面板</h2>
+      <div id="model-summary" class="grid"></div>
+      <div class="table-wrap" style="margin-top: 10px;">
+        <table>
+          <thead>
+            <tr>
+              <th>模型</th>
+              <th class="num">成功</th>
+              <th class="num">失败</th>
+              <th class="num">输入</th>
+              <th class="num">输出</th>
+              <th class="num">总 Token</th>
+              <th class="num">成本 USD</th>
+              <th class="num">平均延迟</th>
+              <th>价格来源</th>
+              <th>最近状态</th>
+            </tr>
+          </thead>
+          <tbody id="model-rows"></tbody>
+        </table>
+      </div>
+      <div class="table-wrap" style="margin-top: 10px;">
+        <table>
+          <thead>
+            <tr>
+              <th>最近调用</th>
+              <th>状态</th>
+              <th class="num">Token</th>
+              <th class="num">成本 USD</th>
+              <th class="num">延迟</th>
+              <th>错误</th>
+            </tr>
+          </thead>
+          <tbody id="recent-model-calls"></tbody>
+        </table>
+      </div>
+    </section>
+    <section style="margin-top: 12px;">
       <h2>脑区状态</h2>
       <div id="regions" class="regions"></div>
     </section>
@@ -405,6 +678,22 @@ function esc(value) {{
     '"': "&quot;",
     "'": "&#39;"
   }})[ch]);
+}}
+function fmtInt(value) {{
+  return Number(value || 0).toLocaleString("zh-CN");
+}}
+function fmtCost(value) {{
+  if (value === null || value === undefined || value === "") return "-";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "-";
+  if (num === 0) return "0";
+  return Math.abs(num) < 0.0001 ? num.toExponential(2) : num.toFixed(6);
+}}
+function fmtLatency(value) {{
+  if (value === null || value === undefined || value === "") return "-";
+  const num = Number(value);
+  if (!Number.isFinite(num)) return "-";
+  return num >= 1000 ? (num / 1000).toFixed(2) + "s" : Math.round(num) + "ms";
 }}
 const notes = $("notes");
 notes.value = localStorage.getItem("brainregion.debug.notes") || "";
@@ -449,6 +738,55 @@ function renderMetrics(snapshot) {{
   ];
   $("metrics").innerHTML = items.map(([label, value]) => `<div class="metric"><span class="small">${{esc(label)}}</span><b>${{esc(value)}}</b></div>`).join("");
 }}
+function renderModelCalls(data) {{
+  const totals = data.totals || {{}};
+  const items = [
+    ["总调用", (totals.successful_calls || 0) + (totals.failed_calls || 0)],
+    ["进行中", totals.in_flight_calls || 0],
+    ["失败", totals.failed_calls || 0],
+    ["总 Token", fmtInt(totals.total_tokens)],
+    ["输入 Token", fmtInt(totals.input_tokens)],
+    ["输出 Token", fmtInt(totals.output_tokens)],
+    ["推理 Token", fmtInt(totals.reasoning_tokens)],
+    ["总成本", "$" + fmtCost(totals.cost_usd)],
+    ["平均延迟", fmtLatency(totals.avg_latency_ms)],
+    ["缺价格", totals.missing_cost_calls || 0],
+  ];
+  $("model-summary").innerHTML = items.map(([label, value]) => `<div class="metric"><span class="small">${{esc(label)}}</span><b>${{esc(value)}}</b></div>`).join("");
+
+  const models = data.models || [];
+  $("model-rows").innerHTML = models.length ? models.map((m) => {{
+    const sources = (m.cost_sources || []).join(", ") || "-";
+    const lastStatus = m.last_error ? `${{m.last_status || "-"}} · ${{m.last_error}}` : (m.last_status || "-");
+    return `<tr>
+      <td><div class="model-name">${{esc(m.label || m.canonical_model || m.model || "unknown")}}</div><div class="small">${{esc(m.resolved_model || "")}}</div></td>
+      <td class="num">${{fmtInt(m.successful_calls)}}</td>
+      <td class="num">${{fmtInt(m.failed_calls)}}</td>
+      <td class="num">${{fmtInt(m.input_tokens)}}</td>
+      <td class="num">${{fmtInt(m.output_tokens)}}</td>
+      <td class="num">${{fmtInt(m.total_tokens)}}</td>
+      <td class="num">${{fmtCost(m.cost_usd)}}</td>
+      <td class="num">${{fmtLatency(m.avg_latency_ms)}}</td>
+      <td>${{esc(sources)}}</td>
+      <td>${{m.last_error ? `<span class="error-text">${{esc(lastStatus)}}</span>` : esc(lastStatus)}}</td>
+    </tr>`;
+  }}).join("") : `<tr><td colspan="10" class="small">还没有模型调用事件</td></tr>`;
+
+  const recent = data.recent || [];
+  $("recent-model-calls").innerHTML = recent.length ? recent.map((call) => {{
+    const usage = call.usage || {{}};
+    const tokenText = fmtInt(usage.total_tokens || 0);
+    const error = call.error ? String(call.error).slice(0, 160) : "";
+    return `<tr>
+      <td><div class="model-name">${{esc(call.label || call.model || "unknown")}}</div><div class="small">#${{esc(call.sequence || "-")}} · ${{esc(call.timestamp || "")}}</div></td>
+      <td>${{esc(call.status || call.type || "-")}}</td>
+      <td class="num">${{tokenText}}</td>
+      <td class="num">${{fmtCost(call.cost_usd)}}</td>
+      <td class="num">${{fmtLatency(call.latency_ms)}}</td>
+      <td>${{error ? `<span class="error-text">${{esc(error)}}</span>` : "-"}}</td>
+    </tr>`;
+  }}).join("") : `<tr><td colspan="6" class="small">还没有最近调用</td></tr>`;
+}}
 function renderRegions(snapshot) {{
   const regions = snapshot.regions || [];
   $("regions").innerHTML = regions.map((r) => {{
@@ -467,6 +805,7 @@ function renderRegions(snapshot) {{
 }}
 let lastEventSequence = 0;
 const eventWindow = [];
+let modelRefreshPending = false;
 function pushEvent(event) {{
   const seq = Number(event.sequence || 0);
   if (seq && seq <= lastEventSequence) return;
@@ -474,6 +813,7 @@ function pushEvent(event) {{
   eventWindow.unshift(event);
   while (eventWindow.length > 100) eventWindow.pop();
   renderEvents();
+  if (String(event.type || "").startsWith("model.call")) scheduleModelRefresh();
 }}
 function renderEvents() {{
   const box = $("events");
@@ -500,6 +840,24 @@ async function loadInitialEvents() {{
     (data.events || []).forEach(pushEvent);
   }} catch (err) {{
     return;
+  }}
+}}
+function scheduleModelRefresh() {{
+  if (modelRefreshPending) return;
+  modelRefreshPending = true;
+  setTimeout(() => {{
+    modelRefreshPending = false;
+    loadModelCalls();
+  }}, 150);
+}}
+async function loadModelCalls() {{
+  if (paused) return;
+  try {{
+    const res = await fetch("/api/models?limit=5000&recent=20", {{cache: "no-store"}});
+    if (!res.ok) throw new Error(`HTTP ${{res.status}}`);
+    renderModelCalls(await res.json());
+  }} catch (err) {{
+    $("model-summary").innerHTML = `<div class="metric"><span class="small">模型面板错误</span><b>${{esc(String(err))}}</b></div>`;
   }}
 }}
 function connectEvents() {{
@@ -540,8 +898,12 @@ $("pause").addEventListener("click", () => {{
   if (!paused) loadSnapshot();
 }});
 loadInitialEvents().then(connectEvents);
-timer = setInterval(loadSnapshot, refreshMs);
+timer = setInterval(() => {{
+  loadSnapshot();
+  loadModelCalls();
+}}, refreshMs);
 loadSnapshot();
+loadModelCalls();
 </script>
 </body>
 </html>"""
@@ -569,6 +931,9 @@ class _DebugHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/events/stream":
             self._send_sse(parse_qs(parsed.query, keep_blank_values=True))
+            return
+        if parsed.path == "/api/models":
+            self._send_json(build_model_calls_payload(parse_qs(parsed.query, keep_blank_values=True)))
             return
         if parsed.path == "/api/snapshot":
             try:
