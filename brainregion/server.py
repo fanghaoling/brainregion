@@ -66,6 +66,7 @@ from .memory import MemoryProvider, governance, store as memory_store  # noqa: E
 from .git import GitProvider  # noqa: E402
 from .privacy import build_policy  # noqa: E402
 from .providers import LiteLLMBackend  # noqa: E402
+from .workspace import apply_text_patch as _apply_text_patch  # noqa: E402
 from .workspace import inspect_file as _inspect_file  # noqa: E402
 from .workspace import list_allowed_roots as _list_allowed_roots  # noqa: E402
 from .workspace import read_text as _read_text  # noqa: E402
@@ -1511,6 +1512,24 @@ def search_text(
         max_results=max_results,
         context_lines=context_lines,
         max_file_bytes=max_file_bytes,
+    )
+
+
+@mcp.tool()
+def apply_text_patch(
+    path: str,
+    expected_sha256: str,
+    replacements: list[dict],
+    dry_run: bool = True,
+    max_diff_bytes: int = 128000,
+) -> dict:
+    """Apply exact UTF-8 text replacements with a required sha256 guard."""
+    return _apply_text_patch(
+        path,
+        expected_sha256=expected_sha256,
+        replacements=replacements,
+        dry_run=dry_run,
+        max_diff_bytes=max_diff_bytes,
     )
 
 

@@ -5,7 +5,14 @@ from pathlib import Path
 
 import pytest
 
-from brainregion.workspace.files import MAX_READ_FILE_BYTES, inspect_file, list_allowed_roots, read_text, search_text
+from brainregion.workspace.files import (
+    MAX_READ_FILE_BYTES,
+    apply_text_patch,
+    inspect_file,
+    list_allowed_roots,
+    read_text,
+    search_text,
+)
 
 
 @pytest.fixture()
@@ -92,6 +99,101 @@ def test_read_text_rejects_oversized_files(workspace_root):
         read_text("huge.txt")
 
 
+def test_apply_text_patch_defaults_to_dry_run(workspace_root):
+    p = workspace_root / "edit.txt"
+    p.write_text("alpha\nbeta\n", encoding="utf-8", newline="\n")
+    sha = hashlib.sha256(p.read_bytes()).hexdigest()
+
+    result = apply_text_patch(
+        "edit.txt",
+        expected_sha256=sha,
+        replacements=[{"old_text": "beta", "new_text": "gamma"}],
+    )
+
+    assert result["ok"] is True
+    assert result["dry_run"] is True
+    assert result["changed"] is True
+    assert result["old_sha256"] == sha
+    assert result["new_sha256"] != sha
+    assert "-beta" in result["diff"]
+    assert "+gamma" in result["diff"]
+    assert p.read_text(encoding="utf-8") == "alpha\nbeta\n"
+
+
+def test_apply_text_patch_writes_when_dry_run_false(workspace_root):
+    p = workspace_root / "edit.txt"
+    p.write_text("alpha\nbeta\n", encoding="utf-8", newline="\n")
+    sha = hashlib.sha256(p.read_bytes()).hexdigest()
+
+    result = apply_text_patch(
+        "edit.txt",
+        expected_sha256=sha,
+        replacements=[{"old_text": "beta", "new_text": "gamma"}],
+        dry_run=False,
+    )
+
+    assert result["dry_run"] is False
+    assert p.read_text(encoding="utf-8") == "alpha\ngamma\n"
+    assert hashlib.sha256(p.read_bytes()).hexdigest() == result["new_sha256"]
+
+
+def test_apply_text_patch_rejects_hash_mismatch(workspace_root):
+    p = workspace_root / "edit.txt"
+    p.write_text("alpha\nbeta\n", encoding="utf-8", newline="\n")
+
+    with pytest.raises(ValueError, match="expected_sha256"):
+        apply_text_patch(
+            "edit.txt",
+            expected_sha256="0" * 64,
+            replacements=[{"old_text": "beta", "new_text": "gamma"}],
+            dry_run=False,
+        )
+
+    assert p.read_text(encoding="utf-8") == "alpha\nbeta\n"
+
+
+def test_apply_text_patch_rejects_ambiguous_or_missing_old_text(workspace_root):
+    p = workspace_root / "edit.txt"
+    p.write_text("same\nsame\n", encoding="utf-8", newline="\n")
+    sha = hashlib.sha256(p.read_bytes()).hexdigest()
+
+    with pytest.raises(ValueError, match="ambiguous"):
+        apply_text_patch("edit.txt", expected_sha256=sha, replacements=[{"old_text": "same", "new_text": "new"}])
+    with pytest.raises(ValueError, match="not found"):
+        apply_text_patch("edit.txt", expected_sha256=sha, replacements=[{"old_text": "missing", "new_text": "new"}])
+
+
+def test_apply_text_patch_rejects_sensitive_files(workspace_root):
+    p = workspace_root / ".env"
+    p.write_text("API_KEY=secret\n", encoding="utf-8")
+    sha = hashlib.sha256(p.read_bytes()).hexdigest()
+
+    with pytest.raises(PermissionError, match="sensitive env file"):
+        apply_text_patch(".env", expected_sha256=sha, replacements=[{"old_text": "secret", "new_text": "redacted"}])
+
+
+def test_apply_text_patch_event_redacts_patch_content(workspace_root, monkeypatch):
+    emitted = []
+    monkeypatch.setattr("brainregion.workspace.files.emit_event", lambda event_type, **fields: emitted.append((event_type, fields)))
+    p = workspace_root / "edit.txt"
+    p.write_text("secret-old\n", encoding="utf-8", newline="\n")
+    sha = hashlib.sha256(p.read_bytes()).hexdigest()
+
+    result = apply_text_patch(
+        "edit.txt",
+        expected_sha256=sha,
+        replacements=[{"old_text": "secret-old", "new_text": "secret-new"}],
+        dry_run=False,
+    )
+
+    assert result["changed"] is True
+    assert emitted[0][0] == "workspace.file_patch_applied"
+    payload_text = str(emitted[0][1]["payload"])
+    assert "secret-old" not in payload_text
+    assert "secret-new" not in payload_text
+    assert "diff_sha256" in emitted[0][1]["payload"]
+
+
 def test_search_text_finds_utf8_with_globs_and_context(workspace_root):
     (workspace_root / "src").mkdir()
     (workspace_root / "docs").mkdir()
@@ -167,8 +269,15 @@ def test_server_mcp_tools_delegate_to_workspace(workspace_root):
     inspected = server.inspect_file("tool.txt")
     read = server.read_text("tool.txt")
     searched = server.search_text("hello")
+    patched = server.apply_text_patch(
+        "tool.txt",
+        expected_sha256=read["sha256"],
+        replacements=[{"old_text": "hello", "new_text": "hi"}],
+    )
 
     assert roots["count"] == 1
     assert inspected["relative_path"] == "tool.txt"
     assert read["text"] == "hello\n"
     assert searched["matches"][0]["relative_path"] == "tool.txt"
+    assert patched["dry_run"] is True
+    assert "hi" in patched["diff"]

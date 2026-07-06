@@ -1,11 +1,12 @@
-"""Safe read-only workspace file tools.
+"""Safe workspace file tools.
 
 These helpers are intentionally conservative: they only read inside configured
 workspace roots, deny common secret/generated dependency paths, and cap returned
-text. Write/edit tools should build on the same root and hash checks later.
+text. Edit tools require a content hash and default to dry-run.
 """
 from __future__ import annotations
 
+import difflib
 import hashlib
 import fnmatch
 import os
@@ -25,6 +26,9 @@ HARD_SEARCH_MAX_RESULTS = 500
 DEFAULT_SEARCH_MAX_FILE_BYTES = 1_000_000
 MAX_CONTEXT_LINES = 3
 MAX_MATCH_TEXT_CHARS = 320
+MAX_PATCH_REPLACEMENTS = 20
+DEFAULT_MAX_DIFF_BYTES = 128_000
+HARD_MAX_DIFF_BYTES = 512_000
 
 _DENIED_DIRS = {
     ".git",
@@ -232,6 +236,23 @@ def _cap_text(text: str, max_bytes: int) -> tuple[str, bool]:
         return text, False
     capped = encoded[:max_bytes]
     return capped.decode("utf-8", errors="ignore"), True
+
+
+def _read_existing_utf8(path: Path) -> tuple[bytes, str]:
+    if not path.exists():
+        raise FileNotFoundError(str(path))
+    if not path.is_file():
+        raise IsADirectoryError(str(path))
+    size_bytes = path.stat().st_size
+    if size_bytes > MAX_READ_FILE_BYTES:
+        raise ValueError(f"file is too large to read safely: {size_bytes} bytes")
+    raw = path.read_bytes()
+    if _looks_binary(raw[:MAX_INSPECT_SAMPLE]):
+        raise ValueError("binary files are not supported")
+    try:
+        return raw, raw.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise ValueError(f"file is not valid UTF-8: {exc}") from exc
 
 
 def _as_patterns(value: list[str] | tuple[str, ...] | str | None) -> list[str]:
@@ -455,6 +476,123 @@ def search_text(
     }
 
 
+def _as_replacements(replacements: list[dict[str, Any]] | None) -> list[dict[str, str]]:
+    if not replacements:
+        raise ValueError("replacements must not be empty")
+    if len(replacements) > MAX_PATCH_REPLACEMENTS:
+        raise ValueError(f"too many replacements: max {MAX_PATCH_REPLACEMENTS}")
+    normalized: list[dict[str, str]] = []
+    for index, item in enumerate(replacements):
+        if not isinstance(item, dict):
+            raise ValueError(f"replacement[{index}] must be an object")
+        old_text = str(item.get("old_text") or "")
+        if not old_text:
+            raise ValueError(f"replacement[{index}].old_text must not be empty")
+        normalized.append({"old_text": old_text, "new_text": str(item.get("new_text") or "")})
+    return normalized
+
+
+def _apply_exact_replacements(text: str, replacements: list[dict[str, str]]) -> tuple[str, list[dict[str, Any]]]:
+    current = text
+    applied: list[dict[str, Any]] = []
+    for index, replacement in enumerate(replacements):
+        old_text = replacement["old_text"]
+        occurrences = current.count(old_text)
+        if occurrences == 0:
+            raise ValueError(f"replacement[{index}].old_text was not found")
+        if occurrences > 1:
+            raise ValueError(f"replacement[{index}].old_text is ambiguous: {occurrences} occurrences")
+        new_text = replacement["new_text"]
+        current = current.replace(old_text, new_text, 1)
+        applied.append(
+            {
+                "index": index,
+                "old_chars": len(old_text),
+                "new_chars": len(new_text),
+                "changed": old_text != new_text,
+            }
+        )
+    return current, applied
+
+
+def _diff_text(path: str, old_text: str, new_text: str, max_diff_bytes: int) -> tuple[str, bool]:
+    diff = "".join(
+        difflib.unified_diff(
+            old_text.splitlines(keepends=True),
+            new_text.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+        )
+    )
+    return _cap_text(diff, max_diff_bytes)
+
+
+def apply_text_patch(
+    path: str,
+    *,
+    expected_sha256: str,
+    replacements: list[dict[str, Any]],
+    dry_run: bool = True,
+    max_diff_bytes: int = DEFAULT_MAX_DIFF_BYTES,
+) -> dict[str, Any]:
+    """Apply exact UTF-8 text replacements inside an allowed workspace file.
+
+    ``old_text`` must occur exactly once after prior replacements. This keeps
+    model-authored edits deterministic and rejects ambiguous patches.
+    """
+    if not expected_sha256:
+        raise ValueError("expected_sha256 is required")
+    target, root = _resolve_target(path)
+    raw, old_text = _read_existing_utf8(target)
+    old_sha256 = hashlib.sha256(raw).hexdigest()
+    if old_sha256 != expected_sha256:
+        raise ValueError("expected_sha256 does not match current file")
+
+    normalized = _as_replacements(replacements)
+    new_text, applied = _apply_exact_replacements(old_text, normalized)
+    new_raw = new_text.encode("utf-8")
+    new_sha256 = hashlib.sha256(new_raw).hexdigest()
+    relative_path = str(target.relative_to(Path(root["path"])))
+    max_diff_bytes = max(1, min(int(max_diff_bytes or DEFAULT_MAX_DIFF_BYTES), HARD_MAX_DIFF_BYTES))
+    diff, diff_truncated = _diff_text(relative_path.replace("\\", "/"), old_text, new_text, max_diff_bytes)
+    changed = old_text != new_text
+
+    if changed and not dry_run:
+        target.write_bytes(new_raw)
+
+    event_type = "workspace.file_patch_dry_run" if dry_run else "workspace.file_patch_applied"
+    emit_event(
+        event_type,
+        payload={
+            "path": relative_path,
+            "dry_run": dry_run,
+            "changed": changed,
+            "replacements": len(applied),
+            "bytes_before": len(raw),
+            "bytes_after": len(new_raw),
+            "diff_sha256": hashlib.sha256(diff.encode("utf-8")).hexdigest(),
+            "diff_truncated": diff_truncated,
+            "old_sha256": old_sha256,
+            "new_sha256": new_sha256,
+        },
+    )
+    return {
+        "ok": True,
+        "path": str(target),
+        "relative_path": relative_path,
+        "root": root,
+        "dry_run": dry_run,
+        "changed": changed,
+        "replacements": applied,
+        "old_sha256": old_sha256,
+        "new_sha256": new_sha256,
+        "bytes_before": len(raw),
+        "bytes_after": len(new_raw),
+        "diff": diff,
+        "diff_truncated": diff_truncated,
+    }
+
+
 def read_text(
     path: str,
     *,
@@ -464,22 +602,8 @@ def read_text(
 ) -> dict[str, Any]:
     """Read UTF-8 text from an allowed workspace file."""
     target, root = _resolve_target(path)
-    if not target.exists():
-        raise FileNotFoundError(str(target))
-    if not target.is_file():
-        raise IsADirectoryError(str(target))
-    size_bytes = target.stat().st_size
-    if size_bytes > MAX_READ_FILE_BYTES:
-        raise ValueError(f"file is too large to read safely: {size_bytes} bytes")
-
     max_bytes = max(1, min(int(max_bytes or DEFAULT_MAX_BYTES), HARD_MAX_BYTES))
-    raw = target.read_bytes()
-    if _looks_binary(raw[:MAX_INSPECT_SAMPLE]):
-        raise ValueError("binary files are not supported")
-    try:
-        text = raw.decode("utf-8")
-    except UnicodeDecodeError as exc:
-        raise ValueError(f"file is not valid UTF-8: {exc}") from exc
+    raw, text = _read_existing_utf8(target)
 
     root_path = Path(root["path"])
     lines = text.splitlines(keepends=True)
