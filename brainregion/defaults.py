@@ -61,6 +61,13 @@ _BUILTINS = {
     "planner_panel": [],
     "planner_max_input_chars": 24000,
     "planner_max_cost_usd": None,
+    # 沙盒(agent loop)配置 —— opt-in(CLI 触发,默认不跑;详见 sandbox/)
+    "sandbox_max_steps": 10,
+    "sandbox_max_cost_usd": 0.5,
+    "sandbox_main_brain": "",
+    "sandbox_consecutive_error_limit": 3,
+    "sandbox_transcript_token_cap": 24000,
+    "sandbox_temperature": 0.0,
 }
 
 
@@ -148,7 +155,15 @@ def _coerce(key: str, val: str):
     if key == "memory_scope":
         v = val.strip().lower()
         return v if v in MEMORY_SCOPE_MODES else "woken"
-    if key in ("temperature", "timeout", "max_cost_usd", "consult_max_cost_usd", "planner_max_cost_usd"):
+    if key in (
+        "temperature",
+        "timeout",
+        "max_cost_usd",
+        "consult_max_cost_usd",
+        "planner_max_cost_usd",
+        "sandbox_max_cost_usd",
+        "sandbox_temperature",
+    ):
         try:
             return float(val)
         except ValueError:
@@ -161,6 +176,9 @@ def _coerce(key: str, val: str):
         "consult_max_input_chars",
         "planner_max_input_chars",
         "context_top_k",
+        "sandbox_max_steps",
+        "sandbox_consecutive_error_limit",
+        "sandbox_transcript_token_cap",
     ):
         try:
             return int(val)

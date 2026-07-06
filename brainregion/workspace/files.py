@@ -6,6 +6,8 @@ text. Edit tools require a content hash and default to dry-run.
 """
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import difflib
 import hashlib
 import fnmatch
@@ -55,6 +57,27 @@ _DENIED_SUFFIXES = {
     ".der",
 }
 
+# Run-local workspace-root override（ContextVar）。沙盒 agent loop 每跑一个 run 设一个 root，
+# 优先级高于进程级 env —— 并发 eval 各 run 互不串根（review consensus:env 是全局可变状态）。
+_workspace_root_override: contextvars.ContextVar[tuple[str, ...] | None] = contextvars.ContextVar(
+    "brainregion_workspace_root_override", default=None
+)
+
+
+@contextlib.contextmanager
+def scoped_workspace_root(*roots: str):
+    """在 with 块内把 workspace root 收容到 ``roots``（run-local，并发安全）。
+
+    沙盒用:每个 run 物化 fixture 到 tmp_dir 后 ``with scoped_workspace_root(tmp_dir):`` 包住
+    run_agent,期间所有 workspace 工具只在该 root 操作。ContextVar 自动随 asyncio task 上下文
+    隔离,并发 run 各自独立;出 with 块自动 reset。
+    """
+    token = _workspace_root_override.set(tuple(r for r in roots if r))
+    try:
+        yield
+    finally:
+        _workspace_root_override.reset(token)
+
 
 def _as_root_list(value: Any) -> list[str]:
     if not value:
@@ -89,6 +112,10 @@ def _dedupe_paths(paths: list[Path]) -> list[Path]:
 
 
 def _configured_roots() -> list[tuple[Path, str]]:
+    override = _workspace_root_override.get()
+    if override:
+        return [(Path(raw), "contextvar:override") for raw in override]
+
     env_roots = _as_root_list(os.environ.get("BRAIN_REGION_WORKSPACE_ROOTS"))
     if env_roots:
         return [(Path(raw), "env:BRAIN_REGION_WORKSPACE_ROOTS") for raw in env_roots]

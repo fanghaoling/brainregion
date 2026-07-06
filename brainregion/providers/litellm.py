@@ -7,6 +7,10 @@ asset-generator-mcp 的 _http.py**。httpx 直连，不需单独装 openai/anthr
 
 强制 JSON：统一 `response_format={"type":"json_object"}`（国产严格 json_schema 不可靠，
 json_object + prompt 贴 schema 范例 + parsing 防御解析）。调用方可通过构造参数覆盖。
+
+`complete`（system+user 两段）服务 review/consult/capability 等单次调用；
+`complete_messages`（完整 messages 列表）服务沙盒 agent loop——跨步携带对话历史 + tool-result。
+两者共用 `_acomplete`（endpoint 解析 / 采样 / effort / 事件 / 失败隔离）。
 """
 from __future__ import annotations
 
@@ -46,10 +50,18 @@ def _effort_kwargs(model: str, effort: str | None) -> dict:
     return {}
 
 
+def _is_json_format_rejection(exc: Exception) -> bool:
+    """provider 拒绝 response_format=json_object？命中则回退纯文本（靠 extract_json_object 解析）。"""
+    msg = str(exc).lower()
+    if "response_format" in msg:
+        return True
+    return "json" in msg and "format" in msg
+
+
 class LiteLLMBackend:
     """基于 litellm 的 ModelBackend 实现。
 
-    litellm 延迟 import（在 complete 内），避免 server 启动时加载重依赖、且让"不用 litellm
+    litellm 延迟 import（在 _acomplete 内），避免 server 启动时加载重依赖、且让"不用 litellm
     的自定义 backend"场景不必装 litellm。
     """
 
@@ -71,26 +83,8 @@ class LiteLLMBackend:
         # credential 只存活在 backend 边缘（调用时查 registry），不进 PipelineContext。
         self.endpoint_registry = endpoint_registry or {}
 
-    async def complete(
-        self,
-        *,
-        model: str,
-        system: str,
-        user: str,
-        temperature: float = 0.3,
-        top_p: float = 0.95,
-        max_tokens: int = 4096,
-        effort: str | None = None,
-        endpoint_id: str | None = None,
-    ) -> ModelResponse:
-        import litellm  # 延迟 import
-
-        # 自动丢弃 provider 不支持的参数（zai/volcengine/anthropic 兼容端不支持 response_format）。
-        # 国产模型靠 prompt 强制 JSON + ParseStage 防御解析兜底。
-        litellm.drop_params = True
-
-        # v1.6：中转站/自定义 endpoint。endpoint_id 查 registry 取 credential（key 不进 pipeline）。
-        # provider 决定 litellm model 前缀（openai/anthropic 是兼容网关协议）；endpoint_id=None 走官方 env。
+    def _resolve_endpoint(self, model: str, endpoint_id: str | None) -> tuple[str, dict, float, str | None]:
+        """返回 (litellm_model, ep_kwargs, call_timeout, provider_for_event)。"""
         ep = self.endpoint_registry.get(endpoint_id) if endpoint_id else None
         litellm_model = model
         ep_kwargs: dict = {}
@@ -107,21 +101,68 @@ class LiteLLMBackend:
                 ep_kwargs["api_key"] = ep["api_key"]
             if ep.get("headers"):
                 ep_kwargs["extra_headers"] = ep["headers"]
-        # endpoint timeout 覆盖全局（慢中转站）
         call_timeout = ep.get("timeout") if ep and ep.get("timeout") else self.timeout
         provider_for_event = (ep or {}).get("provider")
+        return litellm_model, ep_kwargs, call_timeout, provider_for_event
 
-        # OpenAI 推理模型（o 系列 + gpt-5 系列）不支持 temperature/top_p（只支持默认 1），传了报 400；
-        # litellm drop_params 兜不住，按模型名显式跳过采样参数。
+    @staticmethod
+    def _sampling_for(litellm_model: str, temperature: float, top_p: float, effort: str | None) -> dict:
+        """OpenAI 推理模型（o 系列 + gpt-5 系列）不支持 temperature/top_p；anthropic effort 时 temp=1。"""
         short = litellm_model.split("/")[-1]
         is_reasoning = bool(re.match(r"(?:o[1-9]|gpt-5)", short))
         is_anthropic = litellm_model.startswith("anthropic/") or "claude" in short
         if is_reasoning:
-            sampling = {}
-        elif is_anthropic:
-            sampling = {"temperature": 1 if effort else temperature}
-        else:
-            sampling = {"temperature": temperature, "top_p": top_p}
+            return {}
+        if is_anthropic:
+            return {"temperature": 1 if effort else temperature}
+        return {"temperature": temperature, "top_p": top_p}
+
+    async def _acompletion_with_fallback(
+        self,
+        messages: list[dict],
+        *,
+        litellm_model: str,
+        sampling: dict,
+        max_tokens: int,
+        call_timeout: float,
+        ep_kwargs: dict,
+        effort: str | None,
+    ) -> object:
+        """litellm.acompletion + json_object 回退：provider 拒 json_object 时去 response_format 重试。"""
+        import litellm
+
+        litellm.drop_params = True
+        base_kwargs = dict(
+            model=litellm_model,
+            messages=messages,
+            num_retries=self.num_retries,
+            timeout=call_timeout,
+            max_tokens=max_tokens,
+            **sampling,
+            **_effort_kwargs(litellm_model, effort),
+            **{k: v for k, v in ep_kwargs.items() if v is not None},
+        )
+        try:
+            return await litellm.acompletion(response_format=self.response_format, **base_kwargs)
+        except Exception as e:  # noqa: BLE001
+            if self.response_format and _is_json_format_rejection(e):
+                logger.info("response_format 被拒，回退纯文本 model=%s", litellm_model)
+                return await litellm.acompletion(**base_kwargs)
+            raise
+
+    async def _acomplete(
+        self,
+        *,
+        messages: list[dict],
+        model: str,
+        temperature: float,
+        top_p: float,
+        max_tokens: int,
+        effort: str | None,
+        endpoint_id: str | None,
+    ) -> ModelResponse:
+        litellm_model, ep_kwargs, call_timeout, provider_for_event = self._resolve_endpoint(model, endpoint_id)
+        sampling = self._sampling_for(litellm_model, temperature, top_p, effort)
 
         emit_event(
             "model.call_started",
@@ -137,19 +178,14 @@ class LiteLLMBackend:
         )
         started = time.perf_counter()
         try:
-            resp = await litellm.acompletion(
-                model=litellm_model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                num_retries=self.num_retries,
-                timeout=call_timeout,
+            resp = await self._acompletion_with_fallback(
+                messages,
+                litellm_model=litellm_model,
+                sampling=sampling,
                 max_tokens=max_tokens,
-                response_format=self.response_format,
-                **sampling,
-                **_effort_kwargs(litellm_model, effort),
-                **{k: v for k, v in ep_kwargs.items() if v is not None},
+                call_timeout=call_timeout,
+                ep_kwargs=ep_kwargs,
+                effort=effort,
             )
             usage = resp.usage.model_dump() if getattr(resp, "usage", None) else {}
             hp = getattr(resp, "_hidden_params", None) or {}
@@ -202,3 +238,51 @@ class LiteLLMBackend:
                 content="",
                 error=error,
             )
+
+    async def complete(
+        self,
+        *,
+        model: str,
+        system: str,
+        user: str,
+        temperature: float = 0.3,
+        top_p: float = 0.95,
+        max_tokens: int = 4096,
+        effort: str | None = None,
+        endpoint_id: str | None = None,
+    ) -> ModelResponse:
+        """单次调用（system+user 两段）。review/consult/capability 等用。"""
+        return await self._acomplete(
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            model=model,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            effort=effort,
+            endpoint_id=endpoint_id,
+        )
+
+    async def complete_messages(
+        self,
+        messages: list[dict],
+        *,
+        model: str,
+        temperature: float = 0.3,
+        top_p: float = 0.95,
+        max_tokens: int = 4096,
+        effort: str | None = None,
+        endpoint_id: str | None = None,
+    ) -> ModelResponse:
+        """带历史的完整 messages 列表调用。沙盒 agent loop 用（跨步携带对话 + tool-result）。"""
+        return await self._acomplete(
+            messages=messages,
+            model=model,
+            temperature=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            effort=effort,
+            endpoint_id=endpoint_id,
+        )

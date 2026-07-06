@@ -22,6 +22,7 @@ from brainregion.server import review_document
 
 # eval 子命令单独编排（不走 review_document；它直接调 engine 做 A/B 隔离）
 from brainregion.eval import cli as eval_cli
+from brainregion.sandbox import cli as sandbox_cli
 
 
 def _read_text_input(args) -> str:
@@ -179,6 +180,28 @@ def build_parser() -> argparse.ArgumentParser:
                        help="[mixed] 每个别家族的 cross-family distractor 数(= 跨区域噪声)")
     p_cap.add_argument("--sb-router-model", default="modelbridge_openai/gpt-5.4-mini",
                        help="[mixed] 现实路由小模型(读示例+家族描述→家族;默认 gpt-5.4-mini;haiku/flash 备选)")
+
+    p_sb = sub.add_parser(
+        "sandbox",
+        help="沙盒:闭环 agent harness(§15 控制环 keystone 的 code-regime 验证场;让测试过任务)",
+    )
+    p_sb_sub = p_sb.add_subparsers(dest="sandbox_command", required=True)
+    p_sb_run = p_sb_sub.add_parser("run", help="单跑一个 fixture(看 agent 轨迹)")
+    p_sb_run.add_argument("--task", default=None, help="fixture id(默认 off_by_one)")
+    p_sb_run.add_argument("--arm", default="none", choices=["none", "brainregion"], help="顾问臂")
+    p_sb_run.add_argument("--main-brain", default=None, help="主脑模型(deepseek-v4-flash / glm-5.2 等,非 Claude Code)")
+    p_sb_run.add_argument("--max-steps", type=int, default=None)
+    p_sb_run.add_argument("--max-cost-usd", type=float, default=None)
+    p_sb_run.add_argument("--max-tokens", type=int, default=None)
+    p_sb_run.add_argument("--keep", action="store_true", help="失败时保留 run_dir 供检视")
+    p_sb_eval = p_sb_sub.add_parser("eval", help="A/B(none vs brainregion)matched-pair + bootstrap CI gate")
+    p_sb_eval.add_argument("--tasks", default=None, help="逗号分隔 fixture id(默认全部)")
+    p_sb_eval.add_argument("--main-brain", default=None, help="主脑模型")
+    p_sb_eval.add_argument("--max-steps", type=int, default=None)
+    p_sb_eval.add_argument("--max-cost-usd", type=float, default=None)
+    p_sb_eval.add_argument("--max-tokens", type=int, default=None)
+    p_sb_eval.add_argument("--keep", action="store_true", help="失败时保留 run_dir")
+    p_sb_eval.add_argument("--out", default=None, help="报告 JSON 输出目录(默认 .brain-region/sandbox/)")
 
     p_ins = sub.add_parser(
         "inspect",
@@ -689,6 +712,12 @@ def main() -> None:
                 md = _capability_markdown
             result["rendered"] = md(result)
         _emit(result, args)
+        return
+    if args.command == "sandbox":
+        if args.sandbox_command == "run":
+            asyncio.run(sandbox_cli.run(args))
+        elif args.sandbox_command == "eval":
+            asyncio.run(sandbox_cli.run_eval(args))
         return
     if args.command == "inspect":
         run_inspect(args)
