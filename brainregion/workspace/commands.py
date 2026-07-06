@@ -7,6 +7,7 @@ bounded output for diagnosis.
 from __future__ import annotations
 
 import os
+import re
 import subprocess
 import time
 from pathlib import Path
@@ -36,8 +37,14 @@ def _basename(program: str) -> str:
     return name[:-4] if name.endswith(".exe") else name
 
 
+# python / python3 / python3.10 / python2.7(Linux/CI 的 sys.executable 常是版本化的 python3.x;
+# 旧集合 {python,python3,py} 不认 python3.10 → _resolve_executable 误抛 PermissionError,CI 全红)
+_VERSIONED_PYTHON = re.compile(r"^python\d*(\.\d+)?$")
+
+
 def _looks_like_python(program: str) -> bool:
-    return _basename(program) in {"python", "python3", "py"}
+    name = _basename(program)
+    return name == "py" or bool(_VERSIONED_PYTHON.match(name))
 
 
 def _check_kind(argv: list[str]) -> str:

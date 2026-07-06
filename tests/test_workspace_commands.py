@@ -24,6 +24,16 @@ def test_workspace_run_check_allows_python_pytest_version(workspace_root):
     assert "pytest" in result["stdout"].lower()
 
 
+def test_looks_like_python_recognizes_versioned_names():
+    """CI(uv + Linux)sys.executable 常是 python3.10/3.11/3.12,旧集合不认 → _resolve_executable 误拒。"""
+    from brainregion.workspace.commands import _looks_like_python
+
+    for good in ["python", "python3", "python3.10", "python3.12", "python2.7", "py", "python.exe", "Python3.11"]:
+        assert _looks_like_python(good), good
+    for bad in ["pytest", "ruff", "python_evil", "notpython", "ruby"]:
+        assert not _looks_like_python(bad), bad
+
+
 def test_workspace_run_check_supports_allowed_cwd(workspace_root):
     (workspace_root / "sub").mkdir()
 
