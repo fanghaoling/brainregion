@@ -45,6 +45,7 @@ _BUILTINS = {
     "endpoints": {},
     "model_prices": {},
     "model_profiles": {},
+    "workspace_roots": [],
     "privacy_policy": None,
     "context_modes": {},
     "min_compressed_chars": 50,

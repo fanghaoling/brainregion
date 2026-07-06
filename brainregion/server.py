@@ -66,6 +66,9 @@ from .memory import MemoryProvider, governance, store as memory_store  # noqa: E
 from .git import GitProvider  # noqa: E402
 from .privacy import build_policy  # noqa: E402
 from .providers import LiteLLMBackend  # noqa: E402
+from .workspace import inspect_file as _inspect_file  # noqa: E402
+from .workspace import list_allowed_roots as _list_allowed_roots  # noqa: E402
+from .workspace import read_text as _read_text  # noqa: E402
 
 _ADAPTERS = {"unity": UnityAdapter, "generic": GenericAdapter}
 
@@ -1459,6 +1462,29 @@ def list_regions() -> dict:
     """List available Brain Regions."""
     regions = [region.to_dict() for region in _load_regions(REGIONS_DIR)]
     return {"regions": regions}
+
+
+@mcp.tool()
+def list_allowed_roots() -> dict:
+    """List workspace roots that BrainRegion file tools may read."""
+    return _list_allowed_roots()
+
+
+@mcp.tool()
+def inspect_file(path: str) -> dict:
+    """Inspect an allowed workspace file without returning contents."""
+    return _inspect_file(path)
+
+
+@mcp.tool()
+def read_text(
+    path: str,
+    start_line: int = 1,
+    end_line: int | None = None,
+    max_bytes: int = 64000,
+) -> dict:
+    """Read UTF-8 text from an allowed workspace file with line and byte limits."""
+    return _read_text(path, start_line=start_line, end_line=end_line, max_bytes=max_bytes)
 
 
 def _normalize_experience_region(region: str | None) -> str:
