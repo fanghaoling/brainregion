@@ -69,6 +69,7 @@ from .providers import LiteLLMBackend  # noqa: E402
 from .workspace import inspect_file as _inspect_file  # noqa: E402
 from .workspace import list_allowed_roots as _list_allowed_roots  # noqa: E402
 from .workspace import read_text as _read_text  # noqa: E402
+from .workspace import search_text as _search_text  # noqa: E402
 
 _ADAPTERS = {"unity": UnityAdapter, "generic": GenericAdapter}
 
@@ -1485,6 +1486,32 @@ def read_text(
 ) -> dict:
     """Read UTF-8 text from an allowed workspace file with line and byte limits."""
     return _read_text(path, start_line=start_line, end_line=end_line, max_bytes=max_bytes)
+
+
+@mcp.tool()
+def search_text(
+    query: str,
+    root: str = "",
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    case_sensitive: bool = False,
+    regex: bool = False,
+    max_results: int = 50,
+    context_lines: int = 0,
+    max_file_bytes: int = 1000000,
+) -> dict:
+    """Search UTF-8 text files inside allowed workspace roots."""
+    return _search_text(
+        query,
+        root=root,
+        include_globs=include_globs,
+        exclude_globs=exclude_globs,
+        case_sensitive=case_sensitive,
+        regex=regex,
+        max_results=max_results,
+        context_lines=context_lines,
+        max_file_bytes=max_file_bytes,
+    )
 
 
 def _normalize_experience_region(region: str | None) -> str:

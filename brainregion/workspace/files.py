@@ -7,7 +7,9 @@ text. Write/edit tools should build on the same root and hash checks later.
 from __future__ import annotations
 
 import hashlib
+import fnmatch
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,11 @@ DEFAULT_MAX_BYTES = 64_000
 HARD_MAX_BYTES = 512_000
 MAX_READ_FILE_BYTES = 2_000_000
 MAX_INSPECT_SAMPLE = 8192
+DEFAULT_SEARCH_MAX_RESULTS = 50
+HARD_SEARCH_MAX_RESULTS = 500
+DEFAULT_SEARCH_MAX_FILE_BYTES = 1_000_000
+MAX_CONTEXT_LINES = 3
+MAX_MATCH_TEXT_CHARS = 320
 
 _DENIED_DIRS = {
     ".git",
@@ -225,6 +232,227 @@ def _cap_text(text: str, max_bytes: int) -> tuple[str, bool]:
         return text, False
     capped = encoded[:max_bytes]
     return capped.decode("utf-8", errors="ignore"), True
+
+
+def _as_patterns(value: list[str] | tuple[str, ...] | str | None) -> list[str]:
+    if not value:
+        return []
+    if isinstance(value, str):
+        items = [value]
+    else:
+        items = [str(v) for v in value]
+    return [item.replace("\\", "/") for item in items if item.strip()]
+
+
+def _path_matches(path: Path, patterns: list[str]) -> bool:
+    if not patterns:
+        return False
+    text = path.as_posix()
+    name = path.name
+    return any(fnmatch.fnmatchcase(text, pattern) or fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
+
+
+def _trim_line(text: str) -> tuple[str, bool]:
+    stripped = text.rstrip("\r\n")
+    if len(stripped) <= MAX_MATCH_TEXT_CHARS:
+        return stripped, False
+    return stripped[:MAX_MATCH_TEXT_CHARS], True
+
+
+def _compile_matcher(query: str, *, regex: bool, case_sensitive: bool):
+    if not query:
+        raise ValueError("query must not be empty")
+    if regex:
+        flags = 0 if case_sensitive else re.IGNORECASE
+        try:
+            pattern = re.compile(query, flags)
+        except re.error as exc:
+            raise ValueError(f"invalid regex query: {exc}") from exc
+        return lambda line: bool(pattern.search(line))
+    needle = query if case_sensitive else query.casefold()
+    return lambda line: needle in (line if case_sensitive else line.casefold())
+
+
+def _iter_candidate_files(
+    roots: list[dict[str, str]],
+    *,
+    include_globs: list[str],
+    exclude_globs: list[str],
+    max_file_bytes: int,
+    skipped: dict[str, int],
+):
+    for root in roots:
+        root_path = Path(root["path"])
+        for current, dirs, files in os.walk(root_path):
+            current_path = Path(current)
+            kept_dirs: list[str] = []
+            for dirname in dirs:
+                directory = current_path / dirname
+                rel_dir = directory.relative_to(root_path)
+                if _deny_reason(directory):
+                    skipped["denied"] += 1
+                    continue
+                if _path_matches(rel_dir, exclude_globs):
+                    skipped["excluded"] += 1
+                    continue
+                kept_dirs.append(dirname)
+            dirs[:] = kept_dirs
+
+            for filename in files:
+                path = current_path / filename
+                rel_path = path.relative_to(root_path)
+                if _deny_reason(path):
+                    skipped["denied"] += 1
+                    continue
+                if include_globs and not _path_matches(rel_path, include_globs):
+                    skipped["not_included"] += 1
+                    continue
+                if _path_matches(rel_path, exclude_globs):
+                    skipped["excluded"] += 1
+                    continue
+                try:
+                    size_bytes = path.stat().st_size
+                except OSError:
+                    skipped["unreadable"] += 1
+                    continue
+                if size_bytes > max_file_bytes:
+                    skipped["too_large"] += 1
+                    continue
+                yield path, root, rel_path, size_bytes
+
+
+def _context_block(lines: list[str], line_index: int, context_lines: int) -> list[dict[str, Any]]:
+    if context_lines <= 0:
+        return []
+    start = max(0, line_index - context_lines)
+    end = min(len(lines), line_index + context_lines + 1)
+    context: list[dict[str, Any]] = []
+    for idx in range(start, end):
+        text, truncated = _trim_line(lines[idx])
+        context.append({"line": idx + 1, "text": text, "truncated": truncated})
+    return context
+
+
+def search_text(
+    query: str,
+    *,
+    root: str = "",
+    include_globs: list[str] | None = None,
+    exclude_globs: list[str] | None = None,
+    case_sensitive: bool = False,
+    regex: bool = False,
+    max_results: int = DEFAULT_SEARCH_MAX_RESULTS,
+    context_lines: int = 0,
+    max_file_bytes: int = DEFAULT_SEARCH_MAX_FILE_BYTES,
+) -> dict[str, Any]:
+    """Search UTF-8 text files inside allowed workspace roots."""
+    matcher = _compile_matcher(query, regex=regex, case_sensitive=case_sensitive)
+    include = _as_patterns(include_globs)
+    exclude = _as_patterns(exclude_globs)
+    max_results = max(1, min(int(max_results or DEFAULT_SEARCH_MAX_RESULTS), HARD_SEARCH_MAX_RESULTS))
+    context_lines = max(0, min(int(context_lines or 0), MAX_CONTEXT_LINES))
+    max_file_bytes = max(1, min(int(max_file_bytes or DEFAULT_SEARCH_MAX_FILE_BYTES), MAX_READ_FILE_BYTES))
+
+    roots = _allowed_roots()
+    if root:
+        target, root_info = _resolve_target(root)
+        if not target.exists():
+            raise FileNotFoundError(str(target))
+        if not target.is_dir():
+            raise NotADirectoryError(str(target))
+        roots = [{**root_info, "path": str(target)}]
+    if not roots:
+        raise ValueError("no allowed workspace roots configured")
+
+    skipped: dict[str, int] = {
+        "denied": 0,
+        "excluded": 0,
+        "not_included": 0,
+        "too_large": 0,
+        "binary": 0,
+        "non_utf8": 0,
+        "unreadable": 0,
+    }
+    matches: list[dict[str, Any]] = []
+    scanned_files = 0
+    matched_files: set[str] = set()
+    truncated = False
+
+    for path, root_info, rel_path, size_bytes in _iter_candidate_files(
+        roots,
+        include_globs=include,
+        exclude_globs=exclude,
+        max_file_bytes=max_file_bytes,
+        skipped=skipped,
+    ):
+        try:
+            raw = path.read_bytes()
+        except OSError:
+            skipped["unreadable"] += 1
+            continue
+        if _looks_binary(raw[:MAX_INSPECT_SAMPLE]):
+            skipped["binary"] += 1
+            continue
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            skipped["non_utf8"] += 1
+            continue
+
+        scanned_files += 1
+        lines = text.splitlines(keepends=True)
+        for line_index, line in enumerate(lines):
+            if not matcher(line):
+                continue
+            preview, preview_truncated = _trim_line(line)
+            relative_path = rel_path.as_posix()
+            matches.append(
+                {
+                    "path": str(path),
+                    "relative_path": relative_path,
+                    "root": root_info,
+                    "line": line_index + 1,
+                    "text": preview,
+                    "text_truncated": preview_truncated,
+                    "context": _context_block(lines, line_index, context_lines),
+                    "size_bytes": size_bytes,
+                }
+            )
+            matched_files.add(relative_path)
+            if len(matches) >= max_results:
+                truncated = True
+                break
+        if truncated:
+            break
+
+    emit_event(
+        "workspace.text_search",
+        payload={
+            "query_sha256": hashlib.sha256(query.encode("utf-8")).hexdigest(),
+            "regex": regex,
+            "case_sensitive": case_sensitive,
+            "matches": len(matches),
+            "matched_files": len(matched_files),
+            "scanned_files": scanned_files,
+            "truncated": truncated,
+        },
+    )
+    return {
+        "ok": True,
+        "query": query,
+        "regex": regex,
+        "case_sensitive": case_sensitive,
+        "include_globs": include,
+        "exclude_globs": exclude,
+        "roots": roots,
+        "scanned_files": scanned_files,
+        "matched_files": len(matched_files),
+        "count": len(matches),
+        "max_results": max_results,
+        "truncated": truncated,
+        "skipped": skipped,
+        "matches": matches,
+    }
 
 
 def read_text(
