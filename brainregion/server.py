@@ -71,6 +71,7 @@ from .workspace import inspect_file as _inspect_file  # noqa: E402
 from .workspace import list_allowed_roots as _list_allowed_roots  # noqa: E402
 from .workspace import read_text as _read_text  # noqa: E402
 from .workspace import search_text as _search_text  # noqa: E402
+from .workspace import workspace_run_check as _workspace_run_check  # noqa: E402
 
 _ADAPTERS = {"unity": UnityAdapter, "generic": GenericAdapter}
 
@@ -1532,6 +1533,20 @@ def apply_text_patch(
         max_diff_bytes=max_diff_bytes,
     )
 
+@mcp.tool()
+def workspace_run_check(
+    argv: list[str],
+    cwd: str = "",
+    timeout_sec: int = 60,
+    max_output_chars: int = 20000,
+) -> dict:
+    """Run an allowed test/lint check command inside an allowed workspace root."""
+    return _workspace_run_check(
+        argv,
+        cwd=cwd,
+        timeout_sec=timeout_sec,
+        max_output_chars=max_output_chars,
+    )
 
 def _normalize_experience_region(region: str | None) -> str:
     """Normalize MCP-facing Experience Memory regions to registered brain regions."""
