@@ -30,23 +30,37 @@ litellm.suppress_debug_info = True  # 抑制 litellm stdout banner（CLI/MCP std
 logger = logging.getLogger("brainregion.provider.litellm")
 
 
-def _effort_kwargs(model: str, effort: str | None) -> dict:
-    """把 effort（low/medium/high/xhigh/max）映射成 provider 特定参数。
+def _effort_kwargs(model: str, effort: str | None, thinking: bool | None = None) -> dict:
+    """把 effort + thinking 开关映射成 provider 特定参数。
 
-    - Claude（4.6+）：effort 在 output_config；配 thinking adaptive 让思考生效（Opus 4.7/4.8 默认关思考）
-    - OpenAI o 系列：reasoning_effort
-    - 其余（gpt-4o/glm/deepseek 等非推理模型）：不传，litellm drop_params 也不会报错
+    - **DeepSeek**(v4-flash/pro):思考模式开关 `extra_body={"thinking":{"type":"disabled|enabled"}}`
+      (默认 enabled;关掉 = 便宜快的非推理模型,沙盒主脑用);思考开时 effort 走 `reasoning_effort`
+      (low/medium→high、xhigh→max,见 DeepSeek 文档)。`thinking=None` 保持原行为(默认开,不显式传)。
+    - Claude（4.6+）：effort 在 output_config；配 thinking adaptive 让思考生效（Opus 4.7/4.8 默认关思考）。
+    - OpenAI o 系列：reasoning_effort。
+    - 其余（gpt-4o/glm 等非推理模型）：不传,litellm drop_params 也不会报错。
     """
-    if not effort:
-        return {}
     short = model.split("/")[-1]
+    if "deepseek" in model:
+        if thinking is None:
+            # 保持原契约:effort 对 deepseek no-op(§15.6:别用 effort 压 deepseek 思考,
+            # 会抹 reasoning-cost 信号 + 制造 budget-starvation 假退化)。思考开关是独立的新能力。
+            return {}
+        if thinking is False:
+            return {"extra_body": {"thinking": {"type": "disabled"}}}
+        kw: dict = {"extra_body": {"thinking": {"type": "enabled"}}}
+        if effort:
+            kw["reasoning_effort"] = effort
+        return kw
     if "claude" in model:
+        if not effort:
+            return {}
         return {
             "thinking": {"type": "adaptive"},
             "extra_body": {"output_config": {"effort": effort}},
         }
     if re.match(r"o[1-9]", short):  # o1/o3/o4/o5 系列
-        return {"reasoning_effort": effort}
+        return {"reasoning_effort": effort} if effort else {}
     return {}
 
 
@@ -106,12 +120,17 @@ class LiteLLMBackend:
         return litellm_model, ep_kwargs, call_timeout, provider_for_event
 
     @staticmethod
-    def _sampling_for(litellm_model: str, temperature: float, top_p: float, effort: str | None) -> dict:
-        """OpenAI 推理模型（o 系列 + gpt-5 系列）不支持 temperature/top_p；anthropic effort 时 temp=1。"""
+    def _sampling_for(litellm_model: str, temperature: float, top_p: float, effort: str | None, thinking: bool | None) -> dict:
+        """OpenAI 推理模型（o 系列 + gpt-5 系列）不支持 temperature/top_p；anthropic effort 时 temp=1。
+
+        DeepSeek 思考开(默认 enabled)也不支持 temp/top_p(文档:设了不报错但不生效);思考关 → 正常采样。
+        """
         short = litellm_model.split("/")[-1]
         is_reasoning = bool(re.match(r"(?:o[1-9]|gpt-5)", short))
         is_anthropic = litellm_model.startswith("anthropic/") or "claude" in short
-        if is_reasoning:
+        # deepseek 思考【显式开】(thinking=True)→ 忽略 temp/top_p(文档);None=保持旧行为(发送),False=思考关支持采样。
+        is_deepseek_thinking_on = "deepseek" in litellm_model and thinking is True
+        if is_reasoning or is_deepseek_thinking_on:
             return {}
         if is_anthropic:
             return {"temperature": 1 if effort else temperature}
@@ -127,6 +146,7 @@ class LiteLLMBackend:
         call_timeout: float,
         ep_kwargs: dict,
         effort: str | None,
+        thinking: bool | None,
     ) -> object:
         """litellm.acompletion + json_object 回退：provider 拒 json_object 时去 response_format 重试。"""
         import litellm
@@ -139,7 +159,7 @@ class LiteLLMBackend:
             timeout=call_timeout,
             max_tokens=max_tokens,
             **sampling,
-            **_effort_kwargs(litellm_model, effort),
+            **_effort_kwargs(litellm_model, effort, thinking),
             **{k: v for k, v in ep_kwargs.items() if v is not None},
         )
         try:
@@ -160,9 +180,10 @@ class LiteLLMBackend:
         max_tokens: int,
         effort: str | None,
         endpoint_id: str | None,
+        thinking: bool | None = None,
     ) -> ModelResponse:
         litellm_model, ep_kwargs, call_timeout, provider_for_event = self._resolve_endpoint(model, endpoint_id)
-        sampling = self._sampling_for(litellm_model, temperature, top_p, effort)
+        sampling = self._sampling_for(litellm_model, temperature, top_p, effort, thinking)
 
         emit_event(
             "model.call_started",
@@ -172,6 +193,7 @@ class LiteLLMBackend:
                 "resolved_model": litellm_model,
                 "endpoint_id": endpoint_id,
                 "effort": effort,
+                "thinking": thinking,
                 "max_tokens": max_tokens,
                 "timeout": call_timeout,
             },
@@ -186,6 +208,7 @@ class LiteLLMBackend:
                 call_timeout=call_timeout,
                 ep_kwargs=ep_kwargs,
                 effort=effort,
+                thinking=thinking,
             )
             usage = resp.usage.model_dump() if getattr(resp, "usage", None) else {}
             hp = getattr(resp, "_hidden_params", None) or {}
@@ -250,6 +273,7 @@ class LiteLLMBackend:
         max_tokens: int = 4096,
         effort: str | None = None,
         endpoint_id: str | None = None,
+        thinking: bool | None = None,
     ) -> ModelResponse:
         """单次调用（system+user 两段）。review/consult/capability 等用。"""
         return await self._acomplete(
@@ -263,6 +287,7 @@ class LiteLLMBackend:
             max_tokens=max_tokens,
             effort=effort,
             endpoint_id=endpoint_id,
+            thinking=thinking,
         )
 
     async def complete_messages(
@@ -275,6 +300,7 @@ class LiteLLMBackend:
         max_tokens: int = 4096,
         effort: str | None = None,
         endpoint_id: str | None = None,
+        thinking: bool | None = None,
     ) -> ModelResponse:
         """带历史的完整 messages 列表调用。沙盒 agent loop 用（跨步携带对话 + tool-result）。"""
         return await self._acomplete(
@@ -285,4 +311,5 @@ class LiteLLMBackend:
             max_tokens=max_tokens,
             effort=effort,
             endpoint_id=endpoint_id,
+            thinking=thinking,
         )

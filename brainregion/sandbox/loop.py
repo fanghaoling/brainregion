@@ -273,6 +273,8 @@ async def run_agent(
     consecutive_error_limit: int = 3,
     python_exe: str | None = None,
     endpoint_id: str | None = None,
+    thinking: bool | None = None,
+    effort: str | None = None,
 ) -> Trajectory:
     """跑一个 agent loop。返回 Trajectory(含 verify 后的 solve_status)。"""
     import sys
@@ -305,7 +307,7 @@ async def run_agent(
             messages = _trim_transcript(messages, cap_chars)
             resp = await backend.complete_messages(
                 messages, model=model, temperature=temperature, max_tokens=max_tokens,
-                endpoint_id=endpoint_id,
+                endpoint_id=endpoint_id, thinking=thinking, effort=effort,
             )
             step_main_cost = float(resp.cost_usd or 0.0)
             traj.total_main_cost_usd += step_main_cost

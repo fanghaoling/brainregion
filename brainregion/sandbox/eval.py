@@ -104,6 +104,8 @@ async def run_sandbox_eval(
     max_tokens: int = 2048,
     keep_on_fail: bool = False,
     endpoint_id: str | None = None,
+    thinking: bool | None = None,
+    effort: str | None = None,
     **loop_kwargs: Any,
 ) -> dict[str, Any]:
     """matched-pair A/B:每 task 跑 control+treatment 两臂(各 fresh run_dir)。返报告 dict。"""
@@ -121,7 +123,7 @@ async def run_sandbox_eval(
                     backend, model, task, run_dir=run_dir, arm=arm,
                     max_steps=max_steps, max_cost_usd=max_cost_usd,
                     temperature=temperature, max_tokens=max_tokens,
-                    endpoint_id=endpoint_id, **loop_kwargs,
+                    endpoint_id=endpoint_id, thinking=thinking, effort=effort, **loop_kwargs,
                 )
             finally:
                 if not (keep_on_fail and not traj.tests_green):

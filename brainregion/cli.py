@@ -193,6 +193,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_run.add_argument("--max-steps", type=int, default=None)
     p_sb_run.add_argument("--max-cost-usd", type=float, default=None)
     p_sb_run.add_argument("--max-tokens", type=int, default=None)
+    p_sb_run.add_argument("--thinking", default="off", choices=["off", "on"],
+                          help="DeepSeek 思考模式(off=关=便宜快非推理,默认;on=开+--effort 控强度)。非 deepseek 模型忽略。")
+    p_sb_run.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"],
+                          help="思考开时的强度(--thinking on 才生效;deepseek: low/medium→high,xhigh→max)")
     p_sb_run.add_argument("--keep", action="store_true", help="失败时保留 run_dir 供检视")
     p_sb_eval = p_sb_sub.add_parser("eval", help="A/B(none vs brainregion)matched-pair + bootstrap CI gate")
     p_sb_eval.add_argument("--tasks", default=None, help="逗号分隔 fixture id(默认全部)")
@@ -200,6 +204,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_eval.add_argument("--max-steps", type=int, default=None)
     p_sb_eval.add_argument("--max-cost-usd", type=float, default=None)
     p_sb_eval.add_argument("--max-tokens", type=int, default=None)
+    p_sb_eval.add_argument("--thinking", default="off", choices=["off", "on"],
+                           help="DeepSeek 思考模式(off=关=便宜快,默认;on=开+--effort)")
+    p_sb_eval.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])
     p_sb_eval.add_argument("--keep", action="store_true", help="失败时保留 run_dir")
     p_sb_eval.add_argument("--out", default=None, help="报告 JSON 输出目录(默认 .brain-region/sandbox/)")
 

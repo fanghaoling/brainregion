@@ -34,6 +34,16 @@ def _resolve_main_brain(model_str: str, registry: dict, dd: dict[str, Any]) -> t
     return entry["model"], entry.get("endpoint_id")
 
 
+def _thinking_arg(args: argparse.Namespace) -> bool | None:
+    """--thinking off→False(便宜快非推理,默认),on→True(None=provider 默认,沙盒不用)。"""
+    val = getattr(args, "thinking", "off")
+    if val == "on":
+        return True
+    if val == "off":
+        return False
+    return None
+
+
 def _resolve_tasks(args: argparse.Namespace) -> list:
     ids = list_fixture_ids()
     if getattr(args, "task", None):
@@ -74,6 +84,7 @@ async def run(args: argparse.Namespace) -> dict[str, Any]:
             consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
             transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
             endpoint_id=endpoint_id,
+            thinking=_thinking_arg(args), effort=args.effort,
         )
     finally:
         # 失败(run_agent raise 或 tests 没 green)且 --keep → 留检;否则清。
@@ -110,6 +121,7 @@ async def run_eval(args: argparse.Namespace) -> dict[str, Any]:
         consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
         transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
         endpoint_id=endpoint_id,
+        thinking=_thinking_arg(args), effort=args.effort,
     )
     path = write_report(report, getattr(args, "out", None))
     print(render_summary(report))

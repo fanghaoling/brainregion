@@ -88,6 +88,29 @@ def test_complete_messages_json_object_fallback(monkeypatch):
     assert calls[1] is None  # 第二次不带 response_format
 
 
+def test_deepseek_thinking_kwargs():
+    """_effort_kwargs / _sampling_for 对 deepseek 的思考模式控制(关=便宜快;开=reasoning_effort)。"""
+    from brainregion.providers.litellm import LiteLLMBackend, _effort_kwargs
+
+    # thinking off → disabled, 无 reasoning_effort
+    assert _effort_kwargs("openai/deepseek-v4-flash", effort=None, thinking=False) == {
+        "extra_body": {"thinking": {"type": "disabled"}}
+    }
+    # thinking on + effort → enabled + reasoning_effort
+    assert _effort_kwargs("openai/deepseek-v4-pro", effort="high", thinking=True) == {
+        "extra_body": {"thinking": {"type": "enabled"}}, "reasoning_effort": "high",
+    }
+    # thinking None(未显式)→ 保持原契约:effort 对 deepseek no-op(§15.6)
+    assert _effort_kwargs("openai/deepseek-v4-flash", effort="high", thinking=None) == {}
+    assert _effort_kwargs("openai/deepseek-v4-flash", effort=None, thinking=None) == {}
+    # 非 deepseek 不受 thinking 影响
+    assert _effort_kwargs("zhipu/glm-5.2", effort=None, thinking=False) == {}
+    # sampling:deepseek 思考关(False)/默认(None) → 正常采样;显式开(True) → 不采样(文档:思考忽略 temp/top_p)
+    assert LiteLLMBackend._sampling_for("openai/deepseek-v4-flash", 0.0, 0.95, None, False) == {"temperature": 0.0, "top_p": 0.95}
+    assert LiteLLMBackend._sampling_for("openai/deepseek-v4-flash", 0.0, 0.95, None, None) == {"temperature": 0.0, "top_p": 0.95}
+    assert LiteLLMBackend._sampling_for("openai/deepseek-v4-flash", 0.0, 0.95, None, True) == {}
+
+
 
 class MockBackend:
     """按脚本返 tool-call;不调模型。"""
