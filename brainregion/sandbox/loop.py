@@ -80,6 +80,7 @@ class CognitiveIteration:
     cost_usd: float
     delegate_action: str | None
     next_subgoal: str
+    trace_check: str = ""  # 该轮 forced-trace 指出的差距(无进展检测的可审计信号)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -91,6 +92,7 @@ class CognitiveIteration:
             "cost_usd": round(self.cost_usd, 6),
             "delegate_action": self.delegate_action,
             "next_subgoal": self.next_subgoal,
+            "trace_check": self.trace_check,
         }
 
 
@@ -467,6 +469,12 @@ async def run_agent(
     return traj
 
 
+def _normalize_check(check: str) -> str:
+    """归一化 trace.check 供无进展比较:压缩空白 + 小写 + 截断 200。保守(偏继续 = safe:
+    只在精确重复时触发,近义不同表述不触发 → 最多多跑一轮,被 max_iterations 兜住)。"""
+    return " ".join((check or "").split()).lower()[:200]
+
+
 async def run_cognitive_loop(
     backend: Any,
     model: str,
@@ -487,11 +495,13 @@ async def run_cognitive_loop(
     effort: str | None = None,
 ) -> Trajectory:
     """§15.1 认知环外环:expert → verify → delegate →(redelegate 用 next_subgoal 重跑)→ ...
-    → accept / give_up / budget / max_iterations / error。
+    → accept / give_up / budget / max_iterations / no_progress / error。
 
     grounding-first:**唯一重跑** = ``redelegate`` + ``tests_green is False`` + 有 grounded ``next_subgoal``
     (显式查 tests_green,防 delegate_policy drift 在已过测试上 churn;客观测试=ground truth)。
     escalate / accept 停(测试过);escalate 弱测试疑虑只标记(accepted_weak_test)。
+    **无进展检测**:连续两轮同一(归一化)``trace.check`` → ``no_progress`` 提前停(专家没修掉那个差距,
+    不空转到 max_iterations;保守归一化,只在精确重复触发)。
     复用 run_agent(单遍)作内层;worktree 跨迭代持久(累改在盘)。
 
     内层 ``max_cost_usd`` 传**剩余预算** → total ≤ max_cost_usd(防 max_iters × 单遍双计)。
@@ -509,6 +519,7 @@ async def run_cognitive_loop(
     iterations: list[CognitiveIteration] = []
     cumulative = 0.0
     term = "max_iterations"
+    prev_check_norm: str | None = None  # 无进展检测:上一轮 redelegate 的归一化 trace.check
     traj: Trajectory | None = None
     inner_kwargs = dict(  # 内层 run_agent 公共入参
         run_dir=run_dir, arm=arm, max_steps=max_steps, temperature=temperature,
@@ -531,10 +542,12 @@ async def run_cognitive_loop(
         dlg = traj.delegate or {}
         action = dlg.get("action")
         subgoal = (dlg.get("next_subgoal") or "")
+        check_raw = str((traj.brain_verify or {}).get("check", "") or "")  # 防御:非 str/null check 不崩
+        check_norm = _normalize_check(check_raw)
         iterations.append(CognitiveIteration(
             iteration=it, directive=directive[:200], solve_status=traj.solve_status,
             tests_green=traj.tests_green, n_steps=traj.n_steps, cost_usd=round(it_cost, 6),
-            delegate_action=action, next_subgoal=subgoal[:200],
+            delegate_action=action, next_subgoal=subgoal[:200], trace_check=check_raw[:200],
         ))
         if action is None:  # I9: delegate 步失败(run_agent 兜成 {error, action:None})
             term = "delegate_failed"
@@ -545,6 +558,11 @@ async def run_cognitive_loop(
                 if cumulative >= max_cost_usd:
                     term = "budget_exceeded"
                     break
+                # 无进展检测:连续两轮同一(归一化)trace.check → 专家没修掉那个差距,提前停
+                if prev_check_norm and check_norm and check_norm == prev_check_norm:
+                    term = "no_progress"
+                    break
+                prev_check_norm = check_norm
                 directive = subgoal[:1000]
                 continue
             # redelegate 但不可重跑:无 subgoal → delegate_no_subgoal;测试却过 → inconsistent_delegate

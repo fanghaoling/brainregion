@@ -205,6 +205,15 @@ def test_forced_trace_tracks_cost_into_dict():
     assert composite_verify(tr, True).to_dict()["cost_usd"] == 0.012
 
 
+def test_forced_trace_coerces_nonstr_check_and_trace():
+    # code-review fix:LLM emit check/trace=null(或非 str)→ 强制成 str(防下游 .split()/[:200] 崩)
+    backend = _Backend(content='{"verdict":"FAILED","trace":null,"check":null}')
+    tr = asyncio.run(forced_trace(backend, model="m", endpoint_id=None,
+                                  goal="g", test_req="r", patch={"path": "p", "replacements": []}))
+    assert tr.check == ""    # null → ""
+    assert tr.trace == ""
+
+
 # ---------------- verify_with_brain(编排)----------------
 def test_verify_with_brain_weak_test_signal(monkeypatch):
     # 客观测试过(弱测试)+ trace 判 FAILED → weak_test_signal

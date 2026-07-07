@@ -183,8 +183,8 @@ async def forced_trace(
     verdict, obj = _parse_trace(resp.content or "")
     return TraceResult(
         verdict=verdict,
-        trace=(obj or {}).get("trace", ""),
-        check=(obj or {}).get("check", ""),
+        trace=str((obj or {}).get("trace", "") or ""),   # str 强制:防 LLM emit null/非str 透传(镜像 verdict)
+        check=str((obj or {}).get("check", "") or ""),
         confidence=(obj or {}).get("confidence"),
         parse_ok=verdict is not None,
         error=getattr(resp, "error", None),

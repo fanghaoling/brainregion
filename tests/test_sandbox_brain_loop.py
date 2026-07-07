@@ -21,13 +21,15 @@ def _task():
     return SimpleNamespace(id="t", goal="g", gold_diff="")
 
 
-def _traj(*, tests_green, action, subgoal="", cost=0.01):
+def _traj(*, tests_green, action, subgoal="", cost=0.01, check=""):
     t = Trajectory(task_id="t", arm="none")
     t.tests_green = tests_green
     t.solve_status = "solved" if tests_green else "tests_fail"
     t.n_steps = 1
     t.total_main_cost_usd = cost
     t.delegate = (None if action is None else {"action": action, "next_subgoal": subgoal})
+    if check:
+        t.brain_verify = {"check": check}
     return t
 
 
@@ -90,6 +92,77 @@ def test_loop_budget_does_not_mask_accept(monkeypatch):
     traj = asyncio.run(run_cognitive_loop(None, "m", _task(), run_dir=".", max_iterations=3, max_cost_usd=0.05))
     assert traj.termination_reason == "accepted"
     assert len(traj.iterations) == 1
+
+
+# ---------------- 无进展检测 ----------------
+def test_loop_no_progress_same_check(monkeypatch):
+    # 连续两轮同一 trace.check → no_progress 提前停(不空转到 max_iters)
+    seq = [_traj(tests_green=False, action="redelegate", subgoal="补 fsync", check="缺 os.fsync"),
+           _traj(tests_green=False, action="redelegate", subgoal="补 fsync", check="缺 os.fsync")]
+    _patch_seq(monkeypatch, seq)
+    traj = asyncio.run(run_cognitive_loop(None, "m", _task(), run_dir=".", max_iterations=5, max_cost_usd=1.0))
+    assert traj.termination_reason == "no_progress"
+    assert len(traj.iterations) == 2              # 不进 it2
+    assert traj.iterations[-1].trace_check == "缺 os.fsync"
+
+
+def test_loop_progress_different_check_continues(monkeypatch):
+    # 不同 check = 进步 → 不触发 no_progress,继续到 accept
+    seq = [_traj(tests_green=False, action="redelegate", subgoal="补 fsync", check="缺 fsync"),
+           _traj(tests_green=False, action="redelegate", subgoal="补 error", check="缺 error handling"),
+           _traj(tests_green=True, action="accept")]
+    _patch_seq(monkeypatch, seq)
+    traj = asyncio.run(run_cognitive_loop(None, "m", _task(), run_dir=".", max_iterations=5, max_cost_usd=1.0))
+    assert traj.termination_reason == "accepted"
+    assert len(traj.iterations) == 3              # 不同 check 没触发 no_progress
+
+
+def test_loop_no_progress_check_normalization(monkeypatch):
+    # 归一化:空白/大小写差异不算不同 check
+    seq = [_traj(tests_green=False, action="redelegate", subgoal="x", check="缺  Os.Fsync"),
+           _traj(tests_green=False, action="redelegate", subgoal="x", check="缺 os.fsync")]
+    _patch_seq(monkeypatch, seq)
+    traj = asyncio.run(run_cognitive_loop(None, "m", _task(), run_dir=".", max_iterations=5, max_cost_usd=1.0))
+    assert traj.termination_reason == "no_progress"
+
+
+def test_loop_no_progress_first_redelegate_continues(monkeypatch):
+    # 首轮 redelegate 无前序 → 不触发 no_progress,正常继续
+    seq = [_traj(tests_green=False, action="redelegate", subgoal="x", check="C"),
+           _traj(tests_green=True, action="accept")]
+    _patch_seq(monkeypatch, seq)
+    traj = asyncio.run(run_cognitive_loop(None, "m", _task(), run_dir=".", max_iterations=3, max_cost_usd=1.0))
+    assert traj.termination_reason == "accepted"
+    assert len(traj.iterations) == 2
+
+
+def _traj_raw_check(check_val):
+    """brain_verify['check'] = check_val(可非 str),测 loop 端防御不崩。"""
+    t = Trajectory(task_id="t", arm="none")
+    t.tests_green = False
+    t.solve_status = "tests_fail"
+    t.n_steps = 1
+    t.total_main_cost_usd = 0.01
+    t.delegate = {"action": "redelegate", "next_subgoal": "x"}
+    t.brain_verify = {"check": check_val}
+    return t
+
+
+def test_loop_no_progress_null_check_does_not_crash(monkeypatch):
+    # code-review fix:LLM emit check=null → loop 端 str() 强制 → 不崩;null→"" 不触发 no_progress
+    seq = [_traj_raw_check(None), _traj_raw_check(None)]
+    _patch_seq(monkeypatch, seq)
+    traj = asyncio.run(run_cognitive_loop(None, "m", _task(), run_dir=".", max_iterations=2, max_cost_usd=1.0))
+    assert traj.termination_reason == "max_iterations"   # 不崩,null→"" → no_progress 不触发 → 到 max_iters
+    assert len(traj.iterations) == 2
+
+
+def test_loop_no_progress_nonstr_int_check_coerces(monkeypatch):
+    # code-review fix:check=5(int)→ loop 端 str() 强制成 "5";两轮同 "5" → no_progress 触发(非崩)
+    seq = [_traj_raw_check(5), _traj_raw_check(5)]
+    _patch_seq(monkeypatch, seq)
+    traj = asyncio.run(run_cognitive_loop(None, "m", _task(), run_dir=".", max_iterations=3, max_cost_usd=1.0))
+    assert traj.termination_reason == "no_progress"      # 强制 "5" 两轮相同
 
 
 def test_loop_delegate_no_subgoal(monkeypatch):
