@@ -232,7 +232,27 @@ def _dict_spec(item: dict, endpoint_ids: set) -> tuple:
 
 
 def _normalize_one(spec, endpoint_ids: set, endpoints_cfg: dict | None = None) -> dict:
-    """单个 model 规格（str|dict）-> PanelEntry。供 normalizer 复用（schema 与 panel 统一）。"""
+    """单个 model 规格（str|dict）-> PanelEntry。供 normalizer 复用（schema 与 panel 统一）。
+
+    QoL（单模型路径,--main-brain / solver / judge / router / normalizer 等用）:bare 模型名
+    （无 ``/``、非 endpoint_id）若**唯一**匹配某 endpoint 的 ``models`` → 自动归端（省得手写
+    ``endpoint/model``）;多 endpoint 命中 → 报错让用户用 ``endpoint/model`` 消歧;0 命中 → 走既有
+    panel 路径（litellm 原生）。**只作用单模型路径**,不改 panel 语义（panel 里 bare 名仍走原生）。
+    """
+    if (
+        isinstance(spec, str)
+        and "/" not in spec
+        and spec not in endpoint_ids
+        and endpoints_cfg
+    ):
+        hits = [eid for eid, ep in endpoints_cfg.items() if spec in _endpoint_model_ids(ep)]
+        if len(hits) == 1:
+            eid = hits[0]
+            return {"label": f"{eid}/{spec}", "model": spec, "endpoint_id": eid}
+        if len(hits) > 1:
+            raise ValueError(
+                f"模型名 {spec!r} 在多个 endpoint 命中({hits});用 endpoint/model 形式消歧,如 {hits[0]}/{spec}"
+            )
     return _normalize_panel([spec], endpoint_ids, endpoints_cfg)[0]
 
 

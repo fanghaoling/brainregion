@@ -29,7 +29,7 @@ from brainregion.workspace import (
 )
 from brainregion.workspace.files import scoped_workspace_root
 
-from .task import SandboxTask
+from .task import SandboxTask, WorktreeTask
 from .verify import verify_solution
 
 logger = logging.getLogger("brainregion.sandbox.loop")
@@ -197,7 +197,9 @@ def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
         return "", f"{type(e).__name__}: {e}"
 
 
-def _build_system_prompt(task: SandboxTask, python_exe: str) -> str:
+def _build_system_prompt(task: SandboxTask | WorktreeTask, python_exe: str) -> str:
+    # 评测测试命令:用 task.test_args(worktree 任务常钉到具体文件,如 ["tests/test_x.py","-q"])。
+    test_argv_part = (", " + ", ".join(f'"{a}"' for a in task.test_args)) if task.test_args else ""
     tools_doc = (
         "- read_text(path[, start_line, end_line, max_bytes]): 读文件,返回内容+sha256+行数。\n"
         "- search_text(query[, include_globs, regex, max_results]): 在工作区搜文本。\n"
@@ -206,7 +208,7 @@ def _build_system_prompt(task: SandboxTask, python_exe: str) -> str:
         "必须来自上一次 read_text/inspect_file 的 sha256;replacements=[{old_text,new_text}],old_text "
         "须唯一。**dry_run 默认 true=不落盘**;要真改必须传 dry_run=false。\n"
         "- workspace_run_check(argv): 跑 allow-listed 命令(只 pytest/ruff)。跑测试用 "
-        f'argv=["{python_exe}", "-m", "pytest", "-q"]。\n'
+        f'argv=["{python_exe}", "-m", "pytest"{test_argv_part}]。\n'
         "- list_allowed_roots(): 看工作区根。\n"
     )
     return (
@@ -263,7 +265,7 @@ def _arm_inject(task: SandboxTask, goal: str) -> tuple[str, int, int]:
 async def run_agent(
     backend: Any,
     model: str,
-    task: SandboxTask,
+    task: SandboxTask | WorktreeTask,
     *,
     run_dir: str,
     arm: str = "none",
@@ -377,7 +379,7 @@ async def run_agent(
 
         traj.n_steps = len(traj.steps)
         # verify:tests-green 定 solved(客观)。预算/解析失败优先于 tests_fail 作 solve_status。
-        verification = verify_solution(task, run_dir)
+        verification = verify_solution(task, run_dir, python_exe=python_exe)
         traj.tests_green = verification["tests_green"]
         if traj.tests_green:
             traj.solve_status = "solved"

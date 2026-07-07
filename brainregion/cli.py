@@ -198,6 +198,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_run.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"],
                           help="思考开时的强度(--thinking on 才生效;deepseek: low/medium→high,xhigh→max)")
     p_sb_run.add_argument("--keep", action="store_true", help="失败时保留 run_dir 供检视")
+    # --- worktree 模式(真实仓库任务)---
+    p_sb_run.add_argument("--worktree", action="store_true",
+                          help="真实仓库 worktree 模式:在 repo 的独立检出里跑 agent(需 --repo/--goal 或 --task-spec)")
+    p_sb_run.add_argument("--task-spec", default=None, help="worktree 模式:WorktreeTask JSON 文件")
+    p_sb_run.add_argument("--repo", default=None, help="worktree 模式:源仓库路径")
+    p_sb_run.add_argument("--base", default=None, help="worktree 模式:base ref(默认 HEAD)")
+    p_sb_run.add_argument("--goal", default=None, help="worktree 模式:任务目标(钉聚焦区,真仓库大)")
+    p_sb_run.add_argument("--task-id", default=None, help="worktree 模式:任务 id(内联模式默认 worktree-<ts>)")
+    p_sb_run.add_argument("--test-args", default=None, help='worktree 模式:pytest 参数(如 "tests/test_x.py -q")')
+    p_sb_run.add_argument("--bootstrap", default=None,
+                          help='worktree 模式:harness bootstrap 命令(如 "uv sync --extra dev";默认自动探测)')
+    p_sb_run.add_argument("--no-bootstrap", action="store_true", help="worktree 模式:跳过 bootstrap")
+    p_sb_run.add_argument("--python", default=None,
+                          help="worktree 模式:评测用 python(默认探测 worktree .venv,再回退 sys.executable)")
     p_sb_eval = p_sb_sub.add_parser("eval", help="A/B(none vs brainregion)matched-pair + bootstrap CI gate")
     p_sb_eval.add_argument("--tasks", default=None, help="逗号分隔 fixture id(默认全部)")
     p_sb_eval.add_argument("--main-brain", default=None, help="主脑模型")
