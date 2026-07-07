@@ -81,6 +81,8 @@ class CognitiveIteration:
     delegate_action: str | None
     next_subgoal: str
     trace_check: str = ""  # 该轮 forced-trace 指出的差距(无进展检测的可审计信号)
+    orthogonal_verdict: str | None = None  # escalate 正交复查判定(SOLVED/FAILED/None;非 escalate 轮为 None)
+    gap_consensus: bool | None = None  # 正交 check == 原 trace check(归一化);非 escalate 轮为 None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -93,6 +95,8 @@ class CognitiveIteration:
             "delegate_action": self.delegate_action,
             "next_subgoal": self.next_subgoal,
             "trace_check": self.trace_check,
+            "orthogonal_verdict": self.orthogonal_verdict,
+            "gap_consensus": self.gap_consensus,
         }
 
 
@@ -115,6 +119,7 @@ class Trajectory:
     delegate: dict[str, Any] | None = None
     iterations: list[CognitiveIteration] | None = None
     cumulative_cost_usd: float | None = None
+    accept_reason: str = ""  # termination_reason="accepted" 时的细分:normal/weak_test/orthogonal_cleared
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -125,6 +130,7 @@ class Trajectory:
             "n_steps": self.n_steps,
             "done": self.done,
             "termination_reason": self.termination_reason,
+            "accept_reason": self.accept_reason,
             "total_main_cost_usd": round(self.total_main_cost_usd, 6),
             "total_arm_cost_usd": round(self.total_arm_cost_usd, 6),
             "wake_calls": self.wake_calls,
@@ -491,6 +497,8 @@ async def run_cognitive_loop(
     consecutive_error_limit: int = 3,
     python_exe: str | None = None,
     endpoint_id: str | None = None,
+    orthogonal_model: str | None = None,
+    orthogonal_endpoint_id: str | None = None,
     thinking: bool | None = None,
     effort: str | None = None,
 ) -> Trajectory:
@@ -499,7 +507,14 @@ async def run_cognitive_loop(
 
     grounding-first:**唯一重跑** = ``redelegate`` + ``tests_green is False`` + 有 grounded ``next_subgoal``
     (显式查 tests_green,防 delegate_policy drift 在已过测试上 churn;客观测试=ground truth)。
-    escalate / accept 停(测试过);escalate 弱测试疑虑只标记(accepted_weak_test)。
+    grounding-first:**唯一重跑** = ``redelegate`` + 有 grounded ``next_subgoal``;plain redelegate 须
+    ``tests_green is False``(显式查,防 delegate_policy drift 在已过测试上 churn;客观测试=ground truth),
+    escalate→redelegate(正交坐实弱测试)测试虽过也重跑。accept 终态统一 ``accepted`` + ``accept_reason``
+    (normal/weak_test/orthogonal_cleared)。
+    **escalate 独立处理(正交复查 handler,``orthogonal_model`` 穿入时启用)**:用不同家族第二模型盲审同
+    patch 作 tiebreaker —— 正交 FAILED(2 独立 FAILED 票)= 弱测试坐实 → redelegate;正交 SOLVED →
+    accepted(orthogonal_cleared);未解析/报错/无 orthogonal → accepted(weak_test,现状)。详见
+    ``brain_delegate.resolve_escalate`` / ``resolve_escalate_from_trajectory``。
     **无进展检测**:连续两轮同一(归一化)``trace.check`` → ``no_progress`` 提前停(专家没修掉那个差距,
     不空转到 max_iterations;保守归一化,只在精确重复触发)。
     复用 run_agent(单遍)作内层;worktree 跨迭代持久(累改在盘)。
@@ -519,7 +534,8 @@ async def run_cognitive_loop(
     iterations: list[CognitiveIteration] = []
     cumulative = 0.0
     term = "max_iterations"
-    prev_check_norm: str | None = None  # 无进展检测:上一轮 redelegate 的归一化 trace.check
+    accept_reason = ""  # term="accepted" 时的细分:normal/weak_test/orthogonal_cleared
+    prev_check_norm: str | None = None  # 无进展检测:上一轮 redelegate 的归一化 check(trace 或正交)
     traj: Trajectory | None = None
     inner_kwargs = dict(  # 内层 run_agent 公共入参
         run_dir=run_dir, arm=arm, max_steps=max_steps, temperature=temperature,
@@ -544,33 +560,78 @@ async def run_cognitive_loop(
         subgoal = (dlg.get("next_subgoal") or "")
         check_raw = str((traj.brain_verify or {}).get("check", "") or "")  # 防御:非 str/null check 不崩
         check_norm = _normalize_check(check_raw)
+        orig_action = action  # delegate 实际出的 action(记录用);escalate→redelegate 转换不改记录
+        ortho_verdict: str | None = None
+        gap_consensus: bool | None = None
+        ortho_cost = 0.0  # 正交 sidecar 开销(escalate 轮);计入本轮 iteration cost + cumulative
+        accept_reason_here = ""  # 若本轮终结于 accepted,其 reason(escalate 解析填)
+
+        # escalate 独立处理:正交复查 handler(Diagnosis→Action)。可能把 escalate 转成 redelegate
+        # (正交 FAILED,2 独立票 = 弱测试坐实,走统一重跑路径)或 accept(正交 SOLVED/未解析 fallback)。
+        if action == "escalate" and orthogonal_model:
+            from .brain_delegate import resolve_escalate_from_trajectory
+            try:  # sidecar 失败隔离:正交异常 → fallback(不崩主 run)
+                resolution = await resolve_escalate_from_trajectory(
+                    backend, orthogonal_model=orthogonal_model,
+                    orthogonal_endpoint_id=orthogonal_endpoint_id,
+                    goal=task.goal, steps=traj.steps, brain_verify_dict=traj.brain_verify,
+                )
+            except Exception:  # noqa: BLE001
+                resolution = {"action": "accept", "accept_reason": "weak_test"}
+            ortho_cost = float(resolution.get("cost_usd", 0.0) or 0.0)
+            cumulative += ortho_cost
+            ortho_verdict = resolution.get("orthogonal_verdict")
+            gap_consensus = resolution.get("gap_consensus")
+            if resolution.get("action") == "redelegate" and (resolution.get("directive") or "").strip():
+                # 正交 FAILED → 转统一 redelegate 重跑:override subgoal + check(用正交差距驱动 no_progress)
+                action = "redelegate"
+                subgoal = resolution["directive"]
+                check_raw = str(resolution["directive"] or "")
+                check_norm = _normalize_check(check_raw)
+            else:  # accept:正交 SOLVED(orthogonal_cleared)或 未解析/报错 fallback(weak_test)
+                accept_reason_here = resolution.get("accept_reason") or "weak_test"
+                action = "accept"
+
         iterations.append(CognitiveIteration(
             iteration=it, directive=directive[:200], solve_status=traj.solve_status,
-            tests_green=traj.tests_green, n_steps=traj.n_steps, cost_usd=round(it_cost, 6),
-            delegate_action=action, next_subgoal=subgoal[:200], trace_check=check_raw[:200],
+            tests_green=traj.tests_green, n_steps=traj.n_steps, cost_usd=round(it_cost + ortho_cost, 6),
+            delegate_action=orig_action, next_subgoal=subgoal[:200], trace_check=check_raw[:200],
+            orthogonal_verdict=ortho_verdict, gap_consensus=gap_consensus,
         ))
+
         if action is None:  # I9: delegate 步失败(run_agent 兜成 {error, action:None})
             term = "delegate_failed"
             break
         if action == "redelegate":
-            if not traj.tests_green and subgoal:  # I10: 唯一重跑(显式查 tests_green)
+            # 重跑条件:plain redelegate 须测试败(ground truth;I10 防 drift);escalate→redelegate(正交
+            # 坐实弱测试)测试虽过也重跑。两种 origin 都要 subgoal + 受 budget/no_progress 兜。
+            escalate_redelegate = orig_action == "escalate"
+            if subgoal and (escalate_redelegate or not traj.tests_green):
                 # budget 检查只在「想重跑」时拦:不 mask accept/escalate/give_up 等终态判定
                 if cumulative >= max_cost_usd:
                     term = "budget_exceeded"
                     break
-                # 无进展检测:连续两轮同一(归一化)trace.check → 专家没修掉那个差距,提前停
+                # 无进展检测:连续两轮同一(归一化)check(trace 或正交)→ 专家没修掉那个差距,提前停
                 if prev_check_norm and check_norm and check_norm == prev_check_norm:
                     term = "no_progress"
                     break
                 prev_check_norm = check_norm
                 directive = subgoal[:1000]
                 continue
-            # redelegate 但不可重跑:无 subgoal → delegate_no_subgoal;测试却过 → inconsistent_delegate
+            # redelegate 但不可重跑:无 subgoal → delegate_no_subgoal;plain redelegate 测试却过 → inconsistent_delegate
             term = "delegate_no_subgoal" if not subgoal else "inconsistent_delegate"
             break
-        # accept / escalate / give_up / 未知 → 终止(budget 不 mask 这些终态)
-        term = {"accept": "accepted", "escalate": "accepted_weak_test",
-                "give_up": "give_up"}.get(action, "delegate_unknown")
+        # accept / escalate(无 orthogonal)/ give_up / 未知 → 终态(budget 不 mask)
+        if action == "accept":
+            term = "accepted"
+            accept_reason = accept_reason_here or ("weak_test" if orig_action == "escalate" else "normal")
+        elif action == "escalate":  # 无 orthogonal_model → 现状 terminal(弱测试疑虑标记)
+            term = "accepted"
+            accept_reason = "weak_test"
+        elif action == "give_up":
+            term = "give_up"
+        else:
+            term = "delegate_unknown"
         break
 
     if traj is None:  # 防御(max_iterations<1 已早返;此处理论不到)
@@ -578,4 +639,5 @@ async def run_cognitive_loop(
     traj.iterations = iterations
     traj.cumulative_cost_usd = round(cumulative, 6)
     traj.termination_reason = term
+    traj.accept_reason = accept_reason
     return traj

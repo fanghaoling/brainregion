@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+from brainregion.sandbox import brain_delegate as bd
 from brainregion.sandbox import cli as sandbox_cli
 from brainregion.sandbox import loop
 from brainregion.sandbox.loop import (
@@ -69,6 +70,7 @@ def test_loop_accept_first_iteration(monkeypatch):
     _patch_always(monkeypatch, _traj(tests_green=True, action="accept"))
     traj = asyncio.run(run_cognitive_loop(None, "m", _task(), run_dir=".", max_iterations=3, max_cost_usd=1.0))
     assert traj.termination_reason == "accepted"
+    assert traj.accept_reason == "normal"                         # plain delegate accept
     assert len(traj.iterations) == 1                              # 不进 it2
 
 
@@ -179,12 +181,109 @@ def test_loop_delegate_failed_action_none(monkeypatch):
     assert traj.termination_reason == "delegate_failed"
 
 
-def test_loop_escalate_terminal_no_rerun(monkeypatch):
-    # escalate(测试过+weak)→ accepted_weak_test,不重跑
+def test_loop_escalate_no_orthogonal_weak_test_terminal(monkeypatch):
+    # escalate(测试过+weak)但无 orthogonal_model → accepted + weak_test(现状收敛,不重跑)
     _patch_always(monkeypatch, _traj(tests_green=True, action="escalate"))
     traj = asyncio.run(run_cognitive_loop(None, "m", _task(), run_dir=".", max_iterations=3, max_cost_usd=1.0))
-    assert traj.termination_reason == "accepted_weak_test"
+    assert traj.termination_reason == "accepted"
+    assert traj.accept_reason == "weak_test"
     assert len(traj.iterations) == 1
+
+
+# ---------------- escalate 独立处理:正交复查 handler ----------------
+def _fake_resolve(directive, *, verdict="FAILED", gap=True, action="redelegate", reason=""):
+    """假 resolve_escalate_from_trajectory(loop 懒 import bd.resolve_escalate_from_trajectory,故 patch bd)。"""
+    async def fake(*a, **kw):
+        return {"action": action, "accept_reason": reason, "directive": directive,
+                "gap_consensus": gap, "orthogonal_verdict": verdict, "cost_usd": 0.005}
+    return fake
+
+
+def test_loop_escalate_orthogonal_failed_redelegates(monkeypatch):
+    # escalate + 正交 FAILED(2 独立票)→ 转 redelegate 重跑;it2 plain accept → accepted+normal
+    seq = [_traj(tests_green=True, action="escalate", check="缺 fsync"),
+           _traj(tests_green=True, action="accept")]
+    calls = _patch_seq(monkeypatch, seq)
+    monkeypatch.setattr(bd, "resolve_escalate_from_trajectory", _fake_resolve("补 os.fsync 在 replace 前"))
+    traj = asyncio.run(run_cognitive_loop(
+        None, "m", _task(), run_dir=".", orthogonal_model="glm-5.2", max_iterations=3, max_cost_usd=1.0))
+    assert traj.termination_reason == "accepted"
+    assert traj.accept_reason == "normal"                       # it2 plain accept
+    assert len(traj.iterations) == 2
+    it0 = traj.iterations[0]
+    assert it0.delegate_action == "escalate"                     # 记录原 action(非转换后 redelegate)
+    assert it0.orthogonal_verdict == "FAILED"
+    assert it0.gap_consensus is True
+    assert calls[1]["directive"] == "补 os.fsync 在 replace 前"   # it2 收到正交差距作 directive
+
+
+def test_loop_escalate_orthogonal_solved_accepts(monkeypatch):
+    # escalate + 正交 SOLVED → accepted + orthogonal_cleared(原 trace 过虑)
+    _patch_always(monkeypatch, _traj(tests_green=True, action="escalate", check="缺 fsync"))
+    monkeypatch.setattr(bd, "resolve_escalate_from_trajectory",
+                        _fake_resolve("", verdict="SOLVED", gap=False, action="accept", reason="orthogonal_cleared"))
+    traj = asyncio.run(run_cognitive_loop(
+        None, "m", _task(), run_dir=".", orthogonal_model="glm-5.2", max_iterations=3, max_cost_usd=1.0))
+    assert traj.termination_reason == "accepted"
+    assert traj.accept_reason == "orthogonal_cleared"
+    assert len(traj.iterations) == 1
+    assert traj.iterations[0].orthogonal_verdict == "SOLVED"
+
+
+def test_loop_escalate_orthogonal_inconclusive_weak_test(monkeypatch):
+    # escalate + 正交未解析 → accepted + weak_test(fallback = 现状,不重跑)
+    _patch_always(monkeypatch, _traj(tests_green=True, action="escalate", check="缺 fsync"))
+    monkeypatch.setattr(bd, "resolve_escalate_from_trajectory",
+                        _fake_resolve("", verdict=None, gap=False, action="accept", reason="weak_test"))
+    traj = asyncio.run(run_cognitive_loop(
+        None, "m", _task(), run_dir=".", orthogonal_model="glm-5.2", max_iterations=3, max_cost_usd=1.0))
+    assert traj.termination_reason == "accepted"
+    assert traj.accept_reason == "weak_test"
+    assert len(traj.iterations) == 1
+
+
+def test_loop_escalate_orthogonal_no_progress(monkeypatch):
+    # 两轮 escalate + 正交 FAILED 且 directive(差距)相同 → no_progress(专家没修掉,死路由 no_progress 兜)
+    seq = [_traj(tests_green=True, action="escalate", check="缺 fsync"),
+           _traj(tests_green=True, action="escalate", check="缺 fsync")]
+    _patch_seq(monkeypatch, seq)
+    monkeypatch.setattr(bd, "resolve_escalate_from_trajectory", _fake_resolve("缺 fsync"))
+    traj = asyncio.run(run_cognitive_loop(
+        None, "m", _task(), run_dir=".", orthogonal_model="glm-5.2", max_iterations=5, max_cost_usd=1.0))
+    assert traj.termination_reason == "no_progress"
+    assert len(traj.iterations) == 2
+
+
+def test_loop_escalate_orthogonal_cost_folded_into_iteration(monkeypatch):
+    # code-review fix:正交 sidecar cost 折进该轮 iteration.cost_usd + cumulative(审计准)
+    _patch_always(monkeypatch, _traj(tests_green=True, action="escalate", check="缺 fsync", cost=0.01))
+    monkeypatch.setattr(bd, "resolve_escalate_from_trajectory",
+                        _fake_resolve("", verdict="SOLVED", gap=False, action="accept",
+                                      reason="orthogonal_cleared"))  # _fake_resolve cost_usd=0.005
+    traj = asyncio.run(run_cognitive_loop(
+        None, "m", _task(), run_dir=".", orthogonal_model="glm-5.2", max_iterations=3, max_cost_usd=1.0))
+    assert traj.iterations[0].cost_usd == round(0.01 + 0.005, 6)   # 内层 0.01 + 正交 0.005
+    assert traj.cumulative_cost_usd == round(0.015, 6)
+
+
+def test_loop_escalate_orthogonal_progress_different_check_continues(monkeypatch):
+    # 两轮 escalate 但正交差距不同(缺 fsync → 缺 rollback)= 进步 → 不触发 no_progress,it3 accept
+    seq = [_traj(tests_green=True, action="escalate", check="缺 fsync"),
+           _traj(tests_green=True, action="escalate", check="缺 fsync"),
+           _traj(tests_green=True, action="accept")]
+    _patch_seq(monkeypatch, seq)
+    resolves = [_fake_resolve("缺 fsync"), _fake_resolve("缺 rollback")]
+    state = {"i": 0}
+
+    async def fake_resolve(*a, **kw):
+        r = resolves[state["i"]]
+        state["i"] += 1
+        return await r(*a, **kw)
+    monkeypatch.setattr(bd, "resolve_escalate_from_trajectory", fake_resolve)
+    traj = asyncio.run(run_cognitive_loop(
+        None, "m", _task(), run_dir=".", orthogonal_model="glm-5.2", max_iterations=5, max_cost_usd=1.0))
+    assert traj.termination_reason == "accepted"
+    assert len(traj.iterations) == 3
 
 
 def test_loop_policy_drift_redelegate_on_passed_test_no_rerun(monkeypatch):
@@ -269,7 +368,7 @@ def test_trajectory_iterations_serialization():
 def _fake_args(**over):
     base = dict(arm="none", max_steps=None, max_cost_usd=None, max_tokens=None,
                 effort=None, thinking="off", brain_verify=False, brain_delegate=False,
-                brain_loop=False, max_iterations=3)
+                brain_loop=False, max_iterations=3, orthogonal_brain=None)
     base.update(over)
     return SimpleNamespace(**base)
 
@@ -339,3 +438,42 @@ def test_run_expert_max_iterations_zero_not_silently_three(monkeypatch):
     asyncio.run(sandbox_cli._run_expert(
         _fake_args(brain_loop=True, max_iterations=0), None, "m", _task(), ".", {}, None))
     assert called["loop"]["max_iterations"] == 0
+
+
+# ---------------- --orthogonal-brain 穿参(_run_expert)----------------
+def test_run_expert_brain_loop_threads_orthogonal(monkeypatch):
+    # --brain-loop + --orthogonal-brain → run_cognitive_loop 收到 orthogonal_model/endpoint_id
+    called = {}
+
+    async def fake_loop(*a, **kw):
+        called["loop"] = kw
+        return Trajectory(task_id="t", arm="none")
+
+    monkeypatch.setattr(sandbox_cli, "run_cognitive_loop", fake_loop)
+    monkeypatch.setattr(sandbox_cli, "_resolve_orthogonal", lambda args, dd, ep: ("glm-5.2", "zhipu"))
+    asyncio.run(sandbox_cli._run_expert(
+        _fake_args(brain_loop=True, orthogonal_brain="glm-5.2"), None, "m", _task(), ".", {}, None))
+    assert called["loop"]["orthogonal_model"] == "glm-5.2"
+    assert called["loop"]["orthogonal_endpoint_id"] == "zhipu"
+
+
+def test_run_expert_brain_loop_no_orthogonal_when_unset(monkeypatch):
+    # --brain-loop 但无 --orthogonal-brain → 不穿 orthogonal_*(escalate 走 weak_test terminal)
+    called = {}
+
+    async def fake_loop(*a, **kw):
+        called["loop"] = kw
+        return Trajectory(task_id="t", arm="none")
+
+    monkeypatch.setattr(sandbox_cli, "run_cognitive_loop", fake_loop)
+    monkeypatch.setattr(sandbox_cli, "_resolve_orthogonal", lambda args, dd, ep: (None, None))
+    asyncio.run(sandbox_cli._run_expert(
+        _fake_args(brain_loop=True), None, "m", _task(), ".", {}, None))
+    assert "orthogonal_model" not in called["loop"]
+    assert "orthogonal_endpoint_id" not in called["loop"]
+
+
+def test_resolve_orthogonal_unset_returns_none():
+    # 未设 --orthogonal-brain / 配置 → (None, None)(不尝试解析)
+    args = SimpleNamespace(orthogonal_brain=None)
+    assert sandbox_cli._resolve_orthogonal(args, {}, None) == (None, None)

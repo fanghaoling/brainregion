@@ -201,6 +201,10 @@ def build_parser() -> argparse.ArgumentParser:
                           "默认关=sidecar")
     p_sb_run.add_argument("--max-iterations", type=int, default=3,
                           help="外环最大迭代数(仅 --brain-loop 生效,默认 3)")
+    p_sb_run.add_argument("--orthogonal-brain", default=None,
+                          help="escalate 正交复查的第二模型(不同家族,如 main=deepseek-v4-flash → glm-5.2);"
+                          "仅 --brain-loop 下生效:test 过但 forced-trace 怀疑(弱测试)时,盲审同 patch 作 tiebreaker"
+                          "(正交 FAILED→redelegate / SOLVED→accepted);默认关")
     p_sb_run.add_argument("--max-steps", type=int, default=None)
     p_sb_run.add_argument("--max-cost-usd", type=float, default=None)
     p_sb_run.add_argument("--max-tokens", type=int, default=None)

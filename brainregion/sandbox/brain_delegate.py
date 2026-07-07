@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .brain_verify import extract_final_patch, render_patch
+from .brain_verify import TraceResult, extract_final_patch, forced_trace, render_patch
 
 # action 词表(可序列化进 run.json):
 # accept      —— 客观测试过 + trace 认可,完成。
@@ -222,3 +222,130 @@ async def delegate_from_trajectory(
         task_goal=goal, patch=patch, brain_verify=bv_signals,
     )
     return decision.to_dict()
+
+
+# ============================================================================
+# escalate handler —— 正交复查(Delegate 子系统的 handler,§15.1)
+# ============================================================================
+# escalate(test_green=True + weak_test_signal=True:客观测试过但 forced-trace 判 FAILED)的独立处理:
+# 用**不同家族第二模型**盲审同 patch(forced_trace 换模型),作 tiebreaker 解「测试 SOLVED vs trace
+# FAILED」冲突。Diagnosis(正交 verdict/check)→ Action(显式 resolve_escalate):正交 FAILED → redelegate
+# (2 独立 FAILED 票 = 弱测试坐实);正交 SOLVED → accept(原 trace 过虑);未解析 → accept fallback(现状)。
+# 死路(give_up)不新立 action —— 由 loop 的 no_progress 兜(连续同 check→停)。
+# 复用 forced_trace(零新 prompt/解析);盲审 = 无原 trace 上下文(防锚定)。详见 plan / roadmap §15.8。
+RESOLVE_ACTIONS = ("accept", "redelegate")  # escalate handler 行动词表(区别于 DELEGATE_ACTIONS)
+ACCEPT_REASONS = ("normal", "weak_test", "orthogonal_cleared")
+
+
+def _normalize_check(check: str) -> str:
+    """归一化 check 供 gap_consensus / no_progress 比较。
+
+    镜像 ``loop._normalize_check``;本地复刻防 delegate→loop 循环依赖(loop 懒 import delegate)。
+    """
+    return " ".join((check or "").split()).lower()[:200]
+
+
+@dataclass
+class Resolution:
+    """escalate handler 输出:正交复查诊断 → 行动(Diagnosis/Action 分离,GPT)。"""
+
+    action: str  # RESOLVE_ACTIONS 之一
+    accept_reason: str = ""  # action=accept 时:normal / weak_test / orthogonal_cleared
+    directive: str = ""  # action=redelegate 时:给专家的下一子目标(= 正交 check 差距,grounded)
+    gap_consensus: bool = False  # 正交 check == 原 trace check(归一化):两 reviewer 找同一差距
+    orthogonal_verdict: str | None = None  # 正交 forced-trace 判定(SOLVED/FAILED/None)
+    cost_usd: float = 0.0
+    error: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "action": self.action,
+            "accept_reason": self.accept_reason,
+            "directive": self.directive,
+            "gap_consensus": self.gap_consensus,
+            "orthogonal_verdict": self.orthogonal_verdict,
+            "cost_usd": self.cost_usd,
+            "error": self.error,
+        }
+
+
+def resolve_escalate(
+    *,
+    orthogonal_verdict: str | None,
+    orthogonal_check: str,
+    trace_check: str,
+) -> Resolution:
+    """纯函数:正交诊断 → 行动(Diagnosis/Action 分离,零 LLM,零 confabulation)。
+
+    - 正交 **SOLVED**(与原 trace 分歧,与客观测试一致)→ accept(``orthogonal_cleared``)。
+    - 正交 **FAILED**(与原 trace 一致 = 2 独立 FAILED 票,弱测试坐实)→ redelegate
+      (``directive`` = 正交 check 差距;ISS-016 类「缺 fsync」两票一致 → 重跑补 fsync)。
+    - 正交 **None**(未解析/报错)→ accept fallback(``weak_test`` = 现状)。
+    ``gap_consensus`` = 正交 check 与原 trace check 归一化相等(两 reviewer 找同一差距 vs 不同差距;
+    GPT:不只看 verdict,要比 check —— 供 eval / 未来 within-round give_up 判据)。
+    """
+    gap_consensus = _normalize_check(orthogonal_check) == _normalize_check(trace_check)
+    if orthogonal_verdict == "SOLVED":
+        return Resolution(action="accept", accept_reason="orthogonal_cleared",
+                          gap_consensus=gap_consensus, orthogonal_verdict=orthogonal_verdict)
+    if orthogonal_verdict == "FAILED":
+        return Resolution(action="redelegate", directive=str(orthogonal_check or ""),
+                          gap_consensus=gap_consensus, orthogonal_verdict=orthogonal_verdict)
+    return Resolution(action="accept", accept_reason="weak_test",
+                      gap_consensus=gap_consensus, orthogonal_verdict=orthogonal_verdict)
+
+
+async def orthogonal_check(
+    backend: Any,
+    *,
+    orthogonal_model: str,
+    orthogonal_endpoint_id: str | None,
+    goal: str,
+    test_req: str,
+    patch: dict[str, Any],
+    temperature: float = 0.0,
+    max_tokens: int = 1200,
+) -> TraceResult:
+    """正交盲审:复用 ``forced_trace``(同 ``SYS_TRACE``、换 ``orthogonal_model``)。
+
+    无原 trace 上下文(防锚定 —— 正交须独立判断,不看原 trace 说了什么)。
+    """
+    return await forced_trace(
+        backend, model=orthogonal_model, endpoint_id=orthogonal_endpoint_id,
+        goal=goal, test_req=test_req, patch=patch,
+        temperature=temperature, max_tokens=max_tokens,
+    )
+
+
+async def resolve_escalate_from_trajectory(
+    backend: Any,
+    *,
+    orthogonal_model: str,
+    orthogonal_endpoint_id: str | None,
+    goal: str,
+    steps: list[dict[str, Any]],
+    brain_verify_dict: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """run loop 用:escalate 时用正交第二模型盲审同 patch → ``resolve_escalate`` → ``Resolution.to_dict``(进 run.json)。
+
+    **失败隔离**:orthogonal_check 报错 / 无 patch → accept fallback(``weak_test``,现状),不抛、不丢 run.json。
+    ``test_req`` 用 ``goal``(与原 forced-trace 一致 —— run_agent 调 brain_verify_from_trajectory 时
+    test_req 默认 goal)。吃原语(steps + brain_verify_dict),不 import Trajectory,防 delegate↔loop 循环依赖。
+    """
+    bv = brain_verify_dict or {}
+    trace_check = str(bv.get("check", "") or "")
+    patch = extract_final_patch({"steps": steps})
+    if patch is None:  # 无 patch → 无法盲审 → accept fallback(不调 LLM)
+        return Resolution(action="accept", accept_reason="weak_test",
+                          error="trajectory 无 apply_text_patch → 跳过正交盲审").to_dict()
+    try:
+        tr = await orthogonal_check(
+            backend, orthogonal_model=orthogonal_model, orthogonal_endpoint_id=orthogonal_endpoint_id,
+            goal=goal, test_req=goal, patch=patch,
+        )
+    except Exception as exc:  # noqa: BLE001  sidecar:正交调用失败 → 兜,不崩主 run
+        return Resolution(action="accept", accept_reason="weak_test",
+                          error=f"orthogonal_check failed: {exc}").to_dict()
+    res = resolve_escalate(orthogonal_verdict=tr.verdict, orthogonal_check=tr.check, trace_check=trace_check)
+    res.cost_usd = float(getattr(tr, "cost_usd", 0.0) or 0.0)
+    return res.to_dict()

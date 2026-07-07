@@ -47,6 +47,28 @@ def _resolve_main_brain(model_str: str, registry: dict, dd: dict[str, Any]) -> t
     return entry["model"], entry.get("endpoint_id")
 
 
+def _resolve_orthogonal(
+    args: argparse.Namespace, dd: dict[str, Any], main_endpoint_id: str | None,
+) -> tuple[str | None, str | None]:
+    """``--orthogonal-brain``(或 ``sandbox_orthogonal_brain`` 配置)→ ``{model, endpoint_id}``;未设 → ``(None, None)``。
+
+    仅 ``--brain-loop`` 下有意义(escalate 重跑语义只在 loop)。同 main 家族/endpoint → warn(退化同模型二跑,
+    非正交);建议换家族(如 main=deepseek → orthogonal=glm)。
+    """
+    orthogonal_str = getattr(args, "orthogonal_brain", None) or dd.get("sandbox_orthogonal_brain") or ""
+    if not orthogonal_str:
+        return None, None
+    registry = _resolve_endpoints(dd.get("endpoints") or {})
+    entry = _normalize_one(orthogonal_str, set(registry.keys()), dd.get("endpoints"))
+    model, endpoint_id = entry["model"], entry.get("endpoint_id")
+    if endpoint_id is not None and endpoint_id == main_endpoint_id:
+        logger.warning(
+            "orthogonal-brain(%s) 与 main-brain 同 endpoint %s → 退化同模型二跑(非正交);建议换家族",
+            model, endpoint_id,
+        )
+    return model, endpoint_id
+
+
 def _thinking_arg(args: argparse.Namespace) -> bool | None:
     """--thinking off→False(便宜快非推理,默认),on→True(None=provider 默认,沙盒不用)。"""
     val = getattr(args, "thinking", "off")
@@ -116,6 +138,10 @@ async def _run_expert(
     if bool(getattr(args, "brain_loop", False)):
         kwargs.pop("brain_verify", None)
         kwargs.pop("brain_delegate", None)
+        ortho_model, ortho_ep = _resolve_orthogonal(args, dd, endpoint_id)
+        if ortho_model is not None:
+            kwargs["orthogonal_model"] = ortho_model
+            kwargs["orthogonal_endpoint_id"] = ortho_ep
         return await run_cognitive_loop(
             backend, model, task, run_dir=run_dir,
             max_iterations=int(getattr(args, "max_iterations", 3)), **kwargs,

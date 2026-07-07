@@ -6,10 +6,16 @@ import asyncio
 from brainregion.sandbox.brain_delegate import (
     DELEGATE_ACTIONS,
     DelegateDecision,
+    RESOLVE_ACTIONS,
+    Resolution,
     delegate_policy,
     delegate_step,
+    orthogonal_check,
+    resolve_escalate,
+    resolve_escalate_from_trajectory,
 )
 from brainregion.sandbox import brain_delegate as bd
+from brainregion.sandbox import brain_verify as bv
 
 
 class _Resp:
@@ -235,3 +241,134 @@ def test_trajectory_delegate_field_serializes():
     assert traj.to_dict()["delegate"] is None
     traj.delegate = {"action": "accept"}
     assert traj.to_dict()["delegate"] == {"action": "accept"}
+
+
+# ============================================================================
+# escalate handler —— 正交复查(Delegate 子系统的 handler,§15.1)
+# Diagnosis(正交 verdict/check)→ Action(resolve_escalate),零 LLM 决策。
+# ============================================================================
+def test_resolve_escalate_solved_to_accept():
+    r = resolve_escalate(orthogonal_verdict="SOLVED", orthogonal_check="ok", trace_check="缺 fsync")
+    assert r.action == "accept"
+    assert r.accept_reason == "orthogonal_cleared"
+    assert r.directive == ""
+
+
+def test_resolve_escalate_failed_to_redelegate_with_directive():
+    r = resolve_escalate(orthogonal_verdict="FAILED", orthogonal_check="缺 os.fsync", trace_check="缺 fsync")
+    assert r.action == "redelegate"
+    assert r.directive == "缺 os.fsync"  # directive = 正交 check 差距(grounded)
+    assert r.accept_reason == ""
+
+
+def test_resolve_escalate_none_to_weak_test_fallback():
+    r = resolve_escalate(orthogonal_verdict=None, orthogonal_check="", trace_check="缺 fsync")
+    assert r.action == "accept"
+    assert r.accept_reason == "weak_test"
+
+
+def test_resolve_escalate_actions_are_valid_vocab():
+    for ov in ("SOLVED", "FAILED", None):
+        r = resolve_escalate(orthogonal_verdict=ov, orthogonal_check="c", trace_check="t")
+        assert r.action in RESOLVE_ACTIONS
+
+
+def test_resolve_escalate_gap_consensus_same_check():
+    # 正交 check 与 trace check 归一化相等 → gap_consensus=True(两 reviewer 找同一差距)
+    r = resolve_escalate(orthogonal_verdict="FAILED", orthogonal_check="缺  Os.Fsync", trace_check="缺 os.fsync")
+    assert r.gap_consensus is True
+
+
+def test_resolve_escalate_gap_consensus_different_check():
+    # 不同差距(归一化不等)→ gap_consensus=False(更值得 redelegate;GPT ④:比 check 非 仅 verdict)
+    r = resolve_escalate(orthogonal_verdict="FAILED", orthogonal_check="缺 rollback", trace_check="缺 fsync")
+    assert r.gap_consensus is False
+
+
+# ---------------- orthogonal_check(复用 forced_trace 盲审)----------------
+def test_orthogonal_check_uses_orthogonal_model_and_sys_trace():
+    backend = _Backend(content='{"verdict":"FAILED","trace":"t","check":"缺 fsync"}')
+    tr = asyncio.run(orthogonal_check(
+        backend, orthogonal_model="glm-5.2", orthogonal_endpoint_id="zhipu",
+        goal="原子写", test_req="r", patch=_patch()))
+    assert tr.verdict == "FAILED"
+    assert tr.check == "缺 fsync"
+    assert backend.last_kwargs["model"] == "glm-5.2"            # orthogonal_model(非 main)
+    assert backend.last_kwargs["endpoint_id"] == "zhipu"
+    assert backend.last_kwargs["system"] == bv.SYS_TRACE        # 复用 SYS_TRACE(盲审,零新 prompt)
+
+
+def test_orthogonal_check_passes_through_backend_error():
+    backend = _Backend(content="", error="timeout")
+    tr = asyncio.run(orthogonal_check(
+        backend, orthogonal_model="glm-5.2", orthogonal_endpoint_id=None,
+        goal="g", test_req="r", patch=_patch()))
+    assert tr.verdict is None
+    assert tr.error == "timeout"
+
+
+def test_orthogonal_check_tracks_cost():
+    backend = _Backend(content='{"verdict":"SOLVED","trace":"","check":""}', cost_usd=0.015)
+    tr = asyncio.run(orthogonal_check(
+        backend, orthogonal_model="glm-5.2", orthogonal_endpoint_id=None,
+        goal="g", test_req="r", patch=_patch()))
+    assert tr.cost_usd == 0.015
+
+
+# ---------------- resolve_escalate_from_trajectory(loop 用)----------------
+def test_resolve_escalate_from_trajectory_failed_to_redelegate():
+    backend = _Backend(content='{"verdict":"FAILED","trace":"t","check":"缺 fsync"}')
+    out = asyncio.run(resolve_escalate_from_trajectory(
+        backend, orthogonal_model="glm-5.2", orthogonal_endpoint_id=None,
+        goal="原子写", steps=[_apply_step()], brain_verify_dict={"check": "缺 fsync"}))
+    assert out["action"] == "redelegate"
+    assert out["directive"] == "缺 fsync"
+    assert out["orthogonal_verdict"] == "FAILED"
+    assert out["gap_consensus"] is True
+    assert backend.calls == 1
+
+
+def test_resolve_escalate_from_trajectory_solved_to_accept():
+    backend = _Backend(content='{"verdict":"SOLVED","trace":"","check":"ok"}')
+    out = asyncio.run(resolve_escalate_from_trajectory(
+        backend, orthogonal_model="glm-5.2", orthogonal_endpoint_id=None,
+        goal="g", steps=[_apply_step()], brain_verify_dict={"check": "缺 fsync"}))
+    assert out["action"] == "accept"
+    assert out["accept_reason"] == "orthogonal_cleared"
+
+
+def test_resolve_escalate_from_trajectory_no_patch_fallback():
+    backend = _Backend(content='{"verdict":"FAILED"}')  # 不该被调
+    out = asyncio.run(resolve_escalate_from_trajectory(
+        backend, orthogonal_model="glm-5.2", orthogonal_endpoint_id=None,
+        goal="g", steps=[{"tool": "read_text", "args": {"path": "f.py"}}],
+        brain_verify_dict={"check": "缺 fsync"}))
+    assert out["action"] == "accept"
+    assert out["accept_reason"] == "weak_test"
+    assert backend.calls == 0
+    assert out["error"]
+
+
+def test_resolve_escalate_from_trajectory_backend_error_fallback():
+    # 正交调用 raise → accept fallback(失败隔离,不抛)
+    class _ErrBackend(_Backend):
+        async def complete(self, **kwargs):
+            raise RuntimeError("orthogonal boom")
+    out = asyncio.run(resolve_escalate_from_trajectory(
+        _ErrBackend(), orthogonal_model="glm-5.2", orthogonal_endpoint_id=None,
+        goal="g", steps=[_apply_step()], brain_verify_dict={"check": "缺 fsync"}))
+    assert out["action"] == "accept"
+    assert out["accept_reason"] == "weak_test"
+    assert "orthogonal_check failed" in (out["error"] or "")
+
+
+# ---------------- Resolution.to_dict ----------------
+def test_resolution_to_dict():
+    r = Resolution(action="redelegate", directive="补 fsync", gap_consensus=True,
+                   orthogonal_verdict="FAILED", cost_usd=0.01)
+    out = r.to_dict()
+    assert out["action"] == "redelegate"
+    assert out["directive"] == "补 fsync"
+    assert out["gap_consensus"] is True
+    assert out["orthogonal_verdict"] == "FAILED"
+    assert out["cost_usd"] == 0.01
