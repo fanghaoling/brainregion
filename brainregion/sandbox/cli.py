@@ -22,7 +22,7 @@ from brainregion.server import _normalize_one, _resolve_endpoints
 from .eval import render_summary, run_sandbox_eval, write_report
 from .fixtures import SANDBOX_FIXTURES, get_fixture, list_fixture_ids
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
-from .loop import run_agent
+from .loop import run_agent, run_cognitive_loop
 from .brain_verify import TraceResult, composite_verify, extract_final_patch, forced_trace
 from .task import WorktreeTask
 from .worktree import (
@@ -101,6 +101,28 @@ def _agent_kwargs(args: argparse.Namespace, dd: dict[str, Any], endpoint_id: str
     }
 
 
+async def _run_expert(
+    args: argparse.Namespace, backend, model, task, run_dir: str, dd: dict[str, Any],
+    endpoint_id: str | None, *, python_exe: str | None = None,
+):
+    """单遍 run_agent 或外环 run_cognitive_loop(--brain-loop 分支)。
+
+    run_cognitive_loop 强制 brain_verify+brain_delegate(内部 True),故 pop 这两 kw;
+    且不吃 max_iterations 之外的 loop 专参。python_exe 仅 worktree 模式传。
+    """
+    kwargs = _agent_kwargs(args, dd, endpoint_id)
+    if python_exe is not None:
+        kwargs["python_exe"] = python_exe
+    if bool(getattr(args, "brain_loop", False)):
+        kwargs.pop("brain_verify", None)
+        kwargs.pop("brain_delegate", None)
+        return await run_cognitive_loop(
+            backend, model, task, run_dir=run_dir,
+            max_iterations=int(getattr(args, "max_iterations", 3)), **kwargs,
+        )
+    return await run_agent(backend, model, task, run_dir=run_dir, **kwargs)
+
+
 async def _run_fixture(args, dd, backend, model, endpoint_id) -> dict[str, Any]:
     """fixture 模式:物化 synthetic fixture 到 tmp_dir,跑 agent(默认 arm=none)。"""
     tasks = _resolve_tasks(args)
@@ -113,7 +135,7 @@ async def _run_fixture(args, dd, backend, model, endpoint_id) -> dict[str, Any]:
     keep = bool(getattr(args, "keep", False))
     traj = None
     try:
-        traj = await run_agent(backend, model, task, run_dir=run_dir, **_agent_kwargs(args, dd, endpoint_id))
+        traj = await _run_expert(args, backend, model, task, run_dir, dd, endpoint_id)
     finally:
         # 失败(run_agent raise 或 tests 没 green)且 --keep → 留检;否则清。
         if traj is None or not (keep and not traj.tests_green):
@@ -195,10 +217,7 @@ async def _run_worktree(args, dd, backend, model, endpoint_id) -> dict[str, Any]
     with worktree(task.repo_path, task.base_ref, autoremove=not keep) as h:
         bootstrap_results = bootstrap_worktree(h, task.bootstrap_commands)
         py = getattr(args, "python", None) or detect_venv_python(h.path) or sys.executable
-        traj = await run_agent(
-            backend, model, task, run_dir=h.path, python_exe=py,
-            **_agent_kwargs(args, dd, endpoint_id),
-        )
+        traj = await _run_expert(args, backend, model, task, h.path, dd, endpoint_id, python_exe=py)
         # 清理前抓 agent 产物 diff + 落 run.json(CM 退出即 remove,除非 --keep)
         diff = capture_worktree_diff(h)
         artifact_path = write_worktree_run({

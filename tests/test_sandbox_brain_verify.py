@@ -18,22 +18,24 @@ from brainregion.sandbox.brain_verify import (
 
 
 class _Resp:
-    def __init__(self, content, error=None):
+    def __init__(self, content, error=None, cost_usd=0.0):
         self.content = content
         self.error = error
+        self.cost_usd = cost_usd
 
 
 class _Backend:
-    """记录调用 + 返回预设 content/error 的假 backend。"""
+    """记录调用 + 返回预设 content/error/cost 的假 backend。"""
 
-    def __init__(self, content="", error=None):
+    def __init__(self, content="", error=None, cost_usd=0.0):
         self._content = content
         self._error = error
+        self._cost_usd = cost_usd
         self.last_kwargs = None
 
     async def complete(self, **kwargs):
         self.last_kwargs = kwargs
-        return _Resp(self._content, self._error)
+        return _Resp(self._content, self._error, self._cost_usd)
 
 
 # ---------------- extract_final_patch ----------------
@@ -192,6 +194,15 @@ def test_forced_trace_sends_trace_system_prompt():
     assert backend.last_kwargs["system"] == bv.SYS_TRACE
     assert backend.last_kwargs["endpoint_id"] == "e"
     assert "g" in backend.last_kwargs["user"] and "r" in backend.last_kwargs["user"]
+
+
+def test_forced_trace_tracks_cost_into_dict():
+    # sidecar cost 跟踪:forced_trace 从 resp.cost_usd 取 → TraceResult.cost_usd → BrainVerifyResult.to_dict
+    backend = _Backend(content='{"verdict":"SOLVED","trace":"t","check":"c"}', cost_usd=0.012)
+    tr = asyncio.run(forced_trace(backend, model="m", endpoint_id=None,
+                                  goal="g", test_req="r", patch={"path": "p", "replacements": []}))
+    assert tr.cost_usd == 0.012
+    assert composite_verify(tr, True).to_dict()["cost_usd"] == 0.012
 
 
 # ---------------- verify_with_brain(编排)----------------

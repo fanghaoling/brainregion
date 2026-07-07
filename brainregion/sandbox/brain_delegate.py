@@ -36,6 +36,7 @@ class DelegateDecision:
     reason: str = ""
     confidence: float | None = None
     parse_ok: bool = False
+    cost_usd: float = 0.0
     raw: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -46,6 +47,7 @@ class DelegateDecision:
             "reason": self.reason,
             "confidence": self.confidence,
             "parse_ok": self.parse_ok,
+            "cost_usd": self.cost_usd,
         }
 
 
@@ -172,6 +174,7 @@ async def delegate_step(
         reason=obj.get("reason", ""),
         confidence=obj.get("confidence"),
         parse_ok=bool(obj),
+        cost_usd=float(getattr(resp, "cost_usd", 0.0) or 0.0),
         raw=(resp.content or "")[:200],
     )
 

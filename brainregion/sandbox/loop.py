@@ -64,6 +64,37 @@ class StepRecord:
 
 
 @dataclass
+class CognitiveIteration:
+    """外环一轮 expert pass 的 slim 记录(§15.1 认知环)。
+
+    dataclass 非 dict —— 项目风格一致性(ExperienceEvent/RetrieveResult/ContextBlock/Trajectory/
+    DelegateDecision 全 dataclass),且 iteration 记录会长(verify summary / delegate rationale /
+    trace id / timing / patch_size)。
+    """
+
+    iteration: int
+    directive: str
+    solve_status: str
+    tests_green: bool
+    n_steps: int
+    cost_usd: float
+    delegate_action: str | None
+    next_subgoal: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "iteration": self.iteration,
+            "directive": self.directive,
+            "solve_status": self.solve_status,
+            "tests_green": self.tests_green,
+            "n_steps": self.n_steps,
+            "cost_usd": round(self.cost_usd, 6),
+            "delegate_action": self.delegate_action,
+            "next_subgoal": self.next_subgoal,
+        }
+
+
+@dataclass
 class Trajectory:
     task_id: str
     arm: str
@@ -80,6 +111,8 @@ class Trajectory:
     gold_diff: str = ""
     brain_verify: dict[str, Any] | None = None
     delegate: dict[str, Any] | None = None
+    iterations: list[CognitiveIteration] | None = None
+    cumulative_cost_usd: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -97,6 +130,10 @@ class Trajectory:
             "gold_diff": self.gold_diff,
             "brain_verify": self.brain_verify,
             "delegate": self.delegate,
+            "iterations": ([it.to_dict() for it in self.iterations]
+                           if self.iterations is not None else None),
+            "cumulative_cost_usd": (round(self.cumulative_cost_usd, 6)
+                                    if self.cumulative_cost_usd is not None else None),
             "steps": [
                 {
                     "index": s.index,
@@ -285,8 +322,13 @@ async def run_agent(
     effort: str | None = None,
     brain_verify: bool = False,
     brain_delegate: bool = False,
+    directive: str = "",
 ) -> Trajectory:
-    """跑一个 agent loop。返回 Trajectory(含 verify 后的 solve_status)。"""
+    """跑一个 agent loop。返回 Trajectory(含 verify 后的 solve_status)。
+
+    ``directive``(外环 redelegate 注入,§15.1):非空时追加到初始 user message,作「上一轮差距」
+    反馈给 expert。cap 1000 chars(限 LLM→LLM 注入面)。默认 "" = 单遍行为。
+    """
     import sys
 
     python_exe = python_exe or sys.executable
@@ -296,9 +338,14 @@ async def run_agent(
 
     with scoped_workspace_root(run_dir):
         system = _build_system_prompt(task, python_exe)
+        user_content = f"开始。目标:{task.goal}"
+        if directive:  # 外环 redelegate 注入:上一轮验证差距;cap 1000 限注入面(C2),frame 标记由模板加
+            user_content += (
+                f"\n\n【主脑 Delegate 反馈 — 上一轮验证发现的差距,请据此修正】\n{directive[:1000]}"
+            )
         messages: list[dict] = [
             {"role": "system", "content": system},
-            {"role": "user", "content": f"开始。目标:{task.goal}"},
+            {"role": "user", "content": user_content},
         ]
         # brainregion 臂:步首 wake_gate + 注入种子经验(MVP:memory-injection,consult-in-loop defer)
         if arm == "brainregion":
@@ -405,6 +452,7 @@ async def run_agent(
             )
         except Exception as exc:
             traj.brain_verify = {"error": f"brain_verify failed: {exc}", "trace_verdict": None}
+        traj.total_main_cost_usd += float((traj.brain_verify or {}).get("cost_usd", 0.0) or 0.0)
     if brain_delegate:
         from .brain_delegate import delegate_from_trajectory
         try:  # 同样失败隔离:delegate 抛异常只记 error,绝不崩主 run
@@ -415,4 +463,101 @@ async def run_agent(
             )
         except Exception as exc:
             traj.delegate = {"error": f"brain_delegate failed: {exc}", "action": None}
+        traj.total_main_cost_usd += float((traj.delegate or {}).get("cost_usd", 0.0) or 0.0)
+    return traj
+
+
+async def run_cognitive_loop(
+    backend: Any,
+    model: str,
+    task: SandboxTask | WorktreeTask,
+    *,
+    run_dir: str,
+    max_iterations: int = 3,
+    arm: str = "none",
+    max_steps: int = 10,
+    max_cost_usd: float = 0.5,
+    temperature: float = 0.0,
+    max_tokens: int = 2048,
+    transcript_token_cap: int = 24000,
+    consecutive_error_limit: int = 3,
+    python_exe: str | None = None,
+    endpoint_id: str | None = None,
+    thinking: bool | None = None,
+    effort: str | None = None,
+) -> Trajectory:
+    """§15.1 认知环外环:expert → verify → delegate →(redelegate 用 next_subgoal 重跑)→ ...
+    → accept / give_up / budget / max_iterations / error。
+
+    grounding-first:**唯一重跑** = ``redelegate`` + ``tests_green is False`` + 有 grounded ``next_subgoal``
+    (显式查 tests_green,防 delegate_policy drift 在已过测试上 churn;客观测试=ground truth)。
+    escalate / accept 停(测试过);escalate 弱测试疑虑只标记(accepted_weak_test)。
+    复用 run_agent(单遍)作内层;worktree 跨迭代持久(累改在盘)。
+
+    内层 ``max_cost_usd`` 传**剩余预算** → total ≤ max_cost_usd(防 max_iters × 单遍双计)。
+    内层异常 → term="error",返已累积(iterations)。返回末轮 Trajectory + iterations 历史 +
+    cumulative_cost_usd(不覆盖 total_main_cost_usd,保末轮语义)。
+    """
+    if max_iterations < 1:  # C1 guard:≤0 → stub,不崩(末尾不引用未定义 traj)
+        stub = Trajectory(task_id=task.id, arm=arm, gold_diff=task.gold_diff)
+        stub.iterations = []
+        stub.cumulative_cost_usd = 0.0
+        stub.termination_reason = "max_iterations"
+        return stub
+
+    directive = ""
+    iterations: list[CognitiveIteration] = []
+    cumulative = 0.0
+    term = "max_iterations"
+    traj: Trajectory | None = None
+    inner_kwargs = dict(  # 内层 run_agent 公共入参
+        run_dir=run_dir, arm=arm, max_steps=max_steps, temperature=temperature,
+        max_tokens=max_tokens, transcript_token_cap=transcript_token_cap,
+        consecutive_error_limit=consecutive_error_limit, python_exe=python_exe,
+        endpoint_id=endpoint_id, thinking=thinking, effort=effort,
+    )
+    for it in range(max_iterations):
+        remaining = max(0.0, max_cost_usd - cumulative)  # I4: 内层传剩余预算
+        try:  # I8: 内层异常不崩外环
+            traj = await run_agent(
+                backend, model, task, max_cost_usd=remaining,
+                brain_verify=True, brain_delegate=True, directive=directive, **inner_kwargs,
+            )
+        except Exception:  # noqa: BLE001  sidecar 性质:任何内层异常 → 记 error,返已累积
+            term = "error"
+            break
+        it_cost = traj.total_main_cost_usd + traj.total_arm_cost_usd
+        cumulative += it_cost
+        dlg = traj.delegate or {}
+        action = dlg.get("action")
+        subgoal = (dlg.get("next_subgoal") or "")
+        iterations.append(CognitiveIteration(
+            iteration=it, directive=directive[:200], solve_status=traj.solve_status,
+            tests_green=traj.tests_green, n_steps=traj.n_steps, cost_usd=round(it_cost, 6),
+            delegate_action=action, next_subgoal=subgoal[:200],
+        ))
+        if action is None:  # I9: delegate 步失败(run_agent 兜成 {error, action:None})
+            term = "delegate_failed"
+            break
+        if action == "redelegate":
+            if not traj.tests_green and subgoal:  # I10: 唯一重跑(显式查 tests_green)
+                # budget 检查只在「想重跑」时拦:不 mask accept/escalate/give_up 等终态判定
+                if cumulative >= max_cost_usd:
+                    term = "budget_exceeded"
+                    break
+                directive = subgoal[:1000]
+                continue
+            # redelegate 但不可重跑:无 subgoal → delegate_no_subgoal;测试却过 → inconsistent_delegate
+            term = "delegate_no_subgoal" if not subgoal else "inconsistent_delegate"
+            break
+        # accept / escalate / give_up / 未知 → 终止(budget 不 mask 这些终态)
+        term = {"accept": "accepted", "escalate": "accepted_weak_test",
+                "give_up": "give_up"}.get(action, "delegate_unknown")
+        break
+
+    if traj is None:  # 防御(max_iterations<1 已早返;此处理论不到)
+        traj = Trajectory(task_id=task.id, arm=arm, gold_diff=task.gold_diff)
+    traj.iterations = iterations
+    traj.cumulative_cost_usd = round(cumulative, 6)
+    traj.termination_reason = term
     return traj

@@ -13,22 +13,24 @@ from brainregion.sandbox import brain_delegate as bd
 
 
 class _Resp:
-    def __init__(self, content, error=None):
+    def __init__(self, content, error=None, cost_usd=0.0):
         self.content = content
         self.error = error
+        self.cost_usd = cost_usd
 
 
 class _Backend:
-    def __init__(self, content="", error=None):
+    def __init__(self, content="", error=None, cost_usd=0.0):
         self._content = content
         self._error = error
+        self._cost_usd = cost_usd
         self.last_kwargs = None
         self.calls = 0
 
     async def complete(self, **kwargs):
         self.last_kwargs = kwargs
         self.calls += 1
-        return _Resp(self._content, self._error)
+        return _Resp(self._content, self._error, self._cost_usd)
 
 
 # ---------------- delegate_policy(纯函数矩阵)----------------
@@ -136,6 +138,18 @@ def test_delegate_step_sends_action_in_user():
                               task_goal="g", patch=_patch(), brain_verify=bv))
     # user 里写明已确定的 action
     assert "redelegate" in backend.last_kwargs["user"]
+
+
+def test_delegate_step_tracks_cost_into_dict():
+    # sidecar cost 跟踪:delegate_step 从 resp.cost_usd 取 → DelegateDecision.cost_usd → to_dict
+    backend = _Backend(content='{"next_subgoal":"补 fsync","target":"same expert","reason":"r"}',
+                       cost_usd=0.008)
+    bv = {"test_green": False, "trace_verdict": "FAILED", "weak_test_signal": False,
+          "trace_missed": False, "check": "缺 fsync"}
+    d = asyncio.run(delegate_step(backend, model="m", endpoint_id=None,
+                                  task_goal="g", patch=_patch(), brain_verify=bv))
+    assert d.cost_usd == 0.008
+    assert d.to_dict()["cost_usd"] == 0.008
 
 
 # ---------------- to_dict ----------------

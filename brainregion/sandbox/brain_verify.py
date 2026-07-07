@@ -53,6 +53,7 @@ class TraceResult:
     confidence: float | None = None
     parse_ok: bool = False
     error: str | None = None
+    cost_usd: float = 0.0
     raw: str = ""
 
 
@@ -91,6 +92,7 @@ class BrainVerifyResult:
             "confidence": self.trace.confidence,
             "parse_ok": self.trace.parse_ok,
             "error": self.trace.error,
+            "cost_usd": self.trace.cost_usd,
             "notes": self.notes,
         }
 
@@ -186,6 +188,7 @@ async def forced_trace(
         confidence=(obj or {}).get("confidence"),
         parse_ok=verdict is not None,
         error=getattr(resp, "error", None),
+        cost_usd=float(getattr(resp, "cost_usd", 0.0) or 0.0),
         raw=(resp.content or "")[:200],
     )
 

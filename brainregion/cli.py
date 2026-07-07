@@ -195,6 +195,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_run.add_argument("--brain-delegate", action="store_true",
                           help="run 末尾基于 brain_verify 信号跑 Delegate 步(action+下一步子目标,§15.1);"
                           "隐含 --brain-verify(delegate 消费 verify 信号);默认关=sidecar")
+    p_sb_run.add_argument("--brain-loop", action="store_true",
+                          help="§15.1 认知环外环:测试败+delegate 给出 next_subgoal 时用它重跑 expert(同 worktree "
+                          "累改),loop 到 accept/give_up/budget/max_iterations。隐含 --brain-delegate --brain-verify;"
+                          "默认关=sidecar")
+    p_sb_run.add_argument("--max-iterations", type=int, default=3,
+                          help="外环最大迭代数(仅 --brain-loop 生效,默认 3)")
     p_sb_run.add_argument("--max-steps", type=int, default=None)
     p_sb_run.add_argument("--max-cost-usd", type=float, default=None)
     p_sb_run.add_argument("--max-tokens", type=int, default=None)
