@@ -77,21 +77,43 @@ class BrainVerifyResult:
             return "FAILED"
         return self.trace_verdict
 
+    def to_dict(self) -> dict[str, Any]:
+        """可序列化(进 trajectory.brain_verify / run.json)。"""
+        return {
+            "trace_verdict": self.trace_verdict,
+            "test_green": self.test_green,
+            "final_verdict": self.verdict,
+            "agree": self.agree,
+            "weak_test_signal": self.weak_test_signal,
+            "trace_missed": self.trace_missed,
+            "trace": self.trace.trace,
+            "check": self.trace.check,
+            "confidence": self.trace.confidence,
+            "parse_ok": self.trace.parse_ok,
+            "error": self.trace.error,
+            "notes": self.notes,
+        }
+
 
 # ---------------- patch 抽取 / 渲染 ----------------
 def extract_final_patch(trajectory: dict[str, Any]) -> dict[str, Any] | None:
     """从 trajectory 取最后一个**成功应用**的 apply_text_patch 步的 {path, replacements}。
 
-    无 apply_text_patch 或全部 error → None。
+    步可以是 dict(run.json 序列化)或 ``StepRecord``(活 trajectory)。无 apply_text_patch
+    或全部 error → None。
     """
     steps = trajectory.get("steps") or []
+
+    def _get(s, key, default=None):
+        return s.get(key, default) if isinstance(s, dict) else getattr(s, key, default)
+
     patch: dict[str, Any] | None = None
     for s in steps:
-        if s.get("tool") != "apply_text_patch":
+        if _get(s, "tool") != "apply_text_patch":
             continue
-        args = s.get("args") or {}
-        reps = args.get("replacements")
-        if reps and not s.get("error"):
+        args = _get(s, "args") or {}
+        reps = args.get("replacements") if isinstance(args, dict) else None
+        if reps and not _get(s, "error"):
             patch = {"path": args.get("path", "?"), "replacements": reps}
     return patch
 
@@ -230,3 +252,33 @@ async def verify_with_brain(
         goal=goal, test_req=test_req, patch=patch,
     )
     return composite_verify(tr, test_green)
+
+
+async def brain_verify_from_trajectory(
+    backend: Any,
+    *,
+    model: str,
+    endpoint_id: str | None,
+    goal: str,
+    steps: list[dict[str, Any]],
+    test_green: bool | None,
+    test_req: str | None = None,
+) -> dict[str, Any]:
+    """run loop 用:test_green 已由 ``run_agent`` 跑 verify_solution 算出 → **只跑 forced-trace**,
+    返回 composite 的可序列化 dict(供 ``trajectory.brain_verify`` / run.json)。**不重跑 pytest**。
+
+    吃原语(steps + test_green),不 import Trajectory,避免 brain_verify↔loop 循环依赖。
+    """
+    patch = extract_final_patch({"steps": steps})
+    test_req = test_req or goal
+    if patch is None:
+        tr = TraceResult(verdict=None, error="no apply_text_patch in trajectory")
+        res = composite_verify(tr, test_green)
+        res.notes.insert(0, "trajectory 无 apply_text_patch → 跳过 trace,仅客观测试")
+    else:
+        tr = await forced_trace(
+            backend, model=model, endpoint_id=endpoint_id,
+            goal=goal, test_req=test_req, patch=patch,
+        )
+        res = composite_verify(tr, test_green)
+    return res.to_dict()

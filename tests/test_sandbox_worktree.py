@@ -241,6 +241,13 @@ class _MockBackend:
         self.i += 1
         return ModelResponse(model=kw.get("model", "mock"), content=content, usage={}, cost_usd=0.0)
 
+    async def complete(self, *, system, user, **kw):
+        # brain_verify 的 forced-trace 用:补丁修了 off-by-one → SOLVED
+        content = json.dumps({"trace": "range(start, end+1) 修了 off-by-one",
+                              "check": "sum_range 现在含 end",
+                              "verdict": "SOLVED", "confidence": 0.9})
+        return ModelResponse(model=kw.get("model", "mock"), content=content, usage={}, cost_usd=0.0)
+
 
 def test_run_agent_against_worktree_solves(repo: Path):
     task = WorktreeTask(
@@ -253,7 +260,46 @@ def test_run_agent_against_worktree_solves(repo: Path):
         with scoped_workspace_root(h.path):
             sha = read_text("ranges.py")["sha256"]
         traj = asyncio.run(
-            run_agent(_MockBackend(sha), "mock", task, run_dir=h.path, arm="none", python_exe=sys.executable)
+            run_agent(_MockBackend(sha), "mock", task, run_dir=h.path, arm="none",
+                      python_exe=sys.executable, brain_verify=True)
         )
         assert traj.solve_status == "solved"
         assert traj.tests_green
+        # §15.8 brain_verify 接 run loop:forced-trace 跑了 + 与客观测试 agree + 序列化进 to_dict
+        assert traj.brain_verify is not None
+        assert traj.brain_verify["trace_verdict"] == "SOLVED"
+        assert traj.brain_verify["test_green"] is True
+        assert traj.brain_verify["agree"] is True
+        assert traj.to_dict()["brain_verify"]["final_verdict"] == "SOLVED"
+
+
+class _MockBackendRaiseTrace(_MockBackend):
+    """同 _MockBackend(能解 task)但 forced-trace 的 complete 抛异常 —— 验 brain_verify 失败隔离。"""
+
+    async def complete(self, *, system, user, **kw):
+        raise RuntimeError("simulated trace backend explosion")
+
+
+def test_run_agent_brain_verify_failure_isolated(repo: Path):
+    """brain_verify 是 sidecar:其 LLM 调用抛异常时,run_agent 不得崩、不得丢主 run 的成果。"""
+    task = WorktreeTask(
+        id="wt-test",
+        goal="ranges.py 的 sum_range 有 off-by-one bug,让 test_ranges.py 转绿。",
+        repo_path=str(repo),
+        test_args=["-q"],
+    )
+    with worktree(repo) as h:
+        with scoped_workspace_root(h.path):
+            sha = read_text("ranges.py")["sha256"]
+        traj = asyncio.run(
+            run_agent(_MockBackendRaiseTrace(sha), "mock", task, run_dir=h.path, arm="none",
+                      python_exe=sys.executable, brain_verify=True)
+        )
+    # 主 run 不受 brain_verify 失败影响
+    assert traj.solve_status == "solved"
+    assert traj.tests_green
+    # brain_verify 失败被显式隔离:run_agent 不抛,brain_verify 段记 error(不丢 run.json/diff)
+    assert traj.brain_verify is not None
+    assert traj.brain_verify.get("trace_verdict") is None
+    assert str(traj.brain_verify.get("error", "")).startswith("brain_verify failed")
+    assert traj.to_dict()["brain_verify"]["error"].startswith("brain_verify failed")

@@ -78,6 +78,7 @@ class Trajectory:
     wake_calls: int = 0
     consult_calls: int = 0
     gold_diff: str = ""
+    brain_verify: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -93,6 +94,7 @@ class Trajectory:
             "wake_calls": self.wake_calls,
             "consult_calls": self.consult_calls,
             "gold_diff": self.gold_diff,
+            "brain_verify": self.brain_verify,
             "steps": [
                 {
                     "index": s.index,
@@ -279,6 +281,7 @@ async def run_agent(
     endpoint_id: str | None = None,
     thinking: bool | None = None,
     effort: str | None = None,
+    brain_verify: bool = False,
 ) -> Trajectory:
     """跑一个 agent loop。返回 Trajectory(含 verify 后的 solve_status)。"""
     import sys
@@ -390,4 +393,13 @@ async def run_agent(
         else:
             traj.solve_status = "tests_fail"
 
+    if brain_verify:
+        from .brain_verify import brain_verify_from_trajectory
+        try:  # sidecar 绝不崩主 run:失败 → 记 error,不丢 run.json/diff(失败隔离是显式契约,不靠 backend 兜)
+            traj.brain_verify = await brain_verify_from_trajectory(
+                backend, model=model, endpoint_id=endpoint_id,
+                goal=task.goal, steps=traj.steps, test_green=traj.tests_green,
+            )
+        except Exception as exc:
+            traj.brain_verify = {"error": f"brain_verify failed: {exc}", "trace_verdict": None}
     return traj

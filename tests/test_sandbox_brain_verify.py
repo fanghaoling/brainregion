@@ -71,6 +71,19 @@ def test_extract_final_patch_ignores_apply_without_replacements():
     assert extract_final_patch(traj) is None
 
 
+def test_extract_final_patch_handles_steprecord_objects():
+    # 活 trajectory 的 steps 是 StepRecord 对象(非 dict);duck-typed 取值
+    from types import SimpleNamespace
+    traj = {"steps": [
+        SimpleNamespace(tool="read_text", args={"path": "a.py"}, error=None),
+        SimpleNamespace(tool="apply_text_patch", error=None,
+                        args={"path": "b.py", "replacements": [{"old_text": "1", "new_text": "2"}]}),
+    ]}
+    patch = extract_final_patch(traj)
+    assert patch["path"] == "b.py"
+    assert patch["replacements"][0]["new_text"] == "2"
+
+
 # ---------------- composite_verify 矩阵 ----------------
 def _tr(verdict):
     return TraceResult(verdict=verdict, parse_ok=verdict is not None)
@@ -232,3 +245,53 @@ def test_verify_with_brain_test_req_defaults_to_goal(monkeypatch):
                                   model="m", endpoint_id=None))
     # test_req 默认 = goal → goal 出现在 user 里
     assert "GOAL_TEXT" in captured["user"]
+
+
+# ---------------- brain_verify_from_trajectory(run loop 用)----------------
+def test_brain_verify_from_trajectory_weak_test_signal():
+    # 有 patch + 测试过 + trace FAILED → 弱测试信号
+    backend = _Backend(content='{"verdict":"FAILED","trace":"缺 fsync","check":"(b) 不满足","confidence":0.9}')
+    steps = [_step("apply_text_patch", error=None, path="f.py",
+                   replacements=[{"old_text": "write_bytes", "new_text": "temp+replace"}])]
+    out = asyncio.run(bv.brain_verify_from_trajectory(
+        backend, model="m", endpoint_id=None, goal="原子写",
+        steps=steps, test_green=True))
+    assert out["trace_verdict"] == "FAILED"
+    assert out["test_green"] is True
+    assert out["weak_test_signal"] is True
+    assert out["agree"] is False
+    assert out["final_verdict"] == "SOLVED"  # 以客观测试为准
+
+
+def test_brain_verify_from_trajectory_agree_failed():
+    backend = _Backend(content='{"verdict":"FAILED","trace":"t","check":"c"}')
+    steps = [_step("apply_text_patch", error=None, path="f.py",
+                   replacements=[{"old_text": "a", "new_text": "b"}])]
+    out = asyncio.run(bv.brain_verify_from_trajectory(
+        backend, model="m", endpoint_id=None, goal="g", steps=steps, test_green=False))
+    assert out["trace_verdict"] == "FAILED"
+    assert out["test_green"] is False
+    assert out["agree"] is True
+    assert out["final_verdict"] == "FAILED"
+
+
+def test_brain_verify_from_trajectory_no_patch_skips_trace():
+    backend = _Backend(content='{"verdict":"SOLVED"}')  # 不该被调
+    out = asyncio.run(bv.brain_verify_from_trajectory(
+        backend, model="m", endpoint_id=None, goal="g",
+        steps=[_step("read_text", path="f.py")], test_green=False))
+    assert out["trace_verdict"] is None
+    assert out["test_green"] is False
+    assert backend.last_kwargs is None  # forced_trace 没跑
+    assert any("无 apply_text_patch" in n for n in out["notes"])
+
+
+# ---------------- Trajectory.brain_verify 序列化 ----------------
+def test_trajectory_brain_verify_field_serializes():
+    from brainregion.sandbox.loop import Trajectory
+
+    traj = Trajectory(task_id="t", arm="none")
+    assert traj.brain_verify is None  # 默认 None
+    assert traj.to_dict()["brain_verify"] is None
+    traj.brain_verify = {"trace_verdict": "SOLVED", "test_green": True}
+    assert traj.to_dict()["brain_verify"] == {"trace_verdict": "SOLVED", "test_green": True}
