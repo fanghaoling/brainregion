@@ -23,6 +23,7 @@ from .eval import render_summary, run_sandbox_eval, write_report
 from .fixtures import SANDBOX_FIXTURES, get_fixture, list_fixture_ids
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
 from .loop import run_agent
+from .brain_verify import TraceResult, composite_verify, extract_final_patch, forced_trace
 from .task import WorktreeTask
 from .worktree import (
     bootstrap_worktree,
@@ -258,3 +259,50 @@ async def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     print(render_summary(report))
     print(f"\n报告: {path}")
     return {"report": report, "path": str(path)}
+
+
+async def verify_brain(args: argparse.Namespace) -> dict[str, Any]:
+    """`brain-region sandbox verify-brain`:§15.8 trace-first + test-backstop 落地。
+
+    对 run.json 里专家(沙盒)的补丁跑一次 forced-trace(廉价 LLM 层),对照该 run **已存的**
+    客观 ``tests_green`` → composite(agree / 弱测试信号 / trace 漏检)。不重跑 pytest(用 run 时的
+    客观结果),故能在历史 run 上离线复盘。
+    """
+    dd = _defaults_mod.apply()
+    backend, registry = _build_backend(dd)
+    model_str = args.main_brain or dd.get("sandbox_main_brain") or "deepseek-v4-flash"
+    model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
+
+    run = json.load(open(args.run, encoding="utf-8"))
+    traj = run.get("trajectory") or {}
+    goal = (run.get("task") or {}).get("goal", "")
+    test_green = traj.get("tests_green")  # run 时跑出的客观结果(最强 grounded check)
+    test_req = args.test_req or goal
+    patch = extract_final_patch(traj)
+
+    if patch is None:
+        tr = TraceResult(verdict=None, error="no apply_text_patch in run trajectory")
+        res = composite_verify(tr, test_green)
+        res.notes.insert(0, "run trajectory 无 apply_text_patch → 跳过 trace,仅客观测试")
+    else:
+        tr = await forced_trace(
+            backend, model=model, endpoint_id=endpoint_id,
+            goal=goal, test_req=test_req, patch=patch,
+        )
+        res = composite_verify(tr, test_green)
+
+    out = {
+        "run": Path(args.run).name,
+        "model": model,
+        "trace_verdict": res.trace_verdict,
+        "test_green": res.test_green,
+        "final_verdict": res.verdict,
+        "agree": res.agree,
+        "weak_test_signal": res.weak_test_signal,
+        "trace_missed": res.trace_missed,
+        "trace": tr.trace,
+        "check": tr.check,
+        "notes": res.notes,
+    }
+    print(json.dumps(out, ensure_ascii=False, indent=2))
+    return out

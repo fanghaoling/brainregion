@@ -224,6 +224,15 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_eval.add_argument("--keep", action="store_true", help="失败时保留 run_dir")
     p_sb_eval.add_argument("--out", default=None, help="报告 JSON 输出目录(默认 .brain-region/sandbox/)")
 
+    p_sb_vb = p_sb_sub.add_parser(
+        "verify-brain",
+        help="主脑 grounding-first 验证(§15.8):对 run.json 里的专家补丁跑 forced-trace,"
+        "对照 run 里存的客观 tests_green → agree / 弱测试信号 / trace 漏检",
+    )
+    p_sb_vb.add_argument("--run", required=True, help="run.json 路径(sandbox run --worktree 的产物)")
+    p_sb_vb.add_argument("--main-brain", default=None, help="主脑模型(默认 sandbox_main_brain 或 deepseek-v4-flash)")
+    p_sb_vb.add_argument("--test-req", default=None, help="覆盖测试要求文本(默认取 task.goal)")
+
     p_ins = sub.add_parser(
         "inspect",
         help="只读调试窗口（v5.x）：activation/memory/run/calibration 可观测面，不调模型不写",
@@ -739,6 +748,8 @@ def main() -> None:
             asyncio.run(sandbox_cli.run(args))
         elif args.sandbox_command == "eval":
             asyncio.run(sandbox_cli.run_eval(args))
+        elif args.sandbox_command == "verify-brain":
+            asyncio.run(sandbox_cli.verify_brain(args))
         return
     if args.command == "inspect":
         run_inspect(args)
