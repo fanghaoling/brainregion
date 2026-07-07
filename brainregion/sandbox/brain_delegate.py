@@ -16,7 +16,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .brain_verify import render_patch
+from .brain_verify import extract_final_patch, render_patch
 
 # action 词表(可序列化进 run.json):
 # accept      —— 客观测试过 + trace 认可,完成。
@@ -149,7 +149,17 @@ async def delegate_step(
             confidence=None, parse_ok=True,
         )
 
-    # redelegate / escalate → LLM formulate next_subgoal(grounded in trace.check)
+    # redelegate / escalate 需要 trace.check 作 grounding。trace 调用失败(brain_verify 被 run_agent
+    # 兜成 error dict,无 check)或 trace 没给出差距 → **不调 LLM**(空 check 下 LLM 只会 confabulate,
+    # 违背「next_subgoal 必须 grounded in trace.check」承诺 —— Step A 反 confabulation 在失败路径的延续)。
+    if not (bv.get("check") or "").strip():
+        return DelegateDecision(
+            action=action,
+            reason="trace 无 check(trace 调用失败或未指出差距)→ 无法 ground next_subgoal,跳过 LLM 防编造",
+            next_subgoal="", parse_ok=True,
+        )
+
+    # redelegate / escalate + 有 check → LLM formulate next_subgoal(grounded in trace.check)
     resp = await backend.complete(
         model=model, system=SYS_DELEGATE, user=_build_user(task_goal, patch, bv, action),
         endpoint_id=endpoint_id, thinking=False, temperature=temperature, max_tokens=max_tokens,
@@ -164,3 +174,48 @@ async def delegate_step(
         parse_ok=bool(obj),
         raw=(resp.content or "")[:200],
     )
+
+
+async def delegate_from_trajectory(
+    backend: Any,
+    *,
+    model: str,
+    endpoint_id: str | None,
+    goal: str,
+    steps: list[dict[str, Any]],
+    test_green: bool | None,
+    brain_verify_dict: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """run loop 用:已有 brain_verify(Merge 步)+ trajectory steps → DelegateDecision.to_dict(进 run.json)。
+
+    **test_green 用 traj.tests_green(verify_solution 跑出的可靠 ground truth)**,不用 brain_verify_dict
+    里的 —— 后者在 trace 调用失败(被 run_agent 兜成 error dict)时会缺 test_green。trace 信号
+    (trace_verdict/weak_test_signal/check)从 brain_verify_dict 取,失败时降级(空)。
+
+    无 patch → 仍由 policy 出 action(多 give_up),但不调 LLM formulate(没补丁上下文)。
+    吃原语,不 import Trajectory,防 delegate↔loop 循环依赖。
+    """
+    bv = brain_verify_dict or {}
+    bv_signals = {
+        "test_green": test_green,  # 可靠 ground truth
+        "trace_verdict": bv.get("trace_verdict"),
+        "weak_test_signal": bv.get("weak_test_signal", False),
+        "trace_missed": bv.get("trace_missed", False),
+        "trace": bv.get("trace", ""),
+        "check": bv.get("check", ""),
+    }
+    patch = extract_final_patch({"steps": steps})
+    if patch is None:
+        action = delegate_policy(
+            test_green=test_green, trace_verdict=bv_signals["trace_verdict"],
+            weak_test_signal=bv_signals["weak_test_signal"], trace_missed=bv_signals["trace_missed"],
+        )
+        return DelegateDecision(
+            action=action, reason="trajectory 无 apply_text_patch → 跳过 LLM formulate(无补丁上下文)",
+            parse_ok=True,
+        ).to_dict()
+    decision = await delegate_step(
+        backend, model=model, endpoint_id=endpoint_id,
+        task_goal=goal, patch=patch, brain_verify=bv_signals,
+    )
+    return decision.to_dict()

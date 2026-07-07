@@ -261,7 +261,7 @@ def test_run_agent_against_worktree_solves(repo: Path):
             sha = read_text("ranges.py")["sha256"]
         traj = asyncio.run(
             run_agent(_MockBackend(sha), "mock", task, run_dir=h.path, arm="none",
-                      python_exe=sys.executable, brain_verify=True)
+                      python_exe=sys.executable, brain_verify=True, brain_delegate=True)
         )
         assert traj.solve_status == "solved"
         assert traj.tests_green
@@ -271,6 +271,10 @@ def test_run_agent_against_worktree_solves(repo: Path):
         assert traj.brain_verify["test_green"] is True
         assert traj.brain_verify["agree"] is True
         assert traj.to_dict()["brain_verify"]["final_verdict"] == "SOLVED"
+        # §15.1 brain_delegate 接 run loop:solved → accept(确定性,不调 LLM)+ 序列化
+        assert traj.delegate is not None
+        assert traj.delegate["action"] == "accept"
+        assert traj.to_dict()["delegate"]["action"] == "accept"
 
 
 class _MockBackendRaiseTrace(_MockBackend):

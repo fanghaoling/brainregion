@@ -192,6 +192,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_run.add_argument("--main-brain", default=None, help="主脑模型(deepseek-v4-flash / glm-5.2 等,非 Claude Code)")
     p_sb_run.add_argument("--brain-verify", action="store_true",
                           help="run 末尾对专家补丁跑 forced-trace + 对照客观 tests_green(§15.8,默认关=sidecar)")
+    p_sb_run.add_argument("--brain-delegate", action="store_true",
+                          help="run 末尾基于 brain_verify 信号跑 Delegate 步(action+下一步子目标,§15.1);"
+                          "隐含 --brain-verify(delegate 消费 verify 信号);默认关=sidecar")
     p_sb_run.add_argument("--max-steps", type=int, default=None)
     p_sb_run.add_argument("--max-cost-usd", type=float, default=None)
     p_sb_run.add_argument("--max-tokens", type=int, default=None)

@@ -97,6 +97,7 @@ def _agent_kwargs(args: argparse.Namespace, dd: dict[str, Any], endpoint_id: str
         "thinking": _thinking_arg(args),
         "effort": args.effort,
         "brain_verify": bool(getattr(args, "brain_verify", False)),
+        "brain_delegate": bool(getattr(args, "brain_delegate", False)),
     }
 
 
