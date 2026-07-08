@@ -144,6 +144,17 @@ def _format_status(*, mem: str, strat: str) -> str:
     return f"记忆脑区:{mem}\n策略脑区:{strat}"
 
 
+# review 双强 consensus HIGH:real(real 解读)vs dummy(模板)注入长度差 → transcript 体积差是 presence 混淆,
+# 破「唯一差=内容」。固定字符预算:real 截断到预算,dummy **程序化填到恰好预算**(同结构标签 + 无信息中性填充)。
+_STATUS_BUDGET = 300
+_DUMMY_FILLER = (
+    "记忆脑区:本周期无可报告的具体地图解读(占位状态,不含可用导航信息);"
+    "策略脑区:本周期无可报告的方向意图(占位状态,不含可用规划信息);"
+    "请依据你的局部视野与已走路径自行判断,本条不作为动作依据。"
+)
+_DUMMY_STATUS = (_DUMMY_FILLER * 8)[:_STATUS_BUDGET]   # 恰好 _STATUS_BUDGET 字符,等长对齐 real
+
+
 def make_status_injector(
     arm: EnvArm, memory_region: MemoryRegion, strategy_region: Any,
     backend: Any, model: str, *, endpoint_id: str | None, thinking: bool | None, effort: str | None,
@@ -175,9 +186,9 @@ def make_status_injector(
             endpoint_id=ep, thinking=th, effort=ef,
         )
         cost = float(m.get("cost_usd", 0.0) or 0.0) + float(s.get("cost_usd", 0.0) or 0.0)
-        if arm.strategy == "dummy":       # 同源同成本,但喂回固定中性模板(content-null)
-            return _format_status(mem="(探索进行中,无具体地图解读)", strat="(继续系统探索未见区域)"), cost
-        return _format_status(mem=memory_region.rough_map, strat=s["intent"]), cost   # real
+        if arm.strategy == "dummy":       # 同源同成本,喂回等长中性占位(content-null,长度对齐避混淆)
+            return _DUMMY_STATUS, cost
+        return _format_status(mem=memory_region.rough_map, strat=s["intent"])[:_STATUS_BUDGET], cost   # real 截断到预算
 
     return inject
 
@@ -247,17 +258,19 @@ def _coverage(env: GridWorld) -> float | None:
     return min(1.0, explored / denom)
 
 
-# region_status 被主脑引用的标记(GPT 加:区分「内容无用」vs「主脑没读」;粗粒度)
-_STATUS_MARKERS = ("记忆脑区", "策略脑区", "记忆显示", "根据记忆", "脑区", "意图", "地图理解", "rough")
+# region_status 被主脑引用的标记(review 双强:收紧为 status 专属标签,去通用词「意图/脑区/地图理解」假阳)。
+# real/dummy 注入串都含「记忆脑区/策略脑区」标签(_format_status/_DUMMY_STATUS),故两臂同标签基线;
+# thought 引用这些 status 专属词 → 视为「读了注入的 status」。
+_STATUS_MARKERS = ("记忆脑区", "策略脑区", "记忆显示", "根据记忆", "rough")
 
 
 def _status_referenced(traj: Any, period: int) -> float | None:
     """post-push 步(注入在 step 顶部,该步 thought 即收 status 后的推理)thought 引用 region_status 的比例。
 
-    粗粒度(GPT 加):thought 含脑区标记 → 视为「读了」。real 高 dummy 低 → 主脑 engage real 内容;
-    两者都低 → 主脑忽略 push(≠ 内容无用)。push 臂外(metronome=False)→ None。
+    review 双强:粗粒度,仅作诊断。负对照基线(无注入 run 的标记率)应另测 —— 若 ≈0 则本指标可信;
+    若高则需收紧到 status 具体内容 token。real/dummy 同标签 → real 高 dummy 低 = engage real 内容。
     """
-    if period <= 0:
+    if not period or period <= 0:
         return None
     push_steps = [s for s in traj.steps if s.index > 0 and s.index % period == 0]
     if not push_steps:

@@ -554,6 +554,10 @@ async def run_env_eval(args: argparse.Namespace) -> dict[str, Any]:
     logger.info("env-eval: %d configs × %d arms × %d repeats = ≤%d runs",
                 len(configs), len(arms), args.repeats, len(configs) * len(arms) * args.repeats)
 
+    status_period = int(getattr(args, "metronome_period", 3) or 3)
+    if status_period <= 0:  # review 双强:period 须正(避 ZeroDivisionError + 语义明确)
+        raise SystemExit("--metronome-period 须为正整数")
+
     report = await run_env_eval_harness(
         backend, model, configs, arms,
         repeats=int(args.repeats),
@@ -561,7 +565,7 @@ async def run_env_eval(args: argparse.Namespace) -> dict[str, Any]:
         temperature=float(dd.get("sandbox_temperature", 0.0)),
         max_tokens=int(args.max_tokens or 2048),
         endpoint_id=endpoint_id, thinking=_thinking_arg(args), effort=args.effort,
-        status_period=int(getattr(args, "metronome_period", 3) or 3),
+        status_period=status_period,
     )
     json_path, csv_path = write_report(report, getattr(args, "out", None))
     print(render_env_eval_summary(report))

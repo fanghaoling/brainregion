@@ -585,13 +585,17 @@ async def run_agent(
 
             # Phase 4.1 metronome:每 status_period 步(status>0)注入脑区状态 user message。
             # 加性:status_injector None → 现行为(零变化)。injector 返 (status_str|None, cost);失败隔离不崩主 run。
-            if status_injector is not None and step > 0 and step % status_period == 0:
+            # review 双强:period 须为正(guard 防 ZeroDivisionError)+ status sanitize fence token(防 LLM rough_map
+            # 含 </region_status> 逃逸围栏 / instruction-hierarchy 注入)。
+            if status_injector is not None and status_period and status_period > 0 \
+                    and step > 0 and step % status_period == 0:
                 try:
                     _status, _inj_cost = await status_injector(step, messages)
                     traj.total_main_cost_usd += float(_inj_cost or 0.0)
                     if _status:
-                        messages.append({"role": "user", "content": f"<region_status>\n{_status}\n</region_status>"})
-                except Exception as exc:  # noqa: BLE001 — injector 失败:跳过本次注入,不毁主 run
+                        _safe = _status.replace("</region_status>", "").replace("<region_status>", "")
+                        messages.append({"role": "user", "content": f"<region_status>\n{_safe}\n</region_status>"})
+                except Exception as exc:  # noqa: BLE001 — injector 失败:跳过本次注入,成本不计,real/dummy 对称跳过
                     logger.warning("status_injector 失败,跳过本次注入", exc_info=True)
 
             messages = _trim_transcript(messages, cap_chars)
