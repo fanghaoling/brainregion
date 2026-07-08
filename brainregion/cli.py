@@ -312,6 +312,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_env_eval.add_argument("--wall-seed", type=int, default=None, help="随机墙种子")
     p_sb_env_eval.add_argument("--max-steps", type=int, default=None, help="per-run 步上限(默认 30)")
     p_sb_env_eval.add_argument("--repeats", type=int, default=3, help="每 (config,arm) 重复 run 数(pilot=3;formal≥10)")
+    p_sb_env_eval.add_argument("--metronome-period", type=int, default=3,
+                               help="Phase 4.1 push 臂:每 N 步注入 region_status(默认 3;正式扫 {2,3,5})")
     p_sb_env_eval.add_argument("--arms", default="memory-strategy", choices=list(ARM_PRESETS_KEYS),
                                help="臂预设(memory-strategy=D.3+Echo 控制臂 / memory-baseline / all)")
     p_sb_env_eval.add_argument("--arm", action="append", default=None,

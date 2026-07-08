@@ -31,8 +31,9 @@ from brainregion.eval import stats as eval_stats
 from .eval import evaluate_gate
 from .envs import GridWorld, build_env_system_prompt
 from .isolation import cleanup_run_dir, make_run_dir
-from .loop import run_agent, scoped_env, scoped_memory_mode
+from .loop import _current_env, run_agent, scoped_env, scoped_memory_mode
 from .regions import EchoStrategy, MemoryRegion, StrategyRegion
+from .regions.strategy_region import _strip_to_thought
 from .task import SandboxTask
 
 logger = logging.getLogger("brainregion.sandbox.env_eval")
@@ -66,7 +67,7 @@ class EnvConfig:
 
 @dataclass(frozen=True)
 class EnvArm:
-    """一个臂 = 一个 feature-config(脑区开/关 + strategy 模式)。
+    """一个臂 = 一个 feature-config(脑区开/关 + strategy 模式 + metronome push)。
 
     加新脑区 = 加一个字段 + 一个 CLI flag,不动 harness 主体(feature-config 本位)。
     """
@@ -74,7 +75,8 @@ class EnvArm:
     name: str
     memory_tool: bool = False          # --memory 被动完美图工具(Phase C 基线下界)
     memory_region: bool = False        # --memory-region 有状态脑区
-    strategy: str = "none"             # "none" | "real" | "echo"(echo=控制臂,无 LLM)
+    strategy: str = "none"             # "none" | "real" | "echo" | "dummy"(echo=主脑自产无LLM;dummy=同源同成本固定模板)
+    metronome: bool = False            # Phase 4.1 push 臂:无 pull 工具,节拍器每 N 步推脑区状态(清测内容价值)
 
 
 # 预设 = 常用比较的糖(CLI 也可 --arm 显式给 feature-config)
@@ -87,10 +89,16 @@ ARMS_MEMORY_BASELINE: tuple[EnvArm, ...] = (
     EnvArm("memory_tool", memory_tool=True),
     EnvArm("memory_only", memory_region=True),
 )
+ARMS_METRONOME: tuple[EnvArm, ...] = (        # Phase 4.1 push:清测脑区内容价值(强制曝光)
+    EnvArm("push_real",  memory_region=True, strategy="real",  metronome=True),
+    EnvArm("push_dummy", memory_region=True, strategy="dummy", metronome=True),   # 主控制:同源同成本固定模板
+    EnvArm("push_echo",  memory_region=True, strategy="echo",  metronome=True),   # 次要:self-reminder 分析
+)
 ARM_PRESETS: dict[str, tuple[EnvArm, ...]] = {
     "memory-strategy": ARMS_MEMORY_STRATEGY,
     "memory-baseline": ARMS_MEMORY_BASELINE,
-    "all": ARMS_MEMORY_STRATEGY + ARMS_MEMORY_BASELINE,
+    "metronome": ARMS_METRONOME,
+    "all": ARMS_MEMORY_STRATEGY + ARMS_MEMORY_BASELINE + ARMS_METRONOME,
 }
 
 
@@ -122,13 +130,56 @@ def build_regions_for_arm(
     """
     memory_mode = arm.memory_tool or arm.memory_region
     memory_region = MemoryRegion(start=env.start, log_len=log_len) if arm.memory_region else None
-    if arm.strategy == "real":
-        strategy_region: Any = StrategyRegion()
+    if arm.strategy in ("real", "dummy"):
+        strategy_region: Any = StrategyRegion()   # dummy 用真 StrategyRegion(injector 调它 match real 的 2 次调用成本,丢输出)
     elif arm.strategy == "echo":
-        strategy_region = EchoStrategy()
+        strategy_region = EchoStrategy()          # 占位(echo injector 不调 region,返主脑自产)
     else:
         strategy_region = None
     return memory_region, strategy_region, memory_mode
+
+
+def _format_status(*, mem: str, strat: str) -> str:
+    """两槽结构(push_real/dummy/echo 同结构,只内容差)—— 记忆脑区 + 策略脑区状态行。"""
+    return f"记忆脑区:{mem}\n策略脑区:{strat}"
+
+
+def make_status_injector(
+    arm: EnvArm, memory_region: MemoryRegion, strategy_region: Any,
+    backend: Any, model: str, *, endpoint_id: str | None, thinking: bool | None, effort: str | None,
+):
+    """Phase 4.1 metronome injector:async (step, messages) -> (status_str|None, cost_usd)。
+
+    - **real**:调 memory.reason + strategy.reason(同源)→ 喂回 real rough_map + intent。
+    - **dummy**(主控制):**同样**调两脑区(同源同成本同延迟,real 工作)→ 但喂回**固定中性模板**(content-null)。
+      → real vs dummy 隔离「内容质量」(GPT #1+#2:echo 不同源,解释不了 real≈echo)。
+    - **echo**(次要):返主脑上一句 thought(不同源,无 LLM)→ 仅 self-reminder 分析。
+    - real/dummy 都调 memory.reason + strategy.reason(**2 次同源同成本同延迟调用**);dummy 丢输出喂固定模板。
+      → real vs dummy 隔离「内容质量」(GPT #1+#2:echo 不同源、call-count 不 match,解释不了 real≈echo)。
+    """
+    ep, th, ef = endpoint_id, thinking, effort
+
+    async def inject(step: int, messages: list) -> tuple[str | None, float]:
+        if arm.strategy == "echo":
+            prev = next((m["content"] for m in reversed(messages) if m.get("role") == "assistant"), "")
+            e = _strip_to_thought(prev) or "(无上一句推理)"
+            return _format_status(mem=e, strat=e), 0.0
+        env = _current_env.get()
+        if env is None or memory_region is None:
+            return None, 0.0
+        # real 与 dummy 都调 memory.reason + strategy.reason(同源、同成本、同调用数);memory.reason 刷 rough_map
+        m = await memory_region.reason(backend, model, env.relative_view(), endpoint_id=ep, thinking=th, effort=ef)
+        s = await strategy_region.reason(
+            backend, model, memory_rough_map=memory_region.rough_map, current_view=env.relative_view(),
+            rough_position=memory_region.pose, prev_assistant=None,
+            endpoint_id=ep, thinking=th, effort=ef,
+        )
+        cost = float(m.get("cost_usd", 0.0) or 0.0) + float(s.get("cost_usd", 0.0) or 0.0)
+        if arm.strategy == "dummy":       # 同源同成本,但喂回固定中性模板(content-null)
+            return _format_status(mem="(探索进行中,无具体地图解读)", strat="(继续系统探索未见区域)"), cost
+        return _format_status(mem=memory_region.rough_map, strat=s["intent"]), cost   # real
+
+    return inject
 
 
 # ---------- 过程指标 ----------
@@ -196,6 +247,25 @@ def _coverage(env: GridWorld) -> float | None:
     return min(1.0, explored / denom)
 
 
+# region_status 被主脑引用的标记(GPT 加:区分「内容无用」vs「主脑没读」;粗粒度)
+_STATUS_MARKERS = ("记忆脑区", "策略脑区", "记忆显示", "根据记忆", "脑区", "意图", "地图理解", "rough")
+
+
+def _status_referenced(traj: Any, period: int) -> float | None:
+    """post-push 步(注入在 step 顶部,该步 thought 即收 status 后的推理)thought 引用 region_status 的比例。
+
+    粗粒度(GPT 加):thought 含脑区标记 → 视为「读了」。real 高 dummy 低 → 主脑 engage real 内容;
+    两者都低 → 主脑忽略 push(≠ 内容无用)。push 臂外(metronome=False)→ None。
+    """
+    if period <= 0:
+        return None
+    push_steps = [s for s in traj.steps if s.index > 0 and s.index % period == 0]
+    if not push_steps:
+        return None
+    hit = sum(1 for s in push_steps if any(m in (s.thought or "") for m in _STATUS_MARKERS))
+    return hit / len(push_steps)
+
+
 # ---------- 单 episode ----------
 
 
@@ -203,16 +273,23 @@ async def _run_one_episode(
     backend: Any, model: str, cfg: EnvConfig, arm: EnvArm, *,
     max_cost_usd: float, temperature: float, max_tokens: int,
     endpoint_id: str | None, thinking: bool | None, effort: str | None,
-    log_len: int = 32,
+    log_len: int = 32, status_period: int = 3,
 ) -> dict:
-    """单 episode:构造 env+regions → run_agent → per-run 摘要(含过程指标)。复用 run_env 装配模式。"""
+    """单 episode:构造 env+regions → run_agent → per-run 摘要(含过程指标)。复用 run_env 装配模式。
+
+    metronome(push)臂:无 pull 工具(memory=False prompt),节拍器每 status_period 步注入 region_status;
+    strategy_region 传 None 给 run_agent(禁 plan-intercept),真对象由 injector 闭包持有。
+    """
     env = build_env_for_config(cfg)
     memory_region, strategy_region, memory_mode = build_regions_for_arm(arm, env, log_len=log_len)
-    # goal_text 臂感知:memory_only(无 plan 工具)不提 plan(防幻觉缺失工具拖累基线,实验洁净)。
-    tools_hint = "recall_map 拿累积探索图/记忆理解"
-    if arm.strategy in ("real", "echo"):
-        tools_hint += ",plan 拿策略意图"
-    goal_text = f"找到并到达藏在网格里的目标 G(observe 只看当前视野,{tools_hint};先探索拼图再过去)"
+    # goal_text 臂感知:push 臂不提 pull 工具;memory_only 不提 plan;real/echo 提 plan。
+    if arm.metronome:
+        goal_text = "找到并到达藏在网格里的目标 G(observe 只看当前视野;每几步收到脑区背景状态作参考;先探索再过去)"
+    else:
+        tools_hint = "recall_map 拿累积探索图/记忆理解"
+        if arm.strategy in ("real", "echo"):
+            tools_hint += ",plan 拿策略意图"
+        goal_text = f"找到并到达藏在网格里的目标 G(observe 只看当前视野,{tools_hint};先探索拼图再过去)"
     task = SandboxTask(id=f"env-{cfg.label}", goal=goal_text)
 
     def verify(t, run_dir, *, python_exe=None):  # env-grounded,完整 verify shape
@@ -221,6 +298,16 @@ async def _run_one_episode(
             "solve_status": "solved" if env.solved else "tests_fail",
             "pytest": None, "gold_diff": getattr(t, "gold_diff", ""),
         }
+
+    # push 臂:injector 闭包持真 strategy_region;run_agent 收 strategy_region=None(禁 plan pull-intercept)
+    injector = None
+    run_strategy_region = strategy_region
+    if arm.metronome:
+        injector = make_status_injector(
+            arm, memory_region, strategy_region, backend, model,
+            endpoint_id=endpoint_id, thinking=thinking, effort=effort,
+        )
+        run_strategy_region = None
 
     run_dir = make_run_dir()
     try:
@@ -232,11 +319,14 @@ async def _run_one_episode(
                     temperature=temperature, max_tokens=max_tokens,
                     endpoint_id=endpoint_id, thinking=thinking, effort=effort,
                     system_prompt=build_env_system_prompt(
-                        env, goal_text, memory=True,
-                        strategy=arm.strategy in ("real", "echo"),
+                        env, goal_text,
+                        memory=not arm.metronome,                        # push 臂:无 recall_map(memory=False)
+                        strategy=(not arm.metronome and arm.strategy in ("real", "echo")),
+                        metronome=arm.metronome,
                     ),
                     verify_fn=verify,
-                    memory_region=memory_region, strategy_region=strategy_region,
+                    memory_region=memory_region, strategy_region=run_strategy_region,
+                    status_injector=injector, status_period=status_period,
                 )
     finally:
         cleanup_run_dir(run_dir)
@@ -251,6 +341,7 @@ async def _run_one_episode(
         "n_plan": sum(1 for s in traj.steps if s.tool == "plan"),
         "revisit_rate": _revisit_rate(positions),
         "coverage": _coverage(env),
+        "status_referenced": _status_referenced(traj, status_period) if arm.metronome else None,
     }
 
 
@@ -271,6 +362,7 @@ def _agg_arm_runs(arm_runs: list[dict]) -> dict:
         "mean_steps": _mean("steps"), "mean_cost": _mean("cost"),
         "mean_revisit_rate": _mean("revisit_rate"), "mean_coverage": _mean("coverage"),
         "mean_n_plan": _mean("n_plan"), "mean_n_recall": _mean("n_recall"),
+        "mean_status_referenced": _mean("status_referenced"),   # Phase 4.1 push 臂(post-push 引用 status 比例)
     }
 
 
@@ -409,7 +501,7 @@ async def run_env_eval(
     repeats: int = 3, max_cost_usd: float = 2.0,
     temperature: float = 0.0, max_tokens: int = 2048,
     endpoint_id: str | None = None, thinking: bool | None = None, effort: str | None = None,
-    log_progress: bool = True,
+    log_progress: bool = True, status_period: int = 3,
 ) -> dict:
     """formal A/B:configs × arms × repeats(matched-set 循环)→ 报告 dict。
 
@@ -438,6 +530,7 @@ async def run_env_eval(
                     max_cost_usd=max(0.01, max_cost_usd - cost_total),  # per-run 剩余预算(下限避 0)
                     temperature=temperature, max_tokens=max_tokens,
                     endpoint_id=endpoint_id, thinking=thinking, effort=effort,
+                    status_period=status_period,
                 )
                 cost_total += summary["cost"]
                 runs.append(summary)
@@ -462,7 +555,7 @@ def write_csv(report: dict, path: str | Path) -> Path:
     """每 run 一行(平铺)落 CSV(含生成配置列,review 双强可复现)。"""
     p = Path(path)
     cols = ["config", "arm", "solved", "steps", "cost", "termination",
-            "n_recall", "n_plan", "revisit_rate", "coverage",
+            "n_recall", "n_plan", "revisit_rate", "coverage", "status_referenced",
             "model", "temperature", "thinking", "effort"]
     with open(p, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -470,7 +563,7 @@ def write_csv(report: dict, path: str | Path) -> Path:
         for r in report["runs"]:
             w.writerow([
                 r["config"], r["arm"], r["solved"], r["steps"], r["cost"], r["termination"],
-                r["n_recall"], r["n_plan"], r["revisit_rate"], r["coverage"],
+                r["n_recall"], r["n_plan"], r["revisit_rate"], r["coverage"], r["status_referenced"],
                 report["model"], report["temperature"], report["thinking"], report["effort"],
             ])
     return p
@@ -508,13 +601,13 @@ def render_env_eval_summary(report: dict) -> str:
         lines.append(f"⚠️ cost_capped at {report['cost_capped_at']} —— 对比矩阵不完整,gate 已作废为 INCONCLUSIVE。")
 
     lines.append("\n**per-arm(池化 over configs×repeats):**")
-    lines.append("| arm | n | solve_rate | revisit | coverage | n_plan | n_recall | mean_steps | mean_cost |")
-    lines.append("|---|---|---|---|---|---|---|---|---|")
+    lines.append("| arm | n | solve_rate | revisit | coverage | n_plan | n_recall | stat_ref | mean_steps | mean_cost |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|")
     for arm, s in report["per_arm"].items():
         lines.append(
             f"| {arm} | {s['n']} | {s['solve_rate']:.2f} | {_fmt(s['mean_revisit_rate'])} | "
             f"{_fmt(s['mean_coverage'])} | {(s['mean_n_plan'] or 0):.1f} | {(s['mean_n_recall'] or 0):.1f} | "
-            f"{(s['mean_steps'] or 0):.1f} | ${(s['mean_cost'] or 0):.4f} |"
+            f"{_fmt(s.get('mean_status_referenced'))} | {(s['mean_steps'] or 0):.1f} | ${(s['mean_cost'] or 0):.4f} |"
         )
 
     lines.append("\n**pairwise(config 级 bootstrap,次要 —— env 在变,标 pilot):**")

@@ -19,6 +19,7 @@ import tempfile
 from brainregion.providers.base import ModelResponse
 from brainregion.sandbox.env_eval import (
     ARMS_MEMORY_STRATEGY,
+    ARMS_METRONOME,
     ARM_PRESETS,
     EchoStrategy,
     EnvArm,
@@ -27,7 +28,9 @@ from brainregion.sandbox.env_eval import (
     _coverage,
     _positions_from_traj,
     _revisit_rate,
+    _status_referenced,
     build_regions_for_arm,
+    make_status_injector,
     render_env_eval_summary,
     run_env_eval,
     write_report,
@@ -330,3 +333,133 @@ def test_render_env_eval_summary_smoke():
     text = render_env_eval_summary(report)
     assert "env-eval" in text and "per-arm" in text and "pairwise" in text
     assert "a_vs_b" in text
+
+
+# ---------- Phase 4.1 metronome push ----------
+
+
+def test_arms_metronome_preset():
+    assert [a.name for a in ARMS_METRONOME] == ["push_real", "push_dummy", "push_echo"]
+    assert ARM_PRESETS["metronome"][-1].metronome is True
+    assert all(a.metronome for a in ARMS_METRONOME)
+
+
+def test_injector_real_and_dummy_matched_calls_echo_none():
+    """review gpt #1+#2:real 与 dummy 都调 memory+strategy(同源同成本同调用数);echo 不调 LLM(不同源)。"""
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
+
+    def make(strategy):
+        mem = MemoryRegion(start=env.start)
+        strat = StrategyRegion() if strategy in ("real", "dummy") else EchoStrategy()
+        return EnvArm("t", memory_region=True, strategy=strategy, metronome=True), mem, strat
+
+    class _Spy:
+        def __init__(self):
+            self.calls = 0
+            self.i = 0
+
+        async def complete_messages(self, messages, **kw):
+            self.calls += 1
+            self.i += 1
+            content = _MEMORY_JSON if self.i % 2 == 1 else _STRATEGY_JSON  # 奇=memory 偶=strategy
+            return ModelResponse(model="m", content=content, usage={}, cost_usd=0.001)
+
+    with scoped_env(env):
+        # real:2 调用,返真 rough_map + intent
+        arm, mem, strat = make("real")
+        spy = _Spy()
+        inj = make_status_injector(arm, mem, strat, spy, "m", endpoint_id=None, thinking=False, effort=None)
+        status_r, cost_r = asyncio.run(inj(3, []))
+        assert spy.calls == 2 and "东边开阔" in status_r
+
+        # dummy:同样 2 调用(同源同成本),但返固定模板(content-null)
+        arm, mem, strat = make("dummy")
+        spy = _Spy()
+        inj = make_status_injector(arm, mem, strat, spy, "m", endpoint_id=None, thinking=False, effort=None)
+        status_d, cost_d = asyncio.run(inj(3, []))
+        assert spy.calls == 2                          # 与 real 同调用数(matched cost)
+        assert "无具体地图解读" in status_d and "东边开阔" not in status_d  # 模板,非 real 输出
+        assert cost_d == cost_r                        # 成本一致
+
+        # echo:不调 LLM(不同源),返主脑上一句
+        arm, mem, strat = make("echo")
+        spy = _Spy()
+        inj = make_status_injector(arm, mem, strat, spy, "m", endpoint_id=None, thinking=False, effort=None)
+        status_e, cost_e = asyncio.run(inj(3, [{"role": "assistant", "content": '{"thought":"我在(1,1)东有墙","tool":"plan","args":{}}'}]))
+        assert spy.calls == 0 and cost_e == 0.0
+        assert "我在(1,1)" in status_e
+
+
+def test_status_injector_fires_every_period_not_step0():
+    """run_agent 钩子:period=3 → step 3,6 注入 <region_status>;step 0,1,2 不注。"""
+    env = GridWorld(size=8, start=(0, 0), goal=(7, 0), visibility_radius=1, strict_obs=True)
+    captured = []
+
+    class _Rec:
+        async def complete_messages(self, messages, **kw):
+            captured.append([m["content"] for m in messages])
+            return ModelResponse(model="m", content=_J({"thought": "走", "tool": "act", "args": {"action": "right"}}),
+                                 usage={}, cost_usd=0.0)
+
+    async def inj(step, messages):
+        return f"MARKER_{step}", 0.0
+
+    task = SandboxTask(id="t", goal="到 G")
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            asyncio.run(run_agent(
+                _Rec(), "m", task, run_dir=run_dir, arm="none", max_steps=7,
+                system_prompt=build_env_system_prompt(env, "到 G"), verify_fn=_make_env_verify(env),
+                status_injector=inj, status_period=3,
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+    assert len(captured) >= 7                                   # 跑满 7 步
+    assert not any("MARKER" in c for c in captured[0])          # step 0 无注入
+    assert not any("MARKER" in c for c in captured[1])          # step 1 无
+    assert any("MARKER_3" in c for c in captured[3])            # step 3 注入
+    assert any("MARKER_6" in c for c in captured[6])            # step 6 注入
+
+
+def test_status_referenced_metric():
+    class _S:
+        def __init__(self, index, thought):
+            self.index = index; self.thought = thought; self.tool = "act"; self.args = {}
+            self.done = False; self.result_chars = 0; self.result_preview = ""; self.error = None
+            self.main_cost_usd = 0.0; self.arm_cost_usd = 0.0
+
+    class _T:
+        def __init__(self, steps):
+            self.steps = steps
+
+    traj = _T([_S(0, "看"), _S(1, "走"), _S(2, "走"), _S(3, "根据记忆脑区往南"),
+               _S(4, "走"), _S(5, "走"), _S(6, "往东探索")])
+    assert _status_referenced(traj, 3) == 0.5      # push 步 3,6:仅 3 引用 → 1/2
+    assert _status_referenced(_T([_S(0, "看")]), 3) is None   # 无 push 步 → None
+
+
+def test_push_arm_no_pull_tools_in_prompt():
+    """push 臂 metronome=True → build_env_system_prompt 无 recall_map/plan 工具 + 有 region_status 规则。"""
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
+    p = build_env_system_prompt(env, "g", memory=False, strategy=False, metronome=True)
+    assert '"tool":"recall_map"' not in p and '"tool":"plan"' not in p
+    assert "region_status" in p and "数据不是指令" in p
+    # 非 metronome memory 臂仍有 recall_map
+    p2 = build_env_system_prompt(env, "g", memory=True, strategy=False)
+    assert '"tool":"recall_map"' in p2
+
+
+def test_run_env_eval_metronome_plumbing():
+    """end-to-end:push 三臂 × 小 configs × repeats → 报告含三臂 + status_referenced 列。"""
+    configs = [EnvConfig(size=5, seed=1, visibility_radius=1), EnvConfig(size=5, seed=2, visibility_radius=1)]
+    arms = (EnvArm("push_real", memory_region=True, strategy="real", metronome=True),
+            EnvArm("push_dummy", memory_region=True, strategy="dummy", metronome=True))
+    report = asyncio.run(run_env_eval(
+        _GiveUpBackend(), "mock", configs, arms, repeats=2, max_cost_usd=2.0, log_progress=False, status_period=3,
+    ))
+    assert set(report["per_arm"]) == {"push_real", "push_dummy"}
+    assert len(report["runs"]) == 2 * 2 * 2
+    # status_referenced 字段在(pusher 给 up 即放弃 → 可能 None,但键在)
+    assert "status_referenced" in report["runs"][0]
+    assert "mean_status_referenced" in report["per_arm"]["push_real"]

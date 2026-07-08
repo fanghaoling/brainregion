@@ -527,6 +527,8 @@ async def run_agent(
     max_recall_calls: int | None = None,
     strategy_region: Any = None,
     max_plan_calls: int | None = None,
+    status_injector: Any = None,        # Phase 4.1 metronome:async (step, messages)->(status_str|None, cost_usd);None=现行为
+    status_period: int = 3,
 ) -> Trajectory:
     """跑一个 agent loop。返回 Trajectory(含 verify 后的 solve_status)。
 
@@ -580,6 +582,17 @@ async def run_agent(
             if spent >= max_cost_usd:  # per-run 预算预检(review consensus-2)
                 traj.termination_reason = "budget_exceeded"
                 break
+
+            # Phase 4.1 metronome:每 status_period 步(status>0)注入脑区状态 user message。
+            # 加性:status_injector None → 现行为(零变化)。injector 返 (status_str|None, cost);失败隔离不崩主 run。
+            if status_injector is not None and step > 0 and step % status_period == 0:
+                try:
+                    _status, _inj_cost = await status_injector(step, messages)
+                    traj.total_main_cost_usd += float(_inj_cost or 0.0)
+                    if _status:
+                        messages.append({"role": "user", "content": f"<region_status>\n{_status}\n</region_status>"})
+                except Exception as exc:  # noqa: BLE001 — injector 失败:跳过本次注入,不毁主 run
+                    logger.warning("status_injector 失败,跳过本次注入", exc_info=True)
 
             messages = _trim_transcript(messages, cap_chars)
             resp = await backend.complete_messages(

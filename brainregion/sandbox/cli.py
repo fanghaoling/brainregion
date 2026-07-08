@@ -561,6 +561,7 @@ async def run_env_eval(args: argparse.Namespace) -> dict[str, Any]:
         temperature=float(dd.get("sandbox_temperature", 0.0)),
         max_tokens=int(args.max_tokens or 2048),
         endpoint_id=endpoint_id, thinking=_thinking_arg(args), effort=args.effort,
+        status_period=int(getattr(args, "metronome_period", 3) or 3),
     )
     json_path, csv_path = write_report(report, getattr(args, "out", None))
     print(render_env_eval_summary(report))
