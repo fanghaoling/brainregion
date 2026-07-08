@@ -383,6 +383,10 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         goal_kw["random_goal_seed"] = getattr(args, "seed", None) if getattr(args, "seed", None) is not None else 0
     elif getattr(args, "goal_x", None) is not None and getattr(args, "goal_y", None) is not None:
         goal_kw["goal"] = (int(args.goal_x), int(args.goal_y))
+    wall_seed = getattr(args, "wall_seed", None)
+    if wall_seed is not None:
+        goal_kw["random_walls_seed"] = wall_seed
+        goal_kw["wall_density"] = float(getattr(args, "wall_density", None) or 0.2)  # 默认密度 0.2
     try:
         env = GridWorld(size=size, start=(0, 0), **goal_kw)
     except ValueError as exc:
@@ -398,15 +402,19 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit("--max-steps 须为正整数")
 
     # --debug:后台开调试窗(用户实时看 env.step 事件进 SSE 时间线)
+    debug_port = int(getattr(args, "debug_port", 8765))
     if getattr(args, "debug", False):
         import threading
         from brainregion.viz import DebugDashboardOptions, serve_debug_dashboard
         opts = DebugDashboardOptions(
-            goal=goal_text, problem=goal_text, refresh_ms=1000, port=int(getattr(args, "debug_port", 8765)),
+            goal=goal_text, problem=goal_text, refresh_ms=1000, port=debug_port,
         )
         threading.Thread(
-            target=serve_debug_dashboard, args=(opts,), kwargs={"open_browser": True}, daemon=True
+            target=serve_debug_dashboard, args=(opts,),
+            kwargs={"open_browser": True, "open_path": "/scene"}, daemon=True,
         ).start()
+        print(f"\n>>> 调试窗已开:场景查看 http://127.0.0.1:{debug_port}/scene (网格实时渲染 + 可回看)")
+        print(f">>>          BrainRegion 面板 http://127.0.0.1:{debug_port}/ (脑区/模型调用)\n")
 
     task = SandboxTask(id=f"env-{env.size}x{env.size}", goal=goal_text)
 
@@ -443,6 +451,7 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         "solved": env.solved, "total_reward": env.total_reward,
         "n_steps": traj.n_steps, "termination": traj.termination_reason,
         "visibility_radius": env.visibility_radius, "goal_pos": tuple(env.goal),
+        "n_walls": len(env.walls),
     }
     out_dir = Path(".brain-region") / "sandbox"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -456,4 +465,15 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         "replay": str(replay_path),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))
+    if getattr(args, "debug", False):
+        # --debug:跑完后保持调试窗 300s 供回看(/scene 已缓存所有帧,可拖动/播放)。Ctrl+C 提前退。
+        # 用 bounded sleep 而非 input() —— input()/isatty() 在后台/非交互语境脆(EOF 即退),sleep 稳。
+        print(f"\n>>> run 结束。场景回看 http://127.0.0.1:{debug_port}/scene "
+              f"(或静态 replay: {replay_path})")
+        print(">>> 调试窗保持 300 秒供回看(Ctrl+C 提前退出)...")
+        try:
+            for _ in range(600):
+                time.sleep(0.5)
+        except KeyboardInterrupt:
+            pass
     return result

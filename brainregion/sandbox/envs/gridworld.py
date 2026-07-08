@@ -52,6 +52,8 @@ class GridWorld:
         visibility_radius: int | None = None,
         random_goal_seed: int | None = None,
         strict_obs: bool = False,
+        wall_density: float = 0.0,
+        random_walls_seed: int | None = None,
     ) -> None:
         if not (2 <= size <= 50):
             raise ValueError(f"size 须在 2..50,got {size}")
@@ -61,30 +63,39 @@ class GridWorld:
                 raise ValueError(f"visibility_radius 须 int 或 None,got {type(visibility_radius).__name__}")
             if visibility_radius < 0:
                 raise ValueError(f"visibility_radius 须 ≥0,got {visibility_radius}")
+        if not (0.0 <= wall_density <= 0.6):
+            raise ValueError(f"wall_density 须在 0..0.6,got {wall_density}")
 
         self.size = size
         self.start = tuple(start)
-        self.walls = frozenset(tuple(w) for w in walls)
         self.visibility_radius = visibility_radius
         self.strict_obs = strict_obs  # Phase C:True → observation() 只给当前视野(agent 须 recall_map 拿累积图)
         fog = visibility_radius is not None
 
         if not self._in_grid(self.start):
             raise ValueError(f"start {self.start} 越界(size={size})")
-        if self.start in self.walls:
-            raise ValueError(f"start {self.start} 落在墙上")
 
-        # goal:random_goal_seed 给定 → seeded 随机;否则用显式 goal(默认远角)。
+        # goal 先选(不避墙 —— 墙稍后生成时会避开 goal)。random_goal_seed → seeded 随机;否则显式/远角。
         if random_goal_seed is not None:
             self.goal = self._pick_random_goal(random_goal_seed, fog)
         else:
             self.goal = tuple(goal) if goal is not None else (size - 1, size - 1)
         if not self._in_grid(self.goal):
             raise ValueError(f"goal {self.goal} 越界(size={size})")
-        if self.goal in self.walls:
-            raise ValueError(f"goal {self.goal} 落在墙上")
         if self.goal == self.start:
             raise ValueError(f"goal {self.goal} 不能等于 start {self.start}")
+
+        # 墙:random_walls_seed → 生成(避开 start/goal + BFS 可达性保证);否则显式 walls。
+        if random_walls_seed is not None:
+            self.walls = self._gen_walls_reachable(random_walls_seed, wall_density)
+        else:
+            self.walls = frozenset(tuple(w) for w in walls)
+        if self.start in self.walls:
+            raise ValueError(f"start {self.start} 落在墙上")
+        if self.goal in self.walls:
+            raise ValueError(f"goal {self.goal} 落在墙上")
+        if self.walls and not self._reachable(self.start, self.goal):
+            raise ValueError(f"goal {self.goal} 不可达(墙挡死:start→goal 无通路)")
 
         self._agent = self.start
         self._terminated = False
@@ -112,13 +123,14 @@ class GridWorld:
         return out
 
     def _pick_random_goal(self, seed: int, fog: bool) -> tuple[int, int]:
-        """seeded 随机 goal:非 start/非墙;fog 下优先 ∉ start 可见域(藏起来逼探索),
-        无合法位(start 可见域覆盖全网格)→ fallback 任意非 start/非墙(review consensus)。"""
+        """seeded 随机 goal:非 start;fog 下优先 ∉ start 可见域(藏起来逼探索),
+        无合法位(start 可见域覆盖全网格)→ fallback 任意非 start(review consensus)。
+        注:不滤墙 —— 墙在 goal 之后生成,会避开 goal(goal 永不在墙上)。"""
         rng = random.Random(seed)
         all_cells = [(x, y) for y in range(self.size) for x in range(self.size)]
-        candidates = [c for c in all_cells if c != self.start and c not in self.walls]
+        candidates = [c for c in all_cells if c != self.start]
         if not candidates:
-            raise ValueError("无合法 goal 位置(网格全墙或仅 start)")
+            raise ValueError("无合法 goal 位置(仅 start)")
         if fog:
             start_vis = set(self._visible_cells(self.start))
             hidden = [c for c in candidates if c not in start_vis]
@@ -126,6 +138,48 @@ class GridWorld:
         else:
             pool = candidates
         return rng.choice(pool)
+
+    def _reachable(self, start: tuple[int, int], goal: tuple[int, int], walls: frozenset | None = None) -> bool:
+        """BFS:start→goal 是否存在不穿墙的 4-邻接通路(可达性保证,review 早标的关键)。"""
+        w = self.walls if walls is None else walls
+        if start == goal:
+            return True
+        from collections import deque
+        seen = {start}
+        q: deque[tuple[int, int]] = deque([start])
+        while q:
+            cx, cy = q.popleft()
+            for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+                nxt = (cx + dx, cy + dy)
+                if nxt in seen or not self._in_grid(nxt) or nxt in w:
+                    continue
+                if nxt == goal:
+                    return True
+                seen.add(nxt)
+                q.append(nxt)
+        return False
+
+    def _gen_walls_reachable(self, seed: int, density: float) -> frozenset[tuple[int, int]]:
+        """seeded 随机墙(避开 start/goal,密度=density × 可放格)+ BFS 可达性保证:
+        多次重采(seed+attempt)直到 start→goal 可达;密度过高全失败 → 降密度重试;仍不行 → 空墙兜底。"""
+        all_cells = [(x, y) for y in range(self.size) for x in range(self.size)]
+        placeable = [c for c in all_cells if c != self.start and c != self.goal]
+        d = max(0.0, min(0.6, density))
+        # 原密度多 seed 重采
+        for attempt in range(30):
+            rng = random.Random(seed + attempt)
+            n = int(len(placeable) * d)
+            walls = frozenset(rng.sample(placeable, n)) if n > 0 else frozenset()
+            if self._reachable(self.start, self.goal, walls):
+                return walls
+        # 降密度兜底
+        for fallback_d in (d * 0.5, d * 0.25, 0.0):
+            rng = random.Random(seed)
+            n = int(len(placeable) * fallback_d)
+            walls = frozenset(rng.sample(placeable, n)) if n > 0 else frozenset()
+            if self._reachable(self.start, self.goal, walls):
+                return walls
+        return frozenset()  # 最终兜底:无墙(保证可构造)
 
     def reset(self, *, seed: int | None = None) -> str:
         """重置 agent 到 start,清空 frames + explored(fog 重探)。

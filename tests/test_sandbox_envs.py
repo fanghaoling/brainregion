@@ -348,3 +348,52 @@ def test_step_returns_strict_observation_when_strict():
     assert env.frames[-1] == env.render()  # replay 用累积图
     assert obs != env.render()  # 严格视野 != 累积图(累积含 (0,0),视野不含)
 
+
+# ---------- 随机墙(BFS 可达性保证)----------
+
+
+def test_random_walls_always_reachable():
+    """random_walls_seed → start→goal 必可达(BFS 保证,多 seed/密度都成立)。"""
+    for seed in range(10):
+        for density in (0.1, 0.2, 0.35):
+            env = GridWorld(size=10, random_walls_seed=seed, wall_density=density)
+            assert env._reachable(env.start, env.goal), f"seed={seed} density={density} 不可达!"
+            assert env.start not in env.walls and env.goal not in env.walls
+
+
+def test_random_walls_density_roughly_correct():
+    """墙数 ≈ density × 可放格(non-start/non-goal);BFS 不改 count(只换哪些 cell)。"""
+    env = GridWorld(size=10, random_walls_seed=3, wall_density=0.2)
+    placeable = 10 * 10 - 2  # 非 start 非 goal(默认 goal 远角)
+    assert abs(len(env.walls) - placeable * 0.2) <= 3
+
+
+def test_random_walls_deterministic_same_seed():
+    a = GridWorld(size=8, random_walls_seed=5, wall_density=0.2)
+    b = GridWorld(size=8, random_walls_seed=5, wall_density=0.2)
+    assert a.walls == b.walls and a.goal == b.goal
+
+
+def test_explicit_blocking_walls_raise():
+    """显式墙把 goal 围死 → 可达性检查 raise(unsolvable env,防不公平测试)。"""
+    # 3x3 goal (2,0),堵其仅有的两邻接 (1,0)(2,1) → 不可达
+    with pytest.raises(ValueError, match="不可达"):
+        GridWorld(size=3, start=(0, 0), goal=(2, 0), walls=((1, 0), (2, 1)))
+
+
+def test_wall_density_validation():
+    with pytest.raises(ValueError, match="wall_density"):
+        GridWorld(size=5, random_walls_seed=1, wall_density=0.8)
+    with pytest.raises(ValueError, match="wall_density"):
+        GridWorld(size=5, random_walls_seed=1, wall_density=-0.1)
+
+
+def test_walls_compose_with_fog_and_memory():
+    """墙 + fog + strict_obs(memory)叠加:可达 + 墙在累积图正确渲染 + step 不崩。"""
+    env = GridWorld(size=8, visibility_radius=2, strict_obs=True,
+                    random_walls_seed=7, wall_density=0.2, random_goal_seed=11)
+    assert env._reachable(env.start, env.goal)
+    assert "#" in env.render()  # 累积图显墙
+    env.step("right")
+    assert env.observation()  # 当前视野不崩(墙在视野内显 #)
+

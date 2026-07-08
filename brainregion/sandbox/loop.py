@@ -76,18 +76,23 @@ def scoped_memory_mode():
         _memory_mode.reset(token)
 
 
-def _emit_env_step(action: str, obs: str, reward: float, terminated: bool, info: dict) -> None:
-    """best-effort 调试窗事件(review 双强):debug server 未启/SSE 断/payload 不可序列化 → 记 warning,绝不毁 act。"""
+def _emit_env_step(action: str, frame: str, agent_view: str, reward: float, terminated: bool, info: dict) -> None:
+    """best-effort 调试窗事件(review 双强):debug server 未启/SSE 断/payload 不可序列化 → 记 warning,绝不毁 act。
+
+    ``frame`` = env.render() 累积探索图(viewer/场景页 友好,总显示完整已知地图);
+    ``agent_view`` = agent 该步看到的 observation(strict 模式=当前视野,记忆脑区调试用)。
+    """
     try:
         emit_event(
             "env.step",
             payload={
                 "action": action,
+                "frame": frame,
+                "agent_view": agent_view,
                 "reward": reward,
                 "terminated": terminated,
                 "done": terminated,
                 "info": info,
-                "frame": obs,
             },
         )
     except Exception:  # noqa: BLE001 — 调试 sidecar,任何异常不毁主路径
@@ -311,7 +316,7 @@ def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
                 raise ValueError(f"act: 非法 action {action!r};合法:{list(vocab)}")
             obs, reward, terminated, info = env.step(normalized)
             if "already_done" not in info:  # review opus:done 后冗余 act 不重复发 env.step 事件
-                _emit_env_step(normalized, obs, reward, terminated, info)
+                _emit_env_step(normalized, env.render(), obs, reward, terminated, info)
             out = {
                 "observation": obs,
                 "reward": reward,

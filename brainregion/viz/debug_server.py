@@ -581,7 +581,11 @@ pre {{
 <body data-refresh-ms="{refresh}">
 <header>
   <h1>BrainRegion 调试面板</h1>
-  <div class="status"><span id="live-dot" class="dot"></span><span id="status">启动中</span></div>
+  <div class="status">
+    <a href="/scene" style="color:var(--blue);text-decoration:none;font-weight:600;margin-right:14px">🎮 场景 /scene</a>
+    <a href="/runs" style="color:var(--blue);text-decoration:none;font-weight:600;margin-right:14px">📜 过去场次 /runs</a>
+    <span id="live-dot" class="dot"></span><span id="status">启动中</span>
+  </div>
 </header>
 <main>
   <aside>
@@ -920,6 +924,27 @@ class _DebugHandler(BaseHTTPRequestHandler):
         if parsed.path in {"", "/"}:
             self._send_html(build_debug_dashboard_html(self.server.options))
             return
+        if parsed.path == "/scene":
+            from .env_scene import build_env_scene_html  # 专用场景查看页(env.step 网格渲染)
+            self._send_html(build_env_scene_html())
+            return
+        if parsed.path == "/runs":
+            from .runs_index import build_runs_index_html, list_env_runs  # 过去场次归档索引
+            self._send_html(build_runs_index_html(list_env_runs()))
+            return
+        if parsed.path.startswith("/replay/"):
+            import re as _re
+            from pathlib import Path as _P
+            run_id = parsed.path[len("/replay/"):]
+            if not _re.fullmatch(r"[A-Za-z0-9_-]+", run_id):  # 防 path traversal
+                self.send_error(HTTPStatus.NOT_FOUND, "bad run_id")
+                return
+            replay_file = _P(".brain-region") / "sandbox" / f"{run_id}.html"
+            if not replay_file.is_file():
+                self.send_error(HTTPStatus.NOT_FOUND, "run not found")
+                return
+            self._send_html(replay_file.read_text(encoding="utf-8"))
+            return
         if parsed.path == "/api/health":
             self._send_json({"ok": True})
             return
@@ -999,12 +1024,15 @@ class _DebugServer(ThreadingHTTPServer):
         self.options = options
 
 
-def serve_debug_dashboard(options: DebugDashboardOptions, *, open_browser: bool = False) -> None:
+def serve_debug_dashboard(
+    options: DebugDashboardOptions, *, open_browser: bool = False, open_path: str = "/"
+) -> None:
     server = _DebugServer((options.host, options.port), options)
-    url = f"http://{options.host}:{server.server_port}/"
-    print(f"BrainRegion debug dashboard: {url}")
+    base = f"http://{options.host}:{server.server_port}"
+    print(f"BrainRegion debug dashboard: {base}/  (场景查看: {base}/scene)")
     if open_browser:
-        threading.Timer(0.2, lambda: webbrowser.open(url)).start()
+        path = open_path if open_path.startswith("/") else "/" + open_path
+        threading.Timer(0.2, lambda: webbrowser.open(f"{base}{path}")).start()
     try:
         server.serve_forever()
     except KeyboardInterrupt:

@@ -276,6 +276,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_env.add_argument("--random-goal", action="store_true",
                           help="seeded 随机 goal(fog 下优先藏在 start 可见域外,逼探索)")
     p_sb_env.add_argument("--seed", type=int, default=None, help="随机 goal 种子(--random-goal 用;默认 0)")
+    p_sb_env.add_argument("--wall-density", type=float, default=None,
+                          help="随机墙密度(0..0.6,占可放格比例;启用需配 --wall-seed)")
+    p_sb_env.add_argument("--wall-seed", type=int, default=None,
+                          help="随机墙种子(启用随机墙;BFS 保证 start→goal 可达)")
     # --- Phase C 记忆脑区(strict 部分可观 + recall_map)---
     p_sb_env.add_argument("--memory", action="store_true",
                           help="Phase C 记忆脑区:严格部分可观(observe 只给当前视野)+ recall_map 拿累积探索图;"

@@ -279,3 +279,54 @@ def test_inspect_memory_returns_by_region_recallable(root):
     res = mem_view.inspect_memory()
     assert res["by_region_recallable"]["unity_ecs"] == 1  # 只有 active 那条
     assert res["by_region"]["unity_ecs"] == 2
+
+
+def test_env_scene_html_builds():
+    """场景查看页(Phase C+):build_env_scene_html 自包含 + 含网格/SSE/中文。"""
+    from brainregion.viz.env_scene import build_env_scene_html
+    html = build_env_scene_html()
+    assert "<html" in html and 'id="grid"' in html        # 网格渲染容器
+    assert "EventSource" in html                           # live SSE
+    assert "场景" in html                                  # 中文(viz-output-chinese)
+    assert "env.step" in html                              # 过滤 env 事件
+
+
+def test_env_scene_route_served():
+    """/scene 路由 serve 场景页(集成:起 debug_server + urllib 取 /scene)。"""
+    import threading
+    import time
+    import urllib.request
+
+    from brainregion.viz.debug_server import DebugDashboardOptions, serve_debug_dashboard
+    opts = DebugDashboardOptions(port=8801, goal="t")
+    t = threading.Thread(target=serve_debug_dashboard, args=(opts,), daemon=True)
+    t.start()
+    time.sleep(1.0)
+    try:
+        scene = urllib.request.urlopen("http://127.0.0.1:8801/scene", timeout=5).read().decode("utf-8")
+        dash = urllib.request.urlopen("http://127.0.0.1:8801/", timeout=5).read().decode("utf-8")
+    finally:
+        pass  # daemon thread 随进程退
+    assert "GridWorld 场景查看" in scene and 'id="grid"' in scene
+    assert "BrainRegion 调试面板" in dash  # 原 dashboard 路由不受影响
+
+
+def test_runs_index_lists_replay_htmls(tmp_path):
+    """list_env_runs 扫盘抽 meta + build_runs_index_html 出场次表。"""
+    from brainregion.viz.runs_index import build_runs_index_html, list_env_runs
+    from brainregion.sandbox.envs import write_replay_html
+    # 造两场 replay
+    write_replay_html(tmp_path / "env-111.html", ["@"], {"model": "m1", "size": 4, "solved": True,
+                         "total_reward": 1.0, "n_steps": 5, "termination": "done", "visibility_radius": None})
+    write_replay_html(tmp_path / "env-222.html", ["@.?"], {"model": "m2", "size": 6, "solved": False,
+                         "total_reward": 0.0, "n_steps": 30, "termination": "max_steps", "visibility_radius": 2})
+    runs = list_env_runs(tmp_path)
+    assert len(runs) == 2
+    ids = {r["run_id"] for r in runs}
+    assert ids == {"env-111", "env-222"}
+    # meta 抽出
+    m1 = next(r["meta"] for r in runs if r["run_id"] == "env-111")
+    assert m1["model"] == "m1" and m1["solved"] is True
+    html = build_runs_index_html(runs)
+    assert "过去场次" in html and "/replay/env-111" in html and "/replay/env-222" in html
+    assert "✅ 解出" in html and "❌ 未解" in html
