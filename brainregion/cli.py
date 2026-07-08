@@ -290,6 +290,10 @@ def build_parser() -> argparse.ArgumentParser:
                           "(不收 env 完美图,自己挣大致地图理解给主脑);隐含 --memory。A/B vs --memory(被动倒图)")
     p_sb_env.add_argument("--memory-log-len", type=int, default=32,
                           help="记忆脑区 movement_log 有界长度(默认 32;--memory-region 用)")
+    # --- Phase D.3 策略脑区(多脑区协同,region-as-tool)---
+    p_sb_env.add_argument("--strategy-region", action="store_true",
+                          help="Phase D.3 策略脑区(LLM 规划器):plan 工具调策略脑区(读记忆脑区理解,提意图"
+                          "去哪/子目标,不给动作);隐含 --memory-region。A/B:Memory-only vs Memory+Strategy")
     p_sb_env.add_argument("--debug-port", type=int, default=8765, help="--debug 调试窗端口(默认 8765)")
 
     p_ins = sub.add_parser(

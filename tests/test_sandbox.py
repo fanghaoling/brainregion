@@ -223,11 +223,11 @@ def test_parse_no_json_returns_error():
 
 
 def test_allowed_tools_exact():
-    # env 工具(observe/act=Phase A,recall_map=Phase C 记忆脑区)在 union;code agent 的 system prompt
-    # 不列它们(不泄漏),仅幻觉调用时触发 → dispatch 显式报错(见 test_sandbox_env_loop)。
+    # env 工具(observe/act=Phase A,recall_map=Phase C 记忆脑区,plan=Phase D.3 策略脑区)在 union;
+    # code agent 的 system prompt 不列它们(不泄漏),仅幻觉调用时触发 → dispatch 显式报错。
     assert ALLOWED_TOOLS == frozenset(
         {"read_text", "search_text", "inspect_file", "apply_text_patch", "workspace_run_check",
-         "list_allowed_roots", "observe", "act", "recall_map"}
+         "list_allowed_roots", "observe", "act", "recall_map", "plan"}
     )
 
 

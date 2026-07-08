@@ -9,13 +9,14 @@ from .gridworld import GridWorld
 from .replay import render_replay_html, write_replay_html
 
 
-def build_env_system_prompt(env, goal: str, *, memory: bool = False) -> str:
-    """env-regime system prompt(Phase A 全可见 + Phase B fog + Phase C 记忆脑区)。
+def build_env_system_prompt(env, goal: str, *, memory: bool = False, strategy: bool = False) -> str:
+    """env-regime system prompt(Phase A 全可见 + Phase B fog + Phase C 记忆脑区 + Phase D.3 策略脑区)。
 
     runner(CLI/smoke/test)调此构建 prompt,经 run_agent 的 ``system_prompt`` 注入参传入(覆盖
     code-regime 默认 prompt)。讲清 JSON 协议(act/observe/done)+ 动作词表(来自 env)+ 图例。
     fog(env.visibility_radius 非 None)→ 讲局部视野 + `?` 未探索 + 探索策略。
     memory(Phase C)→ 严格部分可观(observe 只给当前视野)+ recall_map 拿累积探索图。
+    strategy(Phase D.3)→ +plan 工具调策略脑区(读记忆脑区理解,提意图);**隐含 memory**。
     """
     vocab = ", ".join(getattr(env, "action_vocab", ()))
     radius = getattr(env, "visibility_radius", None)
@@ -41,6 +42,14 @@ def build_env_system_prompt(env, goal: str, *, memory: bool = False) -> str:
         legend = "@=你 G=目标 #=墙 .=地"
         visibility = "**全可见**:整个网格你都看得到。\n"
         tools_extra = ""
+    if strategy:  # Phase D.3 策略脑区(隐含 memory):+plan 工具,调策略脑区读记忆理解提意图
+        tools_extra = (tools_extra or "") + (
+            '  策略:{"thought":"<一句话>","tool":"plan","args":{}}(拿策略意图:去哪/子目标,不计步)\n'
+        )
+        visibility = visibility + (
+            "plan 工具调**策略脑区**(它读记忆脑区的理解,提下一步意图/方向,不直接给动作)。"
+            "综合 recall_map(记忆理解)+ plan(策略意图)后自己 act。\n"
+        )
     return (
         f"你在玩一个网格寻路游戏。目标:{goal}。\n\n"
         + visibility

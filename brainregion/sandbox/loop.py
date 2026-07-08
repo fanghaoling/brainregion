@@ -42,7 +42,7 @@ logger = logging.getLogger("brainregion.sandbox.loop")
 CODE_REGIME_TOOLS = frozenset(
     {"read_text", "search_text", "inspect_file", "apply_text_patch", "workspace_run_check", "list_allowed_roots"}
 )
-ENV_TOOLS = frozenset({"observe", "act", "recall_map"})
+ENV_TOOLS = frozenset({"observe", "act", "recall_map", "plan"})
 ALLOWED_TOOLS = CODE_REGIME_TOOLS | ENV_TOOLS
 _RESULT_CAP_CHARS = 4000
 
@@ -334,6 +334,9 @@ def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
             explored = getattr(env, "_explored", set())
             total = getattr(env, "size", 0) ** 2
             out = {"map": env.render(), "explored_cells": len(explored), "of_total": total}
+        elif call.tool == "plan":
+            # Phase D.3 策略脑区:仅 strategy_region 设时被 run_agent 拦截(dispatch 到此 = 未激活/幻觉)。
+            raise RuntimeError("plan: 策略脑区未激活(用 --strategy-region 启用)")
         else:
             return "", "unreachable: unknown tool"
         return _compact(out), None
@@ -458,6 +461,43 @@ async def _recall_via_region(
         return _compact(out), None
 
 
+async def _plan_via_strategy(
+    strategy_region: Any, memory_region: Any, backend: Any, model: str, *,
+    env: Any, endpoint_id: str | None, thinking: bool | None, effort: str | None,
+    plan_count: int, max_plans: int, spent: float, max_cost_usd: float, traj: Any,
+) -> tuple[str, str | None]:
+    """Phase D.3:plan 经策略脑区 LLM(读 Memory.rough_map = 多脑区协同)。
+
+    成功 → ``{intent, rationale, expected_outcome, strategy: True}``。**memory_region None / rough_map 空
+    / 超 cap / 调用失败 → 降级**返 ``{strategy_degraded}``(不崩主 run;review consensus:空图不规划)。
+    成功 cost 记 main;降级不计费。
+    """
+    # 不变量 + 空图守卫:strategy 在则 memory 必在;rough_map 空 → 降级(防 Strategy 基空图误导)
+    if memory_region is None or not getattr(memory_region, "rough_map", ""):
+        return _compact({"strategy_degraded": "no_memory_or_empty_map",
+                         "hint": "先 recall_map 拿记忆理解"}), None
+    if plan_count >= max_plans or spent >= max_cost_usd:
+        return _compact({"strategy_degraded": "budget_or_cap"}), None
+    try:
+        res = await strategy_region.reason(
+            backend, model,
+            memory_rough_map=memory_region.rough_map, current_view=env.relative_view(),
+            rough_position=memory_region.pose,
+            endpoint_id=endpoint_id, thinking=thinking, effort=effort,
+        )
+        traj.total_main_cost_usd += float(res.get("cost_usd", 0.0) or 0.0)
+        out = {
+            "intent": res.get("intent", ""),
+            "rationale": res.get("rationale", ""),
+            "expected_outcome": res.get("expected_outcome", ""),
+            "strategy": True,
+        }
+        return _compact(out), None
+    except Exception as exc:  # noqa: BLE001 — 失败隔离:降级,不崩主 run
+        logger.warning("strategy region reason 失败,降级", exc_info=True)
+        return _compact({"strategy_degraded": str(exc)[:200]}), None
+
+
 async def run_agent(
     backend: Any,
     model: str,
@@ -482,6 +522,8 @@ async def run_agent(
     verify_fn: Callable[..., dict] | None = None,
     memory_region: Any = None,
     max_recall_calls: int | None = None,
+    strategy_region: Any = None,
+    max_plan_calls: int | None = None,
 ) -> Trajectory:
     """跑一个 agent loop。返回 Trajectory(含 verify 后的 solve_status)。
 
@@ -508,6 +550,8 @@ async def run_agent(
     _env = _current_env.get()
     _recall_count = 0
     _max_recalls = int(max_recall_calls) if max_recall_calls is not None else int(max_steps)
+    _plan_count = 0
+    _max_plans = int(max_plan_calls) if max_plan_calls is not None else int(max_steps)
 
     with scoped_workspace_root(run_dir):
         system = system_prompt if system_prompt is not None else _build_system_prompt(task, python_exe)
@@ -594,6 +638,14 @@ async def run_agent(
                     spent=traj.total_main_cost_usd + traj.total_arm_cost_usd, max_cost_usd=max_cost_usd, traj=traj,
                 )
                 _recall_count += 1
+            elif call.tool == "plan" and strategy_region is not None and _env is not None:
+                result_str, exec_err = await _plan_via_strategy(
+                    strategy_region, memory_region, backend, model, env=_env,
+                    endpoint_id=endpoint_id, thinking=thinking, effort=effort,
+                    plan_count=_plan_count, max_plans=_max_plans,
+                    spent=traj.total_main_cost_usd + traj.total_arm_cost_usd, max_cost_usd=max_cost_usd, traj=traj,
+                )
+                _plan_count += 1
             else:
                 result_str, exec_err = dispatch_tool(call)
             # act 后 dead-reckon:仅合法 act(moved/blocked/already_done)update;invalid 跳过 → pose 不失步
