@@ -36,18 +36,24 @@ from .verify import verify_solution
 
 logger = logging.getLogger("brainregion.sandbox.loop")
 
-# code-regime + env-regime 工具并集。code agent 的 system prompt 不列 observe/act(硬编码 tools_doc),
+# code-regime + env-regime 工具并集。code agent 的 system prompt 不列 env 工具(硬编码 tools_doc),
 # 故 code agent 不知其存在;仅幻觉调用时会触发 → dispatch 显式报错(不崩)。parse_tool_call 用此集校验。
-ALLOWED_TOOLS = frozenset(
-    {"read_text", "search_text", "inspect_file", "apply_text_patch", "workspace_run_check", "list_allowed_roots",
-     "observe", "act"}
+# ENV_TOOLS 单列常量防 drift(opus medium):observe/act/recall_map 命名一处。
+CODE_REGIME_TOOLS = frozenset(
+    {"read_text", "search_text", "inspect_file", "apply_text_patch", "workspace_run_check", "list_allowed_roots"}
 )
+ENV_TOOLS = frozenset({"observe", "act", "recall_map"})
+ALLOWED_TOOLS = CODE_REGIME_TOOLS | ENV_TOOLS
 _RESULT_CAP_CHARS = 4000
 
 # env 注入(Phase A):observe/act 工具经此 ContextVar 读当前 env(仿 workspace.files.scoped_workspace_root)。
 # 默认 None = code-regime;observe/act 在 dispatch 显式报错(不崩)。env-loop 用 scoped_env 绑定。
 # 嵌套/并发各持各的 ContextVar 副本(隔离,不串台)。
 _current_env: ContextVar[Any] = ContextVar("_current_env", default=None)
+
+# Phase C 记忆脑区 gate:recall_map 仅在 memory 模式(_memory_mode True)可用;默认 False = code-regime
+# /非 memory env-run 幻觉调 recall_map → dispatch 显式报错(不崩,镜像 observe/act None-guard)。
+_memory_mode: ContextVar[bool] = ContextVar("_memory_mode", default=False)
 
 
 @contextmanager
@@ -58,6 +64,16 @@ def scoped_env(env: Any):
         yield env
     finally:
         _current_env.reset(token)
+
+
+@contextmanager
+def scoped_memory_mode():
+    """激活记忆脑区(recall_map 可用)。runner 侧在 --memory 时包 run_agent。RAII:退出复位。"""
+    token = _memory_mode.set(True)
+    try:
+        yield
+    finally:
+        _memory_mode.reset(token)
 
 
 def _emit_env_step(action: str, obs: str, reward: float, terminated: bool, info: dict) -> None:
@@ -281,7 +297,7 @@ def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
             env = _current_env.get()
             if env is None:
                 raise RuntimeError("observe: 当前无 env(code-regime 不支持该工具)")
-            out = {"observation": env.render()}
+            out = {"observation": env.observation()}  # 统一接口:strict_obs → 当前视野,否则累积图(gpt high)
         elif call.tool == "act":
             env = _current_env.get()
             if env is None:
@@ -303,6 +319,16 @@ def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
                 "info": info,
                 "solved": bool(getattr(env, "solved", False)),
             }
+        elif call.tool == "recall_map":
+            # Phase C 记忆脑区:返累积探索图(当前视野之外的记忆)。仅 _memory_mode True 可用。
+            if not _memory_mode.get():
+                raise RuntimeError("recall_map: 记忆脑区未激活(用 --memory 启用)")
+            env = _current_env.get()
+            if env is None:
+                raise RuntimeError("recall_map: 当前无 env")
+            explored = getattr(env, "_explored", set())
+            total = getattr(env, "size", 0) ** 2
+            out = {"map": env.render(), "explored_cells": len(explored), "of_total": total}
         else:
             return "", "unreachable: unknown tool"
         return _compact(out), None

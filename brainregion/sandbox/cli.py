@@ -11,6 +11,7 @@ import logging
 import shlex
 import sys
 import time
+from contextlib import nullcontext as _nullcontext
 from dataclasses import replace
 from pathlib import Path
 from typing import Any
@@ -23,7 +24,7 @@ from .eval import render_summary, run_sandbox_eval, write_report
 from .envs import GridWorld, build_env_system_prompt, write_replay_html
 from .fixtures import SANDBOX_FIXTURES, get_fixture, list_fixture_ids
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
-from .loop import run_agent, run_cognitive_loop, scoped_env
+from .loop import run_agent, run_cognitive_loop, scoped_env, scoped_memory_mode
 from .brain_verify import TraceResult, composite_verify, extract_final_patch, forced_trace
 from .task import SandboxTask, WorktreeTask
 from .worktree import (
@@ -372,11 +373,12 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
 
     # 构造 env + 边界校验(constructor 校验 size/visibility_radius/goal/walls;非法 → 干净退出)
     size = int(args.size)
-    fog = bool(getattr(args, "fog", False))
+    memory = bool(getattr(args, "memory", False))  # Phase C:严格部分可观 + recall_map
+    fog = bool(getattr(args, "fog", False)) or memory  # --memory 自动启用 fog(strict_obs 需要半径)
     vis_radius = getattr(args, "visibility_radius", None)
     if vis_radius is None and fog:
-        vis_radius = 2  # --fog 默认半径 2
-    goal_kw: dict[str, Any] = {"visibility_radius": vis_radius}
+        vis_radius = 2  # --fog/--memory 默认半径 2
+    goal_kw: dict[str, Any] = {"visibility_radius": vis_radius, "strict_obs": memory}
     if bool(getattr(args, "random_goal", False)):
         goal_kw["random_goal_seed"] = getattr(args, "seed", None) if getattr(args, "seed", None) is not None else 0
     elif getattr(args, "goal_x", None) is not None and getattr(args, "goal_y", None) is not None:
@@ -386,8 +388,10 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
     except ValueError as exc:
         raise SystemExit(f"env 构造非法: {exc}")
     goal_text = args.goal_text or (
-        "找到并到达藏在网格里的目标 G(你只看得到周围,`?` 是未探索区,先探索再过去)" if fog
-        else "到达目标 G(从 @ 出发,避开墙 #,走到 G)"
+        "找到并到达藏在网格里的目标 G(observe 只看当前视野,recall_map 拿累积探索图;先探索拼图再过去)"
+        if memory else
+        ("找到并到达藏在网格里的目标 G(你只看得到周围,`?` 是未探索区,先探索再过去)" if fog
+         else "到达目标 G(从 @ 出发,避开墙 #,走到 G)")
     )
     max_steps = int(args.max_steps or dd.get("sandbox_max_steps", 10))
     if max_steps < 1:
@@ -397,7 +401,9 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
     if getattr(args, "debug", False):
         import threading
         from brainregion.viz import DebugDashboardOptions, serve_debug_dashboard
-        opts = DebugDashboardOptions(goal=goal_text, problem=goal_text, refresh_ms=1000)
+        opts = DebugDashboardOptions(
+            goal=goal_text, problem=goal_text, refresh_ms=1000, port=int(getattr(args, "debug_port", 8765)),
+        )
         threading.Thread(
             target=serve_debug_dashboard, args=(opts,), kwargs={"open_browser": True}, daemon=True
         ).start()
@@ -415,17 +421,19 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
     run_dir = make_run_dir()
     try:
         with scoped_env(env):
-            traj = await run_agent(
-                backend, model, task, run_dir=run_dir, arm=args.arm,
-                max_steps=max_steps,
-                max_cost_usd=float(args.max_cost_usd or dd.get("sandbox_max_cost_usd", 0.5)),
-                temperature=float(dd.get("sandbox_temperature", 0.0)),
-                max_tokens=int(args.max_tokens or 2048),
-                consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
-                transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
-                endpoint_id=endpoint_id, thinking=_thinking_arg(args), effort=args.effort,
-                system_prompt=build_env_system_prompt(env, goal_text), verify_fn=verify,
-            )
+            # --memory:激活记忆脑区(recall_map 可用);scoped_memory_mode 包 run_agent
+            with scoped_memory_mode() if memory else _nullcontext():
+                traj = await run_agent(
+                    backend, model, task, run_dir=run_dir, arm=args.arm,
+                    max_steps=max_steps,
+                    max_cost_usd=float(args.max_cost_usd or dd.get("sandbox_max_cost_usd", 0.5)),
+                    temperature=float(dd.get("sandbox_temperature", 0.0)),
+                    max_tokens=int(args.max_tokens or 2048),
+                    consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
+                    transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
+                    endpoint_id=endpoint_id, thinking=_thinking_arg(args), effort=args.effort,
+                    system_prompt=build_env_system_prompt(env, goal_text, memory=memory), verify_fn=verify,
+                )
     finally:
         cleanup_run_dir(run_dir)
 

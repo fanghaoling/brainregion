@@ -299,3 +299,52 @@ def test_random_goal_deterministic_same_seed():
     b = GridWorld(size=7, start=(0, 0), visibility_radius=2, random_goal_seed=7)
     assert a.goal == b.goal
 
+
+# ---------- Phase C:strict_obs + render_visible + observation() ----------
+
+
+def test_render_visible_only_current_view():
+    """render_visible 只画当前 Chebyshev 视野(视野外 `?`,即使探索过)。"""
+    env = GridWorld(size=6, start=(0, 0), goal=(5, 5), visibility_radius=1)
+    env.step("right")  # 探索过 (0,0) 邻域;agent 现 (1,0)
+    visible = env.render_visible().split("\n")
+    # agent (1,0) 视野半径1 = (0,0)(1,0)(2,0)(0,1)(1,1)(2,1);(0,0) 探索过但在视野外 → `?`
+    rendered_flat = "".join(visible)
+    assert visible[0][1] == "@"  # agent 可见
+    # (0,0) 探索过但距 agent(1,0) Chebyshev=1 → 在视野内,应显(非 ?);(5,5) 视野外 → ?
+    assert visible[5][5] == "?"
+    assert "?" in rendered_flat  # 严格视野有雾(探索过但视野外的也算 ?)
+
+
+def test_observation_respects_strict_obs():
+    """observation():strict → 当前视野(探索过但视野外显 ?);loose → 累积图(探索过显 .)。
+    需移动 2+ 步让旧格出当前视野(1 步时 explored 恰好 == 当前视野看不出差异)。"""
+    env_strict = GridWorld(size=5, start=(0, 0), goal=(4, 4), visibility_radius=1, strict_obs=True)
+    env_loose = GridWorld(size=5, start=(0, 0), goal=(4, 4), visibility_radius=1, strict_obs=False)
+    for env in (env_strict, env_loose):
+        env.step("right")
+        env.step("right")  # agent (2,0);(0,0) 探索过但在 (2,0) 视野(Chebyshev 2)外
+    strict_rows = env_strict.observation().split("\n")
+    loose_rows = env_loose.observation().split("\n")
+    assert strict_rows[0][0] == "?"  # (0,0) 探索过但出视野 → strict 隐藏
+    assert loose_rows[0][0] == "."   # (0,0) 探索过 → loose 累积图显地
+
+
+def test_observation_loose_equals_render_regression():
+    """strict_obs=False:observation() == render()(Phase A/B 零回归)。"""
+    env = GridWorld(size=5, start=(0, 0), goal=(4, 4), visibility_radius=2, strict_obs=False)
+    env.step("right")
+    env.step("down")
+    assert env.observation() == env.render()
+
+
+def test_step_returns_strict_observation_when_strict():
+    """strict_obs=True:step 返当前视野(observation);frames 仍累积图(render)。
+    移动 2 步让旧格出视野 → observation != render(累积)。"""
+    env = GridWorld(size=5, start=(0, 0), goal=(4, 4), visibility_radius=1, strict_obs=True)
+    env.step("right")  # (0,0)->(1,0)
+    obs, _, _, _ = env.step("right")  # (1,0)->(2,0);(0,0) 探索过但出 (2,0) 视野
+    assert obs == env.render_visible()  # 当前视野
+    assert env.frames[-1] == env.render()  # replay 用累积图
+    assert obs != env.render()  # 严格视野 != 累积图(累积含 (0,0),视野不含)
+

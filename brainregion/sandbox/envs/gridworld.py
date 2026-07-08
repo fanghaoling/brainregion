@@ -51,6 +51,7 @@ class GridWorld:
         walls: tuple[tuple[int, int], ...] = (),
         visibility_radius: int | None = None,
         random_goal_seed: int | None = None,
+        strict_obs: bool = False,
     ) -> None:
         if not (2 <= size <= 50):
             raise ValueError(f"size 须在 2..50,got {size}")
@@ -65,6 +66,7 @@ class GridWorld:
         self.start = tuple(start)
         self.walls = frozenset(tuple(w) for w in walls)
         self.visibility_radius = visibility_radius
+        self.strict_obs = strict_obs  # Phase C:True → observation() 只给当前视野(agent 须 recall_map 拿累积图)
         fog = visibility_radius is not None
 
         if not self._in_grid(self.start):
@@ -154,24 +156,53 @@ class GridWorld:
         fog 下成功移动后扩 _explored(新可见格);无状态改变的动作不扩/不追加 frame。
         """
         if self._terminated:
-            return self.render(), 0.0, True, {"already_done": True}
+            return self.observation(), 0.0, True, {"already_done": True}
         a = (action or "").strip().lower()
         if a not in _ACTION_DELTA:
-            return self.render(), 0.0, False, {"invalid": action}
+            return self.observation(), 0.0, False, {"invalid": action}
         dx, dy = _ACTION_DELTA[a]
         nx, ny = self._agent[0] + dx, self._agent[1] + dy
         if not self._in_grid((nx, ny)) or (nx, ny) in self.walls:
-            return self.render(), 0.0, False, {"blocked": True}
+            return self.observation(), 0.0, False, {"blocked": True}
         self._agent = (nx, ny)
         if self.visibility_radius is not None:  # fog:扩探索域(在 render 前,新格本帧可见)
             self._explored |= set(self._visible_cells(self._agent))
         if self._agent == self.goal:
             self._terminated = True
             self.total_reward += 1.0
-            self.frames.append(self.render())
-            return self.frames[-1], 1.0, True, {"goal": True}
+            self.frames.append(self.render())  # replay:累积图
+            return self.observation(), 1.0, True, {"goal": True}  # agent:当前视野(strict)/累积
         self.frames.append(self.render())
-        return self.frames[-1], 0.0, False, {}
+        return self.observation(), 0.0, False, {}
+
+    def render_visible(self) -> str:
+        """当前 Chebyshev 视野 only(不含历史探索);无 fog(radius None)时 == render()。Phase C 严格观察用。"""
+        r = self.visibility_radius
+        if r is None:
+            return self.render()  # 无 fog → 全可见,与 render 等价
+        rows: list[str] = []
+        for y in range(self.size):
+            chars = []
+            for x in range(self.size):
+                cell = (x, y)
+                if abs(x - self._agent[0]) > r or abs(y - self._agent[1]) > r:
+                    chars.append(_FOG)  # 视野外 → `?`(不论是否探索过)
+                    continue
+                if cell == self._agent:
+                    chars.append(_AGENT)
+                elif cell == self.goal:
+                    chars.append(_GOAL)
+                elif cell in self.walls:
+                    chars.append(_WALL)
+                else:
+                    chars.append(_FLOOR)
+            rows.append("".join(chars))
+        return "\n".join(rows)
+
+    def observation(self) -> str:
+        """agent 看到的观测:strict_obs → 当前视野(render_visible);否则累积图(render)。
+        Phase C 统一接口 —— dispatch observe/act 走此(防 strict 模式 observe 泄漏累积图,gpt high)。"""
+        return self.render_visible() if self.strict_obs else self.render()
 
     def render(self) -> str:
         rows: list[str] = []

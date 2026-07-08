@@ -276,6 +276,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_env.add_argument("--random-goal", action="store_true",
                           help="seeded 随机 goal(fog 下优先藏在 start 可见域外,逼探索)")
     p_sb_env.add_argument("--seed", type=int, default=None, help="随机 goal 种子(--random-goal 用;默认 0)")
+    # --- Phase C 记忆脑区(strict 部分可观 + recall_map)---
+    p_sb_env.add_argument("--memory", action="store_true",
+                          help="Phase C 记忆脑区:严格部分可观(observe 只给当前视野)+ recall_map 拿累积探索图;"
+                          "自动启用 fog(strict_obs=True)")
+    p_sb_env.add_argument("--debug-port", type=int, default=8765, help="--debug 调试窗端口(默认 8765)")
 
     p_ins = sub.add_parser(
         "inspect",

@@ -19,9 +19,11 @@ from brainregion.sandbox.envs import GridWorld, build_env_system_prompt
 from brainregion.sandbox.loop import (
     _build_system_prompt,
     _current_env,
+    _memory_mode,
     dispatch_tool,
     run_agent,
     scoped_env,
+    scoped_memory_mode,
     ToolCall,
 )
 from brainregion.sandbox.task import SandboxTask
@@ -274,3 +276,96 @@ def test_sandbox_env_cli_argparse():
 
     ns2 = parser.parse_args(["sandbox", "env", "--main-brain", "glm-5.2"])
     assert ns2.fog is False and ns2.visibility_radius is None  # 默认全可见(Phase A 回归)
+
+    ns3 = parser.parse_args(["sandbox", "env", "--memory", "--size", "8", "--debug-port", "9000"])
+    assert ns3.memory is True and ns3.size == 8 and ns3.debug_port == 9000
+
+
+# ---------- Phase C 记忆脑区:recall_map + strict observation ----------
+
+
+def test_recall_map_without_memory_mode_errors():
+    """recall_map 在 _memory_mode False(默认)→ 显式错误,不崩(镜像 observe/act None-guard)。"""
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1)
+    assert _memory_mode.get() is False
+    with scoped_env(env):
+        result, error = dispatch_tool(_tc("recall_map"))
+    assert result == ""
+    assert "记忆脑区未激活" in error and "RuntimeError" in error
+
+
+def test_recall_map_returns_accumulated_map():
+    """memory 模式:recall_map 返累积探索图(render)+ explored 计数。"""
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
+    env.step("right")  # 探索扩
+    with scoped_env(env), scoped_memory_mode():
+        result, error = dispatch_tool(_tc("recall_map"))
+    assert error is None
+    payload = json.loads(result)
+    assert "map" in payload and payload["explored_cells"] >= 1 and payload["of_total"] == 16
+    assert "?" in payload["map"]  # 累积图里仍有未探索格
+
+
+def test_recall_map_reflects_exploration_growth():
+    """recall_map 的 explored_cells 随 agent 探索增长(记忆脑区跟随 env 状态)。"""
+    env = GridWorld(size=5, start=(0, 0), goal=(4, 4), visibility_radius=1, strict_obs=True)
+    with scoped_env(env), scoped_memory_mode():
+        _, _ = dispatch_tool(_tc("recall_map"))
+        n0 = json.loads(dispatch_tool(_tc("recall_map"))[0])["explored_cells"]
+        dispatch_tool(_tc("act", {"action": "right"}))
+        n1 = json.loads(dispatch_tool(_tc("recall_map"))[0])["explored_cells"]
+    assert n1 > n0  # 移动后探索域增长
+
+
+def test_scoped_memory_mode_nesting_and_reset():
+    assert _memory_mode.get() is False
+    with scoped_memory_mode():
+        assert _memory_mode.get() is True
+        with scoped_memory_mode():  # 嵌套
+            assert _memory_mode.get() is True
+        assert _memory_mode.get() is True
+    assert _memory_mode.get() is False
+
+
+def test_code_regime_prompt_does_not_leak_recall_map():
+    """code-regime system prompt 不列 recall_map(code agent 不知其存在;同 observe/act 隔离)。"""
+    task = SandboxTask(id="x", goal="修 bug")
+    prompt = _build_system_prompt(task, sys.executable)
+    assert "recall_map" not in prompt
+
+
+def test_recall_map_hallucination_in_code_regime_graceful():
+    """code-regime(_memory_mode False)幻觉调 recall_map → 优雅错误,不崩不 leak memory。"""
+    assert _memory_mode.get() is False
+    result, error = dispatch_tool(_tc("recall_map"))  # 无 scoped_env、无 memory_mode
+    assert result == "" and "记忆脑区未激活" in error
+
+
+def test_run_agent_memory_loop_mockbackend():
+    """MockBackend memory-loop(确定性):observe(当前视野)→ recall_map(累积图)→ act→ done。
+    断言 strict observe 返当前视野、recall_map 返累积图、trajectory 含 recall_map、solved。"""
+    env = GridWorld(size=3, start=(0, 0), goal=(1, 0), visibility_radius=1, strict_obs=True)
+    task = SandboxTask(id="env-mem", goal="找到 G")
+    backend = MockBackend([
+        _J({"thought": "看当前视野", "tool": "observe", "args": {}}),
+        _J({"thought": "查记忆地图", "tool": "recall_map", "args": {}}),
+        _J({"thought": "移动到目标", "tool": "act", "args": {"action": "right"}}),
+        _J({"thought": "到达", "done": True, "answer": "到 G"}),
+    ])
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env), scoped_memory_mode():
+            traj = asyncio.run(run_agent(
+                backend, "mock", task, run_dir=run_dir, arm="none", max_steps=6,
+                system_prompt=build_env_system_prompt(env, task.goal, memory=True),
+                verify_fn=_make_env_verify(env),
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+    tools_called = [s.tool for s in traj.steps]
+    assert "recall_map" in tools_called  # agent 确调了记忆脑区
+    recall_step = next(s for s in traj.steps if s.tool == "recall_map")
+    assert '"map"' in recall_step.result_preview  # 返累积图
+    observe_step = next(s for s in traj.steps if s.tool == "observe")
+    assert '"observation"' in observe_step.result_preview
+    assert traj.tests_green is True and env.solved is True  # grounded
