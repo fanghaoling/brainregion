@@ -406,6 +406,60 @@ def _arm_inject(task: SandboxTask, goal: str) -> tuple[str, int, int]:
     return f"相关经验(可信度未知,作参考):\n{body}\n", 1, len(seeds)
 
 
+async def _recall_via_region(
+    memory_region: Any,
+    backend: Any,
+    model: str,
+    *,
+    env: Any,
+    positions: list,
+    attempts: list,
+    query: str,
+    endpoint_id: str | None,
+    thinking: bool | None,
+    effort: str | None,
+    recall_count: int,
+    max_recalls: int,
+    spent: float,
+    max_cost_usd: float,
+    traj: Any,
+) -> tuple[str, str | None]:
+    """Phase D:recall_map 经记忆脑区 LLM(region-as-tool)。
+
+    成功 → ``{"map": env.render(), "interpretation": ..., "region": True}``(raw map 永在 → region 臂 =
+    基线**信息超集**,干净归因)。超 recall-cap / 预算不足 / 调用失败 → **降级** Phase C
+    (``{"map", explored_cells, of_total, region_degraded}``;不推进 env/不追加 path/不重复计费)。
+    成功时 cost 记 ``traj.total_main_cost_usd``;降级不计费。返 ``(result_str, exec_err)``。
+    """
+    if recall_count >= max_recalls or spent >= max_cost_usd:
+        out = {
+            "map": env.render(),
+            "explored_cells": len(getattr(env, "_explored", set())),
+            "of_total": getattr(env, "size", 0) ** 2,
+            "region_degraded": "budget_or_cap",
+        }
+        return _compact(out), None
+    try:
+        res = await memory_region.reason(
+            backend, model,
+            spatial=env.render(), positions=positions, attempts=attempts,
+            current_view=env.observation(), query=query,
+            endpoint_id=endpoint_id, thinking=thinking, effort=effort,
+        )
+        traj.total_main_cost_usd += float(res.get("cost_usd", 0.0) or 0.0)
+        out = {"map": env.render(), "interpretation": res.get("interpretation", ""), "region": True}
+        return _compact(out), None
+    except Exception as exc:  # noqa: BLE001 — 失败隔离:降级 Phase C,不崩主 run(review consensus/gpt)
+        logger.warning("memory region reason 失败,降级 env.render()", exc_info=True)
+        out = {
+            "map": env.render(),
+            "explored_cells": len(getattr(env, "_explored", set())),
+            "of_total": getattr(env, "size", 0) ** 2,
+            "region_degraded": str(exc)[:200],
+        }
+        return _compact(out), None
+
+
 async def run_agent(
     backend: Any,
     model: str,
@@ -428,6 +482,8 @@ async def run_agent(
     directive: str = "",
     system_prompt: str | None = None,
     verify_fn: Callable[..., dict] | None = None,
+    memory_region: Any = None,
+    max_recall_calls: int | None = None,
 ) -> Trajectory:
     """跑一个 agent loop。返回 Trajectory(含 verify 后的 solve_status)。
 
@@ -437,6 +493,10 @@ async def run_agent(
     ``system_prompt`` / ``verify_fn``(Phase A env 注入,加性):非 None 时覆盖默认 code-regime
     prompt(``_build_system_prompt``)/ verify(``verify_solution``)—— env-loop 用:注入 env 游戏 prompt
     + env-grounded verify(返同 shape,``tests_green := env.solved``)。默认 None = code-regime 现行为。
+
+    ``memory_region`` / ``max_recall_calls``(Phase D 记忆脑区,加性):非 None 时 recall_map 在 dispatch
+    前拦下转调记忆脑区 LLM(``_recall_via_region``,region-as-tool)—— env-regime 第一个真·多脑区实验。
+    positions(实际到过)/attempts(每次尝试含失败)分轨喂脑区。默认 None = Phase C 行为(recall_map 被动倒图)。
     """
     import sys
 
@@ -444,6 +504,14 @@ async def run_agent(
     arm = arm if arm in ("none", "brainregion") else "none"
     cap_chars = max(2000, int(transcript_token_cap) * 4)
     traj = Trajectory(task_id=task.id, arm=arm, gold_diff=task.gold_diff)
+
+    # Phase D 记忆脑区(env 模式):positions(实际到过)/attempts(每次尝试,含失败)分轨 + recall 计数。
+    # _env 经 ContextVar(runner 的 scoped_env 已设);非 env 模式 _env=None → 这些特性全 no-op。
+    _env = _current_env.get()
+    _positions: list = [tuple(_env.start)] if (memory_region is not None and _env is not None) else []
+    _attempts: list = []
+    _recall_count = 0
+    _max_recalls = int(max_recall_calls) if max_recall_calls is not None else int(max_steps)
 
     with scoped_workspace_root(run_dir):
         system = system_prompt if system_prompt is not None else _build_system_prompt(task, python_exe)
@@ -520,7 +588,31 @@ async def run_agent(
                 emit_event("sandbox.step", payload={"task_id": task.id, "arm": arm, "step": step, "done": True})
                 break
 
-            result_str, exec_err = dispatch_tool(call)
+            # Phase D 记忆脑区:recall_map 在 region 臂调专用 LLM(region-as-tool);否则走 dispatch(Phase C)。
+            _act_before = _env._agent if (call.tool == "act" and _env is not None) else None
+            if call.tool == "recall_map" and memory_region is not None and _env is not None:
+                result_str, exec_err = await _recall_via_region(
+                    memory_region, backend, model, env=_env, positions=_positions, attempts=_attempts,
+                    query=str(call.args), endpoint_id=endpoint_id, thinking=thinking, effort=effort,
+                    recall_count=_recall_count, max_recalls=_max_recalls,
+                    spent=traj.total_main_cost_usd + traj.total_arm_cost_usd, max_cost_usd=max_cost_usd, traj=traj,
+                )
+                _recall_count += 1
+            else:
+                result_str, exec_err = dispatch_tool(call)
+            # act 分轨:位置 delta 判 status(blocked/invalid/already_done 天然不入 positions → 打转可判)
+            if _act_before is not None:
+                _after = _env._agent
+                if exec_err:
+                    _status = "invalid"
+                elif _after != _act_before:
+                    _status = "moved"
+                    _positions.append(_after)
+                elif getattr(_env, "_terminated", False):
+                    _status = "already_done"
+                else:
+                    _status = "blocked"
+                _attempts.append({"from": list(_act_before), "action": call.args.get("action"), "status": _status, "to": list(_after)})
             consecutive_errors = 0  # 成功(或可执行)解析 → 重置(连续错误是针对 parse/模型失败)
             preview = (result_str or exec_err or "")[:300]
             traj.steps.append(StepRecord(

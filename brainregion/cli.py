@@ -284,6 +284,10 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_env.add_argument("--memory", action="store_true",
                           help="Phase C 记忆脑区:严格部分可观(observe 只给当前视野)+ recall_map 拿累积探索图;"
                           "自动启用 fog(strict_obs=True)")
+    # --- Phase D 记忆脑区(真 LLM,region-as-tool)---
+    p_sb_env.add_argument("--memory-region", action="store_true",
+                          help="Phase D 记忆脑区(真 LLM):recall_map 改由专用记忆脑区 LLM 推理(给主脑记忆解释:"
+                          "位置/走过/打转/goal 方位,不下动作指令);隐含 --memory。A/B vs --memory(被动倒图)")
     p_sb_env.add_argument("--debug-port", type=int, default=8765, help="--debug 调试窗端口(默认 8765)")
 
     p_ins = sub.add_parser(

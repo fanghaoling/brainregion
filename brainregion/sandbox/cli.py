@@ -373,7 +373,8 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
 
     # 构造 env + 边界校验(constructor 校验 size/visibility_radius/goal/walls;非法 → 干净退出)
     size = int(args.size)
-    memory = bool(getattr(args, "memory", False))  # Phase C:严格部分可观 + recall_map
+    memory_region_on = bool(getattr(args, "memory_region", False))  # Phase D:记忆脑区(真 LLM)
+    memory = bool(getattr(args, "memory", False)) or memory_region_on  # 严格部分可观 + recall_map(--memory-region 隐含)
     fog = bool(getattr(args, "fog", False)) or memory  # --memory 自动启用 fog(strict_obs 需要半径)
     vis_radius = getattr(args, "visibility_radius", None)
     if vis_radius is None and fog:
@@ -426,6 +427,11 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
             "gold_diff": getattr(t, "gold_diff", ""),
         }
 
+    memory_region = None
+    if memory_region_on:  # Phase D:recall_map 改由记忆脑区 LLM 推理(region-as-tool)
+        from brainregion.sandbox.regions import MemoryRegion
+        memory_region = MemoryRegion()
+
     run_dir = make_run_dir()
     try:
         with scoped_env(env):
@@ -441,6 +447,7 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
                     transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
                     endpoint_id=endpoint_id, thinking=_thinking_arg(args), effort=args.effort,
                     system_prompt=build_env_system_prompt(env, goal_text, memory=memory), verify_fn=verify,
+                    memory_region=memory_region,
                 )
     finally:
         cleanup_run_dir(run_dir)
@@ -451,7 +458,7 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         "solved": env.solved, "total_reward": env.total_reward,
         "n_steps": traj.n_steps, "termination": traj.termination_reason,
         "visibility_radius": env.visibility_radius, "goal_pos": tuple(env.goal),
-        "n_walls": len(env.walls),
+        "n_walls": len(env.walls), "memory_region": memory_region_on,
     }
     out_dir = Path(".brain-region") / "sandbox"
     out_dir.mkdir(parents=True, exist_ok=True)
