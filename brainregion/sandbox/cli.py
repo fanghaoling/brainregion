@@ -489,3 +489,80 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         except KeyboardInterrupt:
             pass
     return result
+
+
+def _parse_arm_spec(spec: str):
+    """``--arm mem=region,strat=real`` → EnvArm(feature-config;review 双强 feature-flag 表层)。"""
+    from .env_eval import EnvArm
+    parts: dict[str, str] = {}
+    for chunk in spec.split(","):
+        if "=" in chunk:
+            k, v = chunk.split("=", 1)
+            parts[k.strip()] = v.strip()
+    mem = parts.get("mem", "").lower()
+    strat = parts.get("strat", "none").lower()
+    if strat not in ("none", "real", "echo"):
+        raise SystemExit(f"--arm strat 非法 {strat!r};合法:none/real/echo")
+    name = parts.get("name") or f"mem={mem or 'none'},strat={strat}"
+    return EnvArm(
+        name=name,
+        memory_tool=(mem == "tool"),
+        memory_region=mem in ("region", "true", "1"),
+        strategy=strat,
+    )
+
+
+async def run_env_eval(args: argparse.Namespace) -> dict[str, Any]:
+    """`brain-region sandbox env-eval`(Phase 4):多 run × arms(Echo 控制臂)+ 过程指标 + config 级 bootstrap。
+
+    非交互(不开 --debug)。产 JSON 报告 + CSV + markdown 总结。判据 = harness 跑通(三臂都产数据、过程指标非零、
+    pairwise delta+CI 有值、cost 不超 cap)—— **非**「Strategy 显著」结论(N 小,pilot_ 前缀,signal_regime 看 regime)。
+    """
+    from .env_eval import (
+        ARM_PRESETS, ARMS_MEMORY_STRATEGY, EnvConfig, run_env_eval as run_env_eval_harness,
+        render_env_eval_summary, write_report,
+    )
+
+    dd = _defaults_mod.apply()
+    backend, registry = _build_backend(dd)
+    model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
+    if not model_str:
+        raise SystemExit("--main-brain 必填(或配置 sandbox_main_brain)")
+    model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
+
+    sizes = [int(x) for x in args.sizes.split(",") if x.strip()]
+    seeds = [int(x) for x in args.seeds.split(",") if x.strip()]
+    vis_radius = int(args.visibility_radius) if args.visibility_radius is not None else 2
+    configs = [
+        EnvConfig(
+            size=sz, seed=sd,
+            wall_seed=getattr(args, "wall_seed", None),
+            wall_density=float(args.wall_density or 0.0),
+            visibility_radius=vis_radius,
+            max_steps=int(args.max_steps or dd.get("sandbox_max_steps", 30)),
+        )
+        for sz in sizes for sd in seeds
+    ]
+    if len(configs) < 2:
+        logger.warning("configs<2(sizes×seeds=%d)→ bootstrap 退化为 None,pairwise gate INCONCLUSIVE", len(configs))
+
+    if getattr(args, "arm", None):  # 显式 feature-config(覆盖预设)
+        arms = tuple(_parse_arm_spec(s) for s in args.arm)
+    else:
+        arms = ARM_PRESETS.get(args.arms or "memory-strategy", ARMS_MEMORY_STRATEGY)
+
+    logger.info("env-eval: %d configs × %d arms × %d repeats = ≤%d runs",
+                len(configs), len(arms), args.repeats, len(configs) * len(arms) * args.repeats)
+
+    report = await run_env_eval_harness(
+        backend, model, configs, arms,
+        repeats=int(args.repeats),
+        max_cost_usd=float(args.max_cost_usd or dd.get("sandbox_max_cost_usd", 2.0)),
+        temperature=float(dd.get("sandbox_temperature", 0.0)),
+        max_tokens=int(args.max_tokens or 2048),
+        endpoint_id=endpoint_id, thinking=_thinking_arg(args), effort=args.effort,
+    )
+    json_path, csv_path = write_report(report, getattr(args, "out", None))
+    print(render_env_eval_summary(report))
+    print(f"\n报告 JSON: {json_path}\nper-run CSV: {csv_path}")
+    return {"report": report, "json": str(json_path), "csv": str(csv_path)}

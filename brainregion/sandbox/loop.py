@@ -465,12 +465,14 @@ async def _plan_via_strategy(
     strategy_region: Any, memory_region: Any, backend: Any, model: str, *,
     env: Any, endpoint_id: str | None, thinking: bool | None, effort: str | None,
     plan_count: int, max_plans: int, spent: float, max_cost_usd: float, traj: Any,
+    prev_assistant: str | None = None,
 ) -> tuple[str, str | None]:
     """Phase D.3:plan 经策略脑区 LLM(读 Memory.rough_map = 多脑区协同)。
 
     成功 → ``{intent, rationale, expected_outcome, strategy: True}``。**memory_region None / rough_map 空
     / 超 cap / 调用失败 → 降级**返 ``{strategy_degraded}``(不崩主 run;review consensus:空图不规划)。
-    成功 cost 记 main;降级不计费。
+    成功 cost 记 main;降级不计费。``prev_assistant``(Phase 4 EchoStrategy 控制臂用,real 忽略)= 主脑
+    当前轮内容(run_agent 透传)。
     """
     # 不变量 + 空图守卫:strategy 在则 memory 必在;rough_map 空 → 降级(防 Strategy 基空图误导)
     if memory_region is None or not getattr(memory_region, "rough_map", ""):
@@ -483,6 +485,7 @@ async def _plan_via_strategy(
             backend, model,
             memory_rough_map=memory_region.rough_map, current_view=env.relative_view(),
             rough_position=memory_region.pose,
+            prev_assistant=prev_assistant,
             endpoint_id=endpoint_id, thinking=thinking, effort=effort,
         )
         traj.total_main_cost_usd += float(res.get("cost_usd", 0.0) or 0.0)
@@ -644,6 +647,7 @@ async def run_agent(
                     endpoint_id=endpoint_id, thinking=thinking, effort=effort,
                     plan_count=_plan_count, max_plans=_max_plans,
                     spent=traj.total_main_cost_usd + traj.total_arm_cost_usd, max_cost_usd=max_cost_usd, traj=traj,
+                    prev_assistant=resp.content,  # Phase 4 EchoStrategy 控制臂用(real 忽略)
                 )
                 _plan_count += 1
             else:

@@ -23,6 +23,9 @@ from brainregion.server import review_document
 # eval 子命令单独编排（不走 review_document；它直接调 engine 做 A/B 隔离）
 from brainregion.eval import cli as eval_cli
 from brainregion.sandbox import cli as sandbox_cli
+from brainregion.sandbox.env_eval import ARM_PRESETS
+
+ARM_PRESETS_KEYS = list(ARM_PRESETS.keys())
 
 
 def _read_text_input(args) -> str:
@@ -295,6 +298,31 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Phase D.3 策略脑区(LLM 规划器):plan 工具调策略脑区(读记忆脑区理解,提意图"
                           "去哪/子目标,不给动作);隐含 --memory-region。A/B:Memory-only vs Memory+Strategy")
     p_sb_env.add_argument("--debug-port", type=int, default=8765, help="--debug 调试窗端口(默认 8765)")
+
+    # --- Phase 4 formal A/B harness(env-regime)---
+    p_sb_env_eval = p_sb_sub.add_parser(
+        "env-eval",
+        help="Phase 4 formal A/B:多 run × arms(控制臂 Echo)+ 过程指标 + config 级 bootstrap CI/gate",
+    )
+    p_sb_env_eval.add_argument("--main-brain", default=None, help="主脑模型(deepseek-v4-flash / glm-5.2 等)")
+    p_sb_env_eval.add_argument("--sizes", default="8", help="网格边长 list 逗号分隔(默认 8;笛卡尔积 × seeds)")
+    p_sb_env_eval.add_argument("--seeds", default="1,2", help="random_goal_seed list(默认 1,2;笛卡尔积 × sizes)")
+    p_sb_env_eval.add_argument("--visibility-radius", type=int, default=None, help="fog 半径(默认 2)")
+    p_sb_env_eval.add_argument("--wall-density", type=float, default=None, help="随机墙密度(0..0.6)")
+    p_sb_env_eval.add_argument("--wall-seed", type=int, default=None, help="随机墙种子")
+    p_sb_env_eval.add_argument("--max-steps", type=int, default=None, help="per-run 步上限(默认 30)")
+    p_sb_env_eval.add_argument("--repeats", type=int, default=3, help="每 (config,arm) 重复 run 数(pilot=3;formal≥10)")
+    p_sb_env_eval.add_argument("--arms", default="memory-strategy", choices=list(ARM_PRESETS_KEYS),
+                               help="臂预设(memory-strategy=D.3+Echo 控制臂 / memory-baseline / all)")
+    p_sb_env_eval.add_argument("--arm", action="append", default=None,
+                               help="显式 feature-config(可多次):如 --arm mem=region,strat=real --arm mem=region,strat=echo "
+                                    "(覆盖 --arms;未来加脑区=加 flag,不动预设)")
+    p_sb_env_eval.add_argument("--max-cost-usd", type=float, default=None, help="全局成本上限(超即停+标 cost_capped)")
+    p_sb_env_eval.add_argument("--max-tokens", type=int, default=None)
+    p_sb_env_eval.add_argument("--thinking", default="off", choices=["off", "on"],
+                               help="主脑思考(off=便宜快非推理,默认;on=provider 默认)")
+    p_sb_env_eval.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])
+    p_sb_env_eval.add_argument("--out", default=None, help="报告输出目录(默认 .brain-region/sandbox/)")
 
     p_ins = sub.add_parser(
         "inspect",
@@ -815,6 +843,8 @@ def main() -> None:
             asyncio.run(sandbox_cli.verify_brain(args))
         elif args.sandbox_command == "env":
             asyncio.run(sandbox_cli.run_env(args))
+        elif args.sandbox_command == "env-eval":
+            asyncio.run(sandbox_cli.run_env_eval(args))
         return
     if args.command == "inspect":
         run_inspect(args)

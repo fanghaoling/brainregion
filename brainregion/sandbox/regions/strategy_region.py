@@ -60,6 +60,21 @@ def _parse_intent(content: str) -> dict | None:
     return None
 
 
+def _strip_to_thought(content: str | None) -> str:
+    """EchoStrategy 用:从主脑上一句 assistant 内容剥出 ``thought`` 推理(去掉 tool-call/action JSON,
+    防把旧动作再当新 plan 喂回,review gpt-3/opus-6)。解析失败 → 返原文截断(仍是主脑自有内容,content-null)。"""
+    text = (content or "").strip()
+    s, e = text.find("{"), text.rfind("}")
+    if s != -1 and e != -1 and e > s:
+        try:
+            obj = json.loads(text[s : e + 1])
+        except Exception:  # noqa: BLE001
+            obj = None
+        if isinstance(obj, dict) and isinstance(obj.get("thought"), str) and obj["thought"]:
+            return str(obj["thought"])
+    return text[:_INTENT_CAP]
+
+
 class StrategyRegion:
     """无状态策略脑区(规划器)。
 
@@ -74,8 +89,10 @@ class StrategyRegion:
     async def reason(
         self, backend: Any, model: str, *,
         memory_rough_map: str, current_view: str, rough_position, query: str = "",
+        prev_assistant: str | None = None,
         endpoint_id: str | None = None, thinking: bool | None = None, effort: str | None = None,
     ) -> dict:
+        # prev_assistant 仅 EchoStrategy 控制臂用(review 双强统一签名);real 忽略。
         system = build_strategy_region_system_prompt()
         user = _build_user_message(memory_rough_map, current_view, rough_position, query)
         resp = await backend.complete_messages(
@@ -97,4 +114,38 @@ class StrategyRegion:
         }
 
 
-__all__ = ["StrategyRegion", "build_strategy_region_system_prompt"]
+class EchoStrategy:
+    """Phase 4 控制臂(review 双强 gpt+opus):无 LLM · 复述主脑上一句推理。
+
+    隔离真正混淆「**主脑因多了 plan 工具而行为改变**」(lazy / 过度依赖 / prompt 多一行 plan 指引),
+    而非「Strategy 规划内容」。``reason()`` **不调 backend** → ``cost_usd=0``;主脑看到的 plan 工具 +
+    plumbing 与 real 完全一致,唯一差 = plan 结果是主脑**已有内容**(其上一句 thought 剥离 tool-call)。
+
+    算力不匹配是**特性**:``memory_echo`` 的 strategy cost≈0 → ``cost_delta(strategy vs echo)`` 单独暴露
+    real Strategy 真实算力(两混淆「算力」与「内容」分列)。诚实局限:复述非完美 content-null —— 主脑看到
+    自己上一句作 plan 结果可能有「自我复述」副作用 → 由 ``memory_echo − memory_only`` delta 作控制洁净度
+    诊断(≠0 则据此读 ``memory_strategy − memory_echo``)。
+    """
+
+    def __init__(self, *, max_tokens: int = 1024) -> None:
+        self.max_tokens = max_tokens
+
+    async def reason(
+        self, backend: Any, model: str, *,
+        memory_rough_map: str, current_view: str, rough_position, query: str = "",
+        prev_assistant: str | None = None,
+        endpoint_id: str | None = None, thinking: bool | None = None, effort: str | None = None,
+    ) -> dict:
+        # 忽略全部输入(含 memory_rough_map);复述主脑上一句 thought(剥离 tool-call),无 LLM 调用。
+        thought = _strip_to_thought(prev_assistant)
+        intent = thought if thought else "(echo 控制臂:无上一句推理,不规划)"
+        return {
+            "intent": intent[:_INTENT_CAP],
+            "rationale": "(echo 控制臂:复述主脑上一句,不含规划)",
+            "expected_outcome": "",
+            "cost_usd": 0.0,
+            "ok": True,
+        }
+
+
+__all__ = ["StrategyRegion", "EchoStrategy", "build_strategy_region_system_prompt"]
