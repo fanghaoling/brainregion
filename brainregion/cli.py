@@ -255,7 +255,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sb_env.add_argument("--env", default="gridworld", choices=["gridworld"], help="env 名(Phase A 仅 gridworld)")
     p_sb_env.add_argument("--size", type=int, default=5, help="网格边长(2..50,默认 5)")
-    p_sb_env.add_argument("--goal-text", default=None, help="目标描述(默认:到达目标 G)")
+    p_sb_env.add_argument("--goal-text", default=None, help="目标描述(默认:到达目标 G;fog 下不透露位置)")
     p_sb_env.add_argument("--arm", default="none", choices=["none", "brainregion"], help="顾问臂(Phase A 默认 none)")
     p_sb_env.add_argument("--main-brain", default=None, help="主脑模型(deepseek-v4-flash / glm-5.2 等)")
     p_sb_env.add_argument("--max-steps", type=int, default=None)
@@ -266,6 +266,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_env.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])
     p_sb_env.add_argument("--debug", action="store_true",
                           help="开调试窗(后台 serve_debug_dashboard,SSE 实时看 env.step 事件)")
+    # --- Phase B fog(部分可观)---
+    p_sb_env.add_argument("--fog", action="store_true",
+                          help="Phase B fog:部分可观(只看到角色周围 --visibility-radius 格,余 `?`)")
+    p_sb_env.add_argument("--visibility-radius", type=int, default=None,
+                          help="fog 可见半径(Chebyshev;默认 --fog 时 2;须 ≥0)")
+    p_sb_env.add_argument("--goal-x", type=int, default=None, help="显式 goal 列(默认远角)")
+    p_sb_env.add_argument("--goal-y", type=int, default=None, help="显式 goal 行(默认远角)")
+    p_sb_env.add_argument("--random-goal", action="store_true",
+                          help="seeded 随机 goal(fog 下优先藏在 start 可见域外,逼探索)")
+    p_sb_env.add_argument("--seed", type=int, default=None, help="随机 goal 种子(--random-goal 用;默认 0)")
 
     p_ins = sub.add_parser(
         "inspect",

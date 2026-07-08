@@ -211,3 +211,91 @@ def test_write_replay_html_explicit_utf8(tmp_path):
     content = out.read_text(encoding="utf-8")
     assert "回放" in content and "到达目标" in content
 
+
+# ---------- Phase B fog(部分可观)----------
+
+
+def test_fog_render_hides_unexplored():
+    """fog:未探索格显 `?`;start 邻域(Chebyshev 半径内)可见。"""
+    env = GridWorld(size=6, start=(0, 0), goal=(5, 5), visibility_radius=1)
+    rows = env.render().split("\n")
+    # start (0,0) 邻域半径1 = (0,0)(1,0)(0,1)(1,1);其余 `?`
+    assert rows[0][0] == "@"  # agent 可见
+    assert rows[5][5] == "?"  # goal 远,未探索
+    assert "?" in env.render()  # 有雾
+
+
+def test_fog_explored_accumulates_and_persists():
+    """移动后新格进 explored;离开的旧格仍可见(env-backed classic fog)。"""
+    env = GridWorld(size=6, start=(0, 0), goal=(5, 5), visibility_radius=1)
+    env.step("right")  # (0,0)->(1,0):新可见 (2,0)(1,1)(2,1)
+    assert (2, 0) in env._explored and (1, 1) in env._explored
+    env.step("left")  # 回 (0,0):(1,0) 仍 explored(持久)
+    assert (1, 0) in env._explored
+
+
+def test_fog_goal_hidden_until_within_radius():
+    """goal 在半径外时显 `?`;agent 走近后显 G。"""
+    env = GridWorld(size=6, start=(0, 0), goal=(5, 5), visibility_radius=1)
+    assert "G" not in env.render()  # 初始 goal 远,隐藏
+    for _ in range(4):
+        env.step("right")  # -> (4,0)
+    for _ in range(4):
+        env.step("down")  # -> (4,4):dist to (5,5)=1 ≤ radius → 可见
+    assert "G" in env.render()
+
+
+def test_fog_radius_0_only_agent_cell():
+    """radius=0:只 agent 格可见,余 `?`。"""
+    env = GridWorld(size=3, start=(1, 1), goal=(0, 0), visibility_radius=0)
+    rendered = env.render().replace("\n", "")
+    assert rendered.count("@") == 1
+    assert rendered.count("?") == 8  # 3x3 - 1 agent
+
+
+def test_fog_reset_clears_explored():
+    """reset 清 explored 回 start 可见域(re-explore)。"""
+    env = GridWorld(size=6, start=(0, 0), goal=(5, 5), visibility_radius=1)
+    env.step("right")
+    env.step("right")
+    assert len(env._explored) > 1
+    env.reset()
+    assert env._explored == set(env._visible_cells(env.start))
+
+
+def test_no_fog_full_visible_regression():
+    """radius=None(Phase A):无 `?`,全可见(回归不变)。"""
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3))  # visibility_radius=None
+    assert "?" not in env.render()
+    assert env._explored == set()
+
+
+def test_visibility_radius_validation():
+    """review gpt:radius 负数 → ValueError;非 int → ValueError。"""
+    with pytest.raises(ValueError, match="visibility_radius"):
+        GridWorld(size=4, visibility_radius=-1)
+    with pytest.raises(ValueError, match="visibility_radius"):
+        GridWorld(size=4, visibility_radius=1.5)
+
+
+def test_random_goal_fog_hidden_outside_start_visibility():
+    """random_goal_seed + fog + 大网格:goal 落在 start 可见域外(逼探索)。"""
+    env = GridWorld(size=8, start=(0, 0), visibility_radius=2, random_goal_seed=42)
+    start_vis = set(env._visible_cells(env.start))
+    assert env.goal not in start_vis  # 藏起来
+    assert env.goal != env.start
+
+
+def test_random_goal_fallback_when_start_visibility_covers_grid():
+    """review consensus:小网格+大半径 → start 可见域覆盖全网格 → fallback 任意非 start(不崩)。"""
+    env = GridWorld(size=3, start=(0, 0), visibility_radius=5, random_goal_seed=1)
+    assert env.goal != env.start  # fallback 仍合法
+    assert env.goal in [(x, y) for y in range(3) for x in range(3)]
+
+
+def test_random_goal_deterministic_same_seed():
+    """同 seed → 同 goal(可复现)。"""
+    a = GridWorld(size=7, start=(0, 0), visibility_radius=2, random_goal_seed=7)
+    b = GridWorld(size=7, start=(0, 0), visibility_radius=2, random_goal_seed=7)
+    assert a.goal == b.goal
+

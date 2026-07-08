@@ -226,3 +226,51 @@ def test_code_regime_system_prompt_does_not_leak_env_tools():
     prompt = _build_system_prompt(task, sys.executable)
     assert "observe" not in prompt  # env 专属工具不泄漏
     assert "read_text" in prompt    # code 工具仍在(tool 列表快照不变)
+
+
+# ---------- Phase B review 硬化:act 非法输入 / already_done 跳过 emit / CLI argparse ----------
+
+
+def test_dispatch_act_none_empty_nonstr_graceful():
+    """review opus(B2):act None/空串/非 str/缺 key → 优雅错误,不崩(strip/lower 前已 isinstance 守卫)。"""
+    env = GridWorld(size=3, start=(0, 0), goal=(2, 2))
+    with scoped_env(env):
+        for bad in (None, "", 123, ["right"], {"k": "v"}):
+            _, error = dispatch_tool(_tc("act", {"action": bad}))
+            assert error and ("action" in error or "非法" in error or "must be a string" in error), bad
+        _, error = dispatch_tool(_tc("act", {}))  # 缺 action key
+        assert error and "action" in error
+
+
+def test_dispatch_act_already_done_skips_emit(monkeypatch):
+    """review opus(B5):terminal 后冗余 act(already_done)不重复发 env.step 事件。"""
+    env = GridWorld(size=3, start=(0, 0), goal=(1, 0))
+    emits: list[dict] = []
+    monkeypatch.setattr(
+        "brainregion.sandbox.loop.emit_event",
+        lambda event_type, **kw: emits.append({"type": event_type, "kw": kw}),
+    )
+    with scoped_env(env):
+        dispatch_tool(_tc("act", {"action": "right"}))  # reach goal → emit 1
+        dispatch_tool(_tc("act", {"action": "right"}))  # already_done → skip emit
+    env_events = [e for e in emits if e["type"] == "env.step"]
+    assert len(env_events) == 1  # 只有 goal 那次,already_done 不发
+
+
+def test_sandbox_env_cli_argparse():
+    """review gpt(B4):sandbox env 子命令 argparse —— fog/random-goal/seed/visibility-radius/默认。"""
+    from brainregion.cli import build_parser
+
+    parser = build_parser()
+    ns = parser.parse_args([
+        "sandbox", "env", "--env", "gridworld", "--size", "6",
+        "--fog", "--random-goal", "--seed", "5", "--visibility-radius", "3",
+        "--main-brain", "deepseek-v4-flash", "--debug",
+    ])
+    assert ns.command == "sandbox" and ns.sandbox_command == "env"
+    assert ns.fog is True and ns.random_goal is True
+    assert ns.seed == 5 and ns.size == 6 and ns.visibility_radius == 3
+    assert ns.debug is True and ns.main_brain == "deepseek-v4-flash"
+
+    ns2 = parser.parse_args(["sandbox", "env", "--main-brain", "glm-5.2"])
+    assert ns2.fog is False and ns2.visibility_radius is None  # 默认全可见(Phase A 回归)

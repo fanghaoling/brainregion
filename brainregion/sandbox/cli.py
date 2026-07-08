@@ -370,12 +370,25 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit("--main-brain 必填(或配置 sandbox_main_brain)")
     model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
 
-    # 构造 env + 边界校验(constructor 校验 size/goal/walls;非法 → 干净退出,review gpt #17)
+    # 构造 env + 边界校验(constructor 校验 size/visibility_radius/goal/walls;非法 → 干净退出)
+    size = int(args.size)
+    fog = bool(getattr(args, "fog", False))
+    vis_radius = getattr(args, "visibility_radius", None)
+    if vis_radius is None and fog:
+        vis_radius = 2  # --fog 默认半径 2
+    goal_kw: dict[str, Any] = {"visibility_radius": vis_radius}
+    if bool(getattr(args, "random_goal", False)):
+        goal_kw["random_goal_seed"] = getattr(args, "seed", None) if getattr(args, "seed", None) is not None else 0
+    elif getattr(args, "goal_x", None) is not None and getattr(args, "goal_y", None) is not None:
+        goal_kw["goal"] = (int(args.goal_x), int(args.goal_y))
     try:
-        env = GridWorld(size=int(args.size), start=(0, 0), goal=(int(args.size) - 1, int(args.size) - 1))
+        env = GridWorld(size=size, start=(0, 0), **goal_kw)
     except ValueError as exc:
         raise SystemExit(f"env 构造非法: {exc}")
-    goal_text = args.goal_text or "到达目标 G(从 @ 出发,避开墙 #,走到 G)"
+    goal_text = args.goal_text or (
+        "找到并到达藏在网格里的目标 G(你只看得到周围,`?` 是未探索区,先探索再过去)" if fog
+        else "到达目标 G(从 @ 出发,避开墙 #,走到 G)"
+    )
     max_steps = int(args.max_steps or dd.get("sandbox_max_steps", 10))
     if max_steps < 1:
         raise SystemExit("--max-steps 须为正整数")
@@ -421,6 +434,7 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         "model": model, "size": env.size, "goal": goal_text,
         "solved": env.solved, "total_reward": env.total_reward,
         "n_steps": traj.n_steps, "termination": traj.termination_reason,
+        "visibility_radius": env.visibility_radius, "goal_pos": tuple(env.goal),
     }
     out_dir = Path(".brain-region") / "sandbox"
     out_dir.mkdir(parents=True, exist_ok=True)

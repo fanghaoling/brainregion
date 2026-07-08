@@ -294,7 +294,8 @@ def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
             if normalized not in vocab:
                 raise ValueError(f"act: 非法 action {action!r};合法:{list(vocab)}")
             obs, reward, terminated, info = env.step(normalized)
-            _emit_env_step(normalized, obs, reward, terminated, info)
+            if "already_done" not in info:  # review opus:done 后冗余 act 不重复发 env.step 事件
+                _emit_env_step(normalized, obs, reward, terminated, info)
             out = {
                 "observation": obs,
                 "reward": reward,
