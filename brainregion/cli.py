@@ -248,6 +248,25 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_vb.add_argument("--main-brain", default=None, help="主脑模型(默认 sandbox_main_brain 或 deepseek-v4-flash)")
     p_sb_vb.add_argument("--test-req", default=None, help="覆盖测试要求文本(默认取 task.goal)")
 
+    p_sb_env = p_sb_sub.add_parser(
+        "env",
+        help="env-regime(Phase A):主脑玩 GridWorld(文本渲染),observe/act 作 tool 复用 run_agent,"
+        "0/1 reward grounding;实时调试窗 + replay 回放",
+    )
+    p_sb_env.add_argument("--env", default="gridworld", choices=["gridworld"], help="env 名(Phase A 仅 gridworld)")
+    p_sb_env.add_argument("--size", type=int, default=5, help="网格边长(2..50,默认 5)")
+    p_sb_env.add_argument("--goal-text", default=None, help="目标描述(默认:到达目标 G)")
+    p_sb_env.add_argument("--arm", default="none", choices=["none", "brainregion"], help="顾问臂(Phase A 默认 none)")
+    p_sb_env.add_argument("--main-brain", default=None, help="主脑模型(deepseek-v4-flash / glm-5.2 等)")
+    p_sb_env.add_argument("--max-steps", type=int, default=None)
+    p_sb_env.add_argument("--max-cost-usd", type=float, default=None)
+    p_sb_env.add_argument("--max-tokens", type=int, default=None)
+    p_sb_env.add_argument("--thinking", default="off", choices=["off", "on"],
+                          help="DeepSeek 思考模式(off=关=便宜快非推理,默认;on=开+--effort)")
+    p_sb_env.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])
+    p_sb_env.add_argument("--debug", action="store_true",
+                          help="开调试窗(后台 serve_debug_dashboard,SSE 实时看 env.step 事件)")
+
     p_ins = sub.add_parser(
         "inspect",
         help="只读调试窗口（v5.x）：activation/memory/run/calibration 可观测面，不调模型不写",
@@ -765,6 +784,8 @@ def main() -> None:
             asyncio.run(sandbox_cli.run_eval(args))
         elif args.sandbox_command == "verify-brain":
             asyncio.run(sandbox_cli.verify_brain(args))
+        elif args.sandbox_command == "env":
+            asyncio.run(sandbox_cli.run_env(args))
         return
     if args.command == "inspect":
         run_inspect(args)

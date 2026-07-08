@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import json
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from brainregion.core.stages.parse import extract_json_object
 from brainregion.core.wake.gate import wake_gate
@@ -34,10 +36,46 @@ from .verify import verify_solution
 
 logger = logging.getLogger("brainregion.sandbox.loop")
 
+# code-regime + env-regime 工具并集。code agent 的 system prompt 不列 observe/act(硬编码 tools_doc),
+# 故 code agent 不知其存在;仅幻觉调用时会触发 → dispatch 显式报错(不崩)。parse_tool_call 用此集校验。
 ALLOWED_TOOLS = frozenset(
-    {"read_text", "search_text", "inspect_file", "apply_text_patch", "workspace_run_check", "list_allowed_roots"}
+    {"read_text", "search_text", "inspect_file", "apply_text_patch", "workspace_run_check", "list_allowed_roots",
+     "observe", "act"}
 )
 _RESULT_CAP_CHARS = 4000
+
+# env 注入(Phase A):observe/act 工具经此 ContextVar 读当前 env(仿 workspace.files.scoped_workspace_root)。
+# 默认 None = code-regime;observe/act 在 dispatch 显式报错(不崩)。env-loop 用 scoped_env 绑定。
+# 嵌套/并发各持各的 ContextVar 副本(隔离,不串台)。
+_current_env: ContextVar[Any] = ContextVar("_current_env", default=None)
+
+
+@contextmanager
+def scoped_env(env: Any):
+    """把 env 绑到当前 ContextVar(run_agent 的 observe/act 工具读它)。RAII:退出复位。"""
+    token = _current_env.set(env)
+    try:
+        yield env
+    finally:
+        _current_env.reset(token)
+
+
+def _emit_env_step(action: str, obs: str, reward: float, terminated: bool, info: dict) -> None:
+    """best-effort 调试窗事件(review 双强):debug server 未启/SSE 断/payload 不可序列化 → 记 warning,绝不毁 act。"""
+    try:
+        emit_event(
+            "env.step",
+            payload={
+                "action": action,
+                "reward": reward,
+                "terminated": terminated,
+                "done": terminated,
+                "info": info,
+                "frame": obs,
+            },
+        )
+    except Exception:  # noqa: BLE001 — 调试 sidecar,任何异常不毁主路径
+        logger.warning("env.step emit_event 失败(已忽略)", exc_info=True)
 
 
 @dataclass
@@ -239,6 +277,31 @@ def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
             if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
                 raise ValueError("'argv' must be a list of strings")
             out = workspace_run_check(argv)
+        elif call.tool == "observe":
+            env = _current_env.get()
+            if env is None:
+                raise RuntimeError("observe: 当前无 env(code-regime 不支持该工具)")
+            out = {"observation": env.render()}
+        elif call.tool == "act":
+            env = _current_env.get()
+            if env is None:
+                raise RuntimeError("act: 当前无 env(code-regime 不支持该工具)")
+            action = _req(call.args, "action")
+            if not isinstance(action, str):
+                raise ValueError("'action' must be a string")
+            normalized = action.strip().lower()
+            vocab = tuple(getattr(env, "action_vocab", ()))
+            if normalized not in vocab:
+                raise ValueError(f"act: 非法 action {action!r};合法:{list(vocab)}")
+            obs, reward, terminated, info = env.step(normalized)
+            _emit_env_step(normalized, obs, reward, terminated, info)
+            out = {
+                "observation": obs,
+                "reward": reward,
+                "terminated": terminated,
+                "info": info,
+                "solved": bool(getattr(env, "solved", False)),
+            }
         else:
             return "", "unreachable: unknown tool"
         return _compact(out), None
@@ -331,11 +394,17 @@ async def run_agent(
     brain_verify: bool = False,
     brain_delegate: bool = False,
     directive: str = "",
+    system_prompt: str | None = None,
+    verify_fn: Callable[..., dict] | None = None,
 ) -> Trajectory:
     """跑一个 agent loop。返回 Trajectory(含 verify 后的 solve_status)。
 
     ``directive``(外环 redelegate 注入,§15.1):非空时追加到初始 user message,作「上一轮差距」
     反馈给 expert。cap 1000 chars(限 LLM→LLM 注入面)。默认 "" = 单遍行为。
+
+    ``system_prompt`` / ``verify_fn``(Phase A env 注入,加性):非 None 时覆盖默认 code-regime
+    prompt(``_build_system_prompt``)/ verify(``verify_solution``)—— env-loop 用:注入 env 游戏 prompt
+    + env-grounded verify(返同 shape,``tests_green := env.solved``)。默认 None = code-regime 现行为。
     """
     import sys
 
@@ -345,7 +414,7 @@ async def run_agent(
     traj = Trajectory(task_id=task.id, arm=arm, gold_diff=task.gold_diff)
 
     with scoped_workspace_root(run_dir):
-        system = _build_system_prompt(task, python_exe)
+        system = system_prompt if system_prompt is not None else _build_system_prompt(task, python_exe)
         user_content = f"开始。目标:{task.goal}"
         if directive:  # 外环 redelegate 注入:上一轮验证差距;cap 1000 限注入面(C2),frame 标记由模板加
             user_content += (
@@ -440,7 +509,10 @@ async def run_agent(
 
         traj.n_steps = len(traj.steps)
         # verify:tests-green 定 solved(客观)。预算/解析失败优先于 tests_fail 作 solve_status。
-        verification = verify_solution(task, run_dir, python_exe=python_exe)
+        if verify_fn is not None:  # Phase A env 注入:env-grounded verify(tests_green := env.solved)
+            verification = verify_fn(task, run_dir, python_exe=python_exe)
+        else:
+            verification = verify_solution(task, run_dir, python_exe=python_exe)
         traj.tests_green = verification["tests_green"]
         if traj.tests_green:
             traj.solve_status = "solved"

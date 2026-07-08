@@ -20,11 +20,12 @@ from brainregion.providers.litellm import LiteLLMBackend
 from brainregion.server import _normalize_one, _resolve_endpoints
 
 from .eval import render_summary, run_sandbox_eval, write_report
+from .envs import GridWorld, build_env_system_prompt, write_replay_html
 from .fixtures import SANDBOX_FIXTURES, get_fixture, list_fixture_ids
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
-from .loop import run_agent, run_cognitive_loop
+from .loop import run_agent, run_cognitive_loop, scoped_env
 from .brain_verify import TraceResult, composite_verify, extract_final_patch, forced_trace
-from .task import WorktreeTask
+from .task import SandboxTask, WorktreeTask
 from .worktree import (
     bootstrap_worktree,
     capture_worktree_diff,
@@ -353,3 +354,84 @@ async def verify_brain(args: argparse.Namespace) -> dict[str, Any]:
     }
     print(json.dumps(out, ensure_ascii=False, indent=2))
     return out
+
+
+async def run_env(args: argparse.Namespace) -> dict[str, Any]:
+    """`brain-region sandbox env`(Phase A):主脑玩 GridWorld,observe/act 作 tool 复用 run_agent。
+
+    env-grounded verify(tests_green := env.solved);0/1 reward。--debug 开后台调试窗(SSE 实时看
+    env.step 事件);replay HTML 落 .brain-region/sandbox/。成功标准 = loop 干净终止 + 事件流 + replay 写出
+    (solved 是信号非闸:0/1 稀疏 → solved=False 常态,Phase A 不要求解出)。
+    """
+    dd = _defaults_mod.apply()
+    backend, registry = _build_backend(dd)
+    model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
+    if not model_str:
+        raise SystemExit("--main-brain 必填(或配置 sandbox_main_brain)")
+    model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
+
+    # 构造 env + 边界校验(constructor 校验 size/goal/walls;非法 → 干净退出,review gpt #17)
+    try:
+        env = GridWorld(size=int(args.size), start=(0, 0), goal=(int(args.size) - 1, int(args.size) - 1))
+    except ValueError as exc:
+        raise SystemExit(f"env 构造非法: {exc}")
+    goal_text = args.goal_text or "到达目标 G(从 @ 出发,避开墙 #,走到 G)"
+    max_steps = int(args.max_steps or dd.get("sandbox_max_steps", 10))
+    if max_steps < 1:
+        raise SystemExit("--max-steps 须为正整数")
+
+    # --debug:后台开调试窗(用户实时看 env.step 事件进 SSE 时间线)
+    if getattr(args, "debug", False):
+        import threading
+        from brainregion.viz import DebugDashboardOptions, serve_debug_dashboard
+        opts = DebugDashboardOptions(goal=goal_text, problem=goal_text, refresh_ms=1000)
+        threading.Thread(
+            target=serve_debug_dashboard, args=(opts,), kwargs={"open_browser": True}, daemon=True
+        ).start()
+
+    task = SandboxTask(id=f"env-{env.size}x{env.size}", goal=goal_text)
+
+    def verify(t, run_dir, *, python_exe=None):  # env-grounded,返完整 verify_solution shape
+        return {
+            "tests_green": bool(env.solved),
+            "solve_status": "solved" if env.solved else "tests_fail",
+            "pytest": None,
+            "gold_diff": getattr(t, "gold_diff", ""),
+        }
+
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            traj = await run_agent(
+                backend, model, task, run_dir=run_dir, arm=args.arm,
+                max_steps=max_steps,
+                max_cost_usd=float(args.max_cost_usd or dd.get("sandbox_max_cost_usd", 0.5)),
+                temperature=float(dd.get("sandbox_temperature", 0.0)),
+                max_tokens=int(args.max_tokens or 2048),
+                consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
+                transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
+                endpoint_id=endpoint_id, thinking=_thinking_arg(args), effort=args.effort,
+                system_prompt=build_env_system_prompt(env, goal_text), verify_fn=verify,
+            )
+    finally:
+        cleanup_run_dir(run_dir)
+
+    run_id = f"env-{int(time.time() * 1000)}"
+    meta = {
+        "model": model, "size": env.size, "goal": goal_text,
+        "solved": env.solved, "total_reward": env.total_reward,
+        "n_steps": traj.n_steps, "termination": traj.termination_reason,
+    }
+    out_dir = Path(".brain-region") / "sandbox"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    replay_path = write_replay_html(out_dir / f"{run_id}.html", env.frames, meta)  # 显式 utf-8
+
+    result = {
+        "run_id": run_id, "model": model, "solved": env.solved,
+        "total_reward": env.total_reward, "n_steps": traj.n_steps,
+        "termination": traj.termination_reason, "tests_green": traj.tests_green,
+        "cost_usd": round(traj.total_main_cost_usd + traj.total_arm_cost_usd, 6),
+        "replay": str(replay_path),
+    }
+    print(json.dumps(result, ensure_ascii=False, indent=2))
+    return result

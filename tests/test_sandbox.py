@@ -223,8 +223,11 @@ def test_parse_no_json_returns_error():
 
 
 def test_allowed_tools_exact():
+    # observe/act = Phase A env-regime 工具(union);code agent 的 system prompt 不列它们(不泄漏),
+    # 仅幻觉调用时触发 → dispatch 显式报错(见 test_sandbox_env_loop)。
     assert ALLOWED_TOOLS == frozenset(
-        {"read_text", "search_text", "inspect_file", "apply_text_patch", "workspace_run_check", "list_allowed_roots"}
+        {"read_text", "search_text", "inspect_file", "apply_text_patch", "workspace_run_check",
+         "list_allowed_roots", "observe", "act"}
     )
 
 
