@@ -412,9 +412,6 @@ async def _recall_via_region(
     model: str,
     *,
     env: Any,
-    positions: list,
-    attempts: list,
-    query: str,
     endpoint_id: str | None,
     thinking: bool | None,
     effort: str | None,
@@ -424,12 +421,11 @@ async def _recall_via_region(
     max_cost_usd: float,
     traj: Any,
 ) -> tuple[str, str | None]:
-    """Phase D:recall_map 经记忆脑区 LLM(region-as-tool)。
+    """Phase D.2:recall_map 经记忆脑区 LLM(region-as-tool,有状态自给)。
 
-    成功 → ``{"map": env.render(), "interpretation": ..., "region": True}``(raw map 永在 → region 臂 =
-    基线**信息超集**,干净归因)。超 recall-cap / 预算不足 / 调用失败 → **降级** Phase C
-    (``{"map", explored_cells, of_total, region_degraded}``;不推进 env/不追加 path/不重复计费)。
-    成功时 cost 记 ``traj.total_main_cost_usd``;降级不计费。返 ``(result_str, exec_err)``。
+    成功 → ``{"rough_position": pose, "rough_map": <定性理解>, "region": True}``(事务性替换 rough_map)。
+    超 recall-cap / 预算不足 / 调用/解析失败 → **降级** Phase C(``{"map": env.render(), ...,
+    region_degraded}``;**不替换 rough_map** → 事务性保留上一个有效值)。成功 cost 记 main;降级不计费。
     """
     if recall_count >= max_recalls or spent >= max_cost_usd:
         out = {
@@ -441,15 +437,17 @@ async def _recall_via_region(
         return _compact(out), None
     try:
         res = await memory_region.reason(
-            backend, model,
-            spatial=env.render(), positions=positions, attempts=attempts,
-            current_view=env.observation(), query=query,
+            backend, model, env.relative_view(),
             endpoint_id=endpoint_id, thinking=thinking, effort=effort,
         )
         traj.total_main_cost_usd += float(res.get("cost_usd", 0.0) or 0.0)
-        out = {"map": env.render(), "interpretation": res.get("interpretation", ""), "region": True}
+        out = {
+            "rough_position": list(memory_region.pose),
+            "rough_map": res.get("rough_map", ""),
+            "region": True,
+        }
         return _compact(out), None
-    except Exception as exc:  # noqa: BLE001 — 失败隔离:降级 Phase C,不崩主 run(review consensus/gpt)
+    except Exception as exc:  # noqa: BLE001 — 失败隔离:降级 Phase C,不崩主 run;事务性保留 rough_map(reason 内未替换)
         logger.warning("memory region reason 失败,降级 env.render()", exc_info=True)
         out = {
             "map": env.render(),
@@ -505,11 +503,9 @@ async def run_agent(
     cap_chars = max(2000, int(transcript_token_cap) * 4)
     traj = Trajectory(task_id=task.id, arm=arm, gold_diff=task.gold_diff)
 
-    # Phase D 记忆脑区(env 模式):positions(实际到过)/attempts(每次尝试,含失败)分轨 + recall 计数。
-    # _env 经 ContextVar(runner 的 scoped_env 已设);非 env 模式 _env=None → 这些特性全 no-op。
+    # Phase D.2 记忆脑区(env 模式,有状态):region 自维护 pose/movement_log/rough_map;此处仅 recall 计数。
+    # _env 经 ContextVar(runner 的 scoped_env 已设);非 env 模式 _env=None → region 特性全 no-op。
     _env = _current_env.get()
-    _positions: list = [tuple(_env.start)] if (memory_region is not None and _env is not None) else []
-    _attempts: list = []
     _recall_count = 0
     _max_recalls = int(max_recall_calls) if max_recall_calls is not None else int(max_steps)
 
@@ -588,31 +584,31 @@ async def run_agent(
                 emit_event("sandbox.step", payload={"task_id": task.id, "arm": arm, "step": step, "done": True})
                 break
 
-            # Phase D 记忆脑区:recall_map 在 region 臂调专用 LLM(region-as-tool);否则走 dispatch(Phase C)。
+            # Phase D.2 记忆脑区(有状态):recall → region.reason(相对视野);合法 act 后 region.update(dead-reckon)。
             _act_before = _env._agent if (call.tool == "act" and _env is not None) else None
             if call.tool == "recall_map" and memory_region is not None and _env is not None:
                 result_str, exec_err = await _recall_via_region(
-                    memory_region, backend, model, env=_env, positions=_positions, attempts=_attempts,
-                    query=str(call.args), endpoint_id=endpoint_id, thinking=thinking, effort=effort,
+                    memory_region, backend, model, env=_env,
+                    endpoint_id=endpoint_id, thinking=thinking, effort=effort,
                     recall_count=_recall_count, max_recalls=_max_recalls,
                     spent=traj.total_main_cost_usd + traj.total_arm_cost_usd, max_cost_usd=max_cost_usd, traj=traj,
                 )
                 _recall_count += 1
             else:
                 result_str, exec_err = dispatch_tool(call)
-            # act 分轨:位置 delta 判 status(blocked/invalid/already_done 天然不入 positions → 打转可判)
-            if _act_before is not None:
+            # act 后 dead-reckon:仅合法 act(moved/blocked/already_done)update;invalid 跳过 → pose 不失步
+            if _act_before is not None and memory_region is not None:
                 _after = _env._agent
                 if exec_err:
                     _status = "invalid"
                 elif _after != _act_before:
                     _status = "moved"
-                    _positions.append(_after)
                 elif getattr(_env, "_terminated", False):
                     _status = "already_done"
                 else:
                     _status = "blocked"
-                _attempts.append({"from": list(_act_before), "action": call.args.get("action"), "status": _status, "to": list(_after)})
+                if _status != "invalid":
+                    memory_region.update(call.args.get("action"), _status, _env.relative_view())
             consecutive_errors = 0  # 成功(或可执行)解析 → 重置(连续错误是针对 parse/模型失败)
             preview = (result_str or exec_err or "")[:300]
             traj.steps.append(StepRecord(

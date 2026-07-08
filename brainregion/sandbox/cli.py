@@ -428,9 +428,9 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         }
 
     memory_region = None
-    if memory_region_on:  # Phase D:recall_map 改由记忆脑区 LLM 推理(region-as-tool)
+    if memory_region_on:  # Phase D.2:有状态记忆脑区(代码 dead-reckon + LLM rough_map)
         from brainregion.sandbox.regions import MemoryRegion
-        memory_region = MemoryRegion()
+        memory_region = MemoryRegion(start=env.start, log_len=int(getattr(args, "memory_log_len", 32) or 32))
 
     run_dir = make_run_dir()
     try:

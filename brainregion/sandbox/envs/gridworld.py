@@ -229,6 +229,32 @@ class GridWorld:
         self.frames.append(self.render())
         return self.observation(), 0.0, False, {}
 
+    def relative_view(self) -> str:
+        """agent-centered (2r+1)×(2r+1) 视野 patch(**无绝对坐标**;出界/视野外 `?`)。Phase D.2 region 用:
+        逼 dead-reckon(不泄漏 abs 位置 → region 的 pose 是唯一位置源,忠实「惯性导航」+ 实验干净)。
+        radius=None(全可见)时返 render()(此情况无 fog,abs 无意义;region 模式恒有 radius)。"""
+        r = self.visibility_radius
+        if r is None:
+            return self.render()
+        rows: list[str] = []
+        for dy in range(-r, r + 1):
+            chars = []
+            for dx in range(-r, r + 1):
+                cell = (self._agent[0] + dx, self._agent[1] + dy)
+                if not self._in_grid(cell):
+                    chars.append(_FOG)  # 出界 → ?
+                    continue
+                if cell == self._agent:
+                    chars.append(_AGENT)
+                elif cell == self.goal:
+                    chars.append(_GOAL)
+                elif cell in self.walls:
+                    chars.append(_WALL)
+                else:
+                    chars.append(_FLOOR)
+            rows.append("".join(chars))
+        return "\n".join(rows)
+
     def render_visible(self) -> str:
         """当前 Chebyshev 视野 only(不含历史探索);无 fog(radius None)时 == render()。Phase C 严格观察用。"""
         r = self.visibility_radius
