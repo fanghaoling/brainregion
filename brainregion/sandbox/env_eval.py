@@ -77,6 +77,7 @@ class EnvArm:
     memory_region: bool = False        # --memory-region 有状态脑区
     strategy: str = "none"             # "none" | "real" | "echo" | "dummy"(echo=主脑自产无LLM;dummy=同源同成本固定模板)
     metronome: bool = False            # Phase 4.1 push 臂:无 pull 工具,节拍器每 N 步推脑区状态(清测内容价值)
+    visual_ephemeral: bool = False     # Phase 4.2:剥历史视觉观察出 transcript(只留最新);逼主脑调脑区拿历史
 
 
 # 预设 = 常用比较的糖(CLI 也可 --arm 显式给 feature-config)
@@ -94,11 +95,17 @@ ARMS_METRONOME: tuple[EnvArm, ...] = (        # Phase 4.1 push:清测脑区内�
     EnvArm("push_dummy", memory_region=True, strategy="dummy", metronome=True),   # 主控制:同源同成本固定模板
     EnvArm("push_echo",  memory_region=True, strategy="echo",  metronome=True),   # 次要:self-reminder 分析
 )
+ARMS_EPHEMERAL: tuple[EnvArm, ...] = (        # Phase 4.2:剥视觉出 transcript,测脑区是否变必需(GPT#2:真记忆为主对照)
+    EnvArm("eph_memregion", memory_region=True, visual_ephemeral=True),   # 主:真记忆(recall_map→rough_map 不完美)
+    EnvArm("eph_noregion",  visual_ephemeral=True),                       # 基线:仅当前视野,无记忆
+    EnvArm("eph_region",    memory_tool=True,  visual_ephemeral=True),    # 上界:recall_map→env.render() 完美 oracle
+)
 ARM_PRESETS: dict[str, tuple[EnvArm, ...]] = {
     "memory-strategy": ARMS_MEMORY_STRATEGY,
     "memory-baseline": ARMS_MEMORY_BASELINE,
     "metronome": ARMS_METRONOME,
-    "all": ARMS_MEMORY_STRATEGY + ARMS_MEMORY_BASELINE + ARMS_METRONOME,
+    "ephemeral": ARMS_EPHEMERAL,
+    "all": ARMS_MEMORY_STRATEGY + ARMS_MEMORY_BASELINE + ARMS_METRONOME + ARMS_EPHEMERAL,
 }
 
 
@@ -295,11 +302,12 @@ async def _run_one_episode(
     """
     env = build_env_for_config(cfg)
     memory_region, strategy_region, memory_mode = build_regions_for_arm(arm, env, log_len=log_len)
-    # goal_text 臂感知:push 臂不提 pull 工具;memory_only 不提 plan;real/echo 提 plan。
+    # goal_text 臂感知:push 臂不提 pull 工具;无记忆臂(noregion)不提 recall_map;real/echo 提 plan。
     if arm.metronome:
         goal_text = "找到并到达藏在网格里的目标 G(observe 只看当前视野;每几步收到脑区背景状态作参考;先探索再过去)"
     else:
-        tools_hint = "recall_map 拿累积探索图/记忆理解"
+        has_memory = arm.memory_tool or arm.memory_region
+        tools_hint = "recall_map 拿累积探索图/记忆理解" if has_memory else "靠当前视野探索"
         if arm.strategy in ("real", "echo"):
             tools_hint += ",plan 拿策略意图"
         goal_text = f"找到并到达藏在网格里的目标 G(observe 只看当前视野,{tools_hint};先探索拼图再过去)"
@@ -333,13 +341,15 @@ async def _run_one_episode(
                     endpoint_id=endpoint_id, thinking=thinking, effort=effort,
                     system_prompt=build_env_system_prompt(
                         env, goal_text,
-                        memory=not arm.metronome,                        # push 臂:无 recall_map(memory=False)
+                        memory=(arm.memory_tool or arm.memory_region) and not arm.metronome,  # 有 recall_map 才 memory=True
                         strategy=(not arm.metronome and arm.strategy in ("real", "echo")),
                         metronome=arm.metronome,
+                        # ephemeral 不改 prompt(GPT #5:不强调「你会忘」,现有 memory prompt 已说 observe=当前/recall_map=历史)
                     ),
                     verify_fn=verify,
                     memory_region=memory_region, strategy_region=run_strategy_region,
                     status_injector=injector, status_period=status_period,
+                    visual_ephemeral=arm.visual_ephemeral,
                 )
     finally:
         cleanup_run_dir(run_dir)

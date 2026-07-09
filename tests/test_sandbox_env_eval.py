@@ -36,7 +36,14 @@ from brainregion.sandbox.env_eval import (
     write_report,
 )
 from brainregion.sandbox.envs import GridWorld
-from brainregion.sandbox.loop import run_agent, scoped_env, scoped_memory_mode
+from brainregion.sandbox.loop import (
+    _append_ephemeral_result,
+    _split_visual,
+    _strip_past_visual,
+    run_agent,
+    scoped_env,
+    scoped_memory_mode,
+)
 from brainregion.sandbox.regions import MemoryRegion, StrategyRegion
 from brainregion.sandbox.regions.strategy_region import _strip_to_thought
 from brainregion.sandbox import cleanup_run_dir, make_run_dir
@@ -551,3 +558,130 @@ def test_status_fence_token_sanitized():
     assert region_msg.count("<region_status>") == 1
     assert region_msg.count("</region_status>") == 1
     assert "忽略规则" in region_msg  # 内容保留(只剥 fence token,不删内容)—— 主脑当数据读,非指令
+
+
+# ---------- Phase 4.2 visual_ephemeral ----------
+
+
+def test_split_visual_act_observe_defensive():
+    """review consensus MED:拆 observation 出 act/observe;防御 malformed/缺 key/error。"""
+    # act:含 observation + outcome → 拆
+    outcome, visual = _split_visual('{"observation": "网格", "reward": 0, "terminated": false, "info": {}, "solved": false}')
+    assert visual == "网格"
+    assert '"observation"' not in outcome and '"reward"' in outcome
+    # observe:仅 observation → outcome 为 {}
+    outcome, visual = _split_visual('{"observation": "网格"}')
+    assert visual == "网格" and outcome == "{}"
+    # 缺 observation → 不拆
+    assert _split_visual('{"reward": 0}') == ('{"reward": 0}', None)
+    # malformed JSON → 不拆
+    assert _split_visual("not json") == ("not json", None)
+    # error 结果(非 JSON)→ 不拆
+    assert _split_visual("RuntimeError: recall_map 未激活")[1] is None
+
+
+def test_strip_past_visual_keeps_latest_only():
+    """review consensus HIGH:剥历史 <visual> 只留最新;<tool_result>/thoughts 不动。"""
+    msgs = [
+        {"role": "system", "content": "s"},
+        {"role": "assistant", "content": "t1"},
+        {"role": "user", "content": "<visual>\n旧视野1\n</visual>"},
+        {"role": "user", "content": '<tool_result tool="act">\n{"reward":0}\n</tool_result>'},  # act 动作结果(持久)
+        {"role": "user", "content": "<visual>\n旧视野2\n</visual>"},
+        {"role": "user", "content": "<visual>\n最新视野\n</visual>"},
+    ]
+    _strip_past_visual(msgs)
+    vis = [m for m in msgs if "<visual>" in m["content"]]
+    assert len(vis) == 1 and "最新视野" in vis[0]["content"]      # 只留最新
+    assert any('tool="act"' in m["content"] for m in msgs)       # act 动作结果存活
+    assert any(m["role"] == "assistant" for m in msgs)           # thoughts 存活
+
+
+def test_append_ephemeral_result_act_two_messages_observe_one():
+    """act → outcome <tool_result>(无 obs)+ visual <visual>;observe → 仅 <visual>。"""
+    msgs = []
+    _append_ephemeral_result(msgs, "act",
+                             '{"observation": "网格", "reward": 1, "terminated": true, "info": {}, "solved": true}', None)
+    assert len(msgs) == 2
+    assert 'tool="act"' in msgs[0]["content"] and "网格" not in msgs[0]["content"]  # outcome 无 obs
+    assert msgs[1]["content"].startswith("<visual>") and "网格" in msgs[1]["content"]
+    # observe → 仅 <visual>(outcome {} 不追加)
+    msgs = []
+    _append_ephemeral_result(msgs, "observe", '{"observation": "网格"}', None)
+    assert len(msgs) == 1 and msgs[0]["content"].startswith("<visual>")
+
+
+def test_visual_ephemeral_run_agent_strips_history():
+    """run_agent visual_ephemeral:多步 act → messages 仅最新 <visual>;act 动作结果持久。"""
+    env = GridWorld(size=8, start=(0, 0), goal=(7, 0), visibility_radius=1, strict_obs=True)
+    captured = []
+
+    class _Rec:
+        async def complete_messages(self, messages, **kw):
+            captured.append([m["content"] for m in messages])
+            return ModelResponse(model="m", content=_J({"thought": "走", "tool": "act", "args": {"action": "right"}}),
+                                 usage={}, cost_usd=0.0)
+
+    task = SandboxTask(id="t", goal="g")
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env), scoped_memory_mode():
+            asyncio.run(run_agent(
+                _Rec(), "m", task, run_dir=run_dir, arm="none", max_steps=6,
+                system_prompt=build_env_system_prompt(env, "g", memory=True),
+                verify_fn=_make_env_verify(env), visual_ephemeral=True,
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+    # 最后一次 complete_messages 收到的 messages:仅 1 条 <visual>(最新);多条 act <tool_result>(动作历史)
+    last = captured[-1]
+    vis = [c for c in last if c.startswith("<visual>")]
+    assert len(vis) == 1                          # 只留最新视觉
+    assert sum(1 for c in last if 'tool="act"' in c) >= 2   # 历史 act 动作结果存活(consensus HIGH)
+
+
+def test_visual_ephemeral_false_zero_regression():
+    """visual_ephemeral=False → 标准 <tool_result>(act 含 observation)、无 <visual>、不剥。"""
+    env = GridWorld(size=6, start=(0, 0), goal=(5, 0), visibility_radius=1, strict_obs=True)
+    captured = []
+
+    class _Rec:
+        async def complete_messages(self, messages, **kw):
+            captured.append([m["content"] for m in messages])
+            return ModelResponse(model="m", content=_J({"thought": "走", "tool": "act", "args": {"action": "right"}}),
+                                 usage={}, cost_usd=0.0)
+
+    task = SandboxTask(id="t", goal="g")
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env), scoped_memory_mode():
+            asyncio.run(run_agent(
+                _Rec(), "m", task, run_dir=run_dir, arm="none", max_steps=4,
+                system_prompt=build_env_system_prompt(env, "g", memory=True),
+                verify_fn=_make_env_verify(env),  # visual_ephemeral 默认 False
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+    last = captured[-1]
+    assert not any(c.startswith("<visual>") for c in last)          # 无 <visual>
+    assert any(c.startswith("<tool_result>") and "observation" in c for c in last)  # act 含 observation(标准)
+
+
+def test_eph_arms_assembly():
+    from brainregion.sandbox.env_eval import ARMS_EPHEMERAL
+    names = [a.name for a in ARMS_EPHEMERAL]
+    assert names == ["eph_memregion", "eph_noregion", "eph_region"]
+    assert all(a.visual_ephemeral for a in ARMS_EPHEMERAL)
+    assert ARMS_EPHEMERAL[0].memory_region and not ARMS_EPHEMERAL[1].memory_tool and ARMS_EPHEMERAL[2].memory_tool
+
+
+def test_run_env_eval_ephemeral_plumbing():
+    """end-to-end:eph 三臂 × 小 configs × repeats → 报告含三臂。"""
+    configs = [EnvConfig(size=5, seed=1, visibility_radius=1), EnvConfig(size=5, seed=2, visibility_radius=1)]
+    arms = (EnvArm("eph_memregion", memory_region=True, visual_ephemeral=True),
+            EnvArm("eph_noregion", visual_ephemeral=True))
+    report = asyncio.run(run_env_eval(
+        _GiveUpBackend(), "mock", configs, arms, repeats=2, max_cost_usd=2.0, log_progress=False,
+    ))
+    assert set(report["per_arm"]) == {"eph_memregion", "eph_noregion"}
+    assert len(report["runs"]) == 2 * 2 * 2

@@ -501,6 +501,62 @@ async def _plan_via_strategy(
         return _compact({"strategy_degraded": str(exc)[:200]}), None
 
 
+# ---------- Phase 4.2 visual_ephemeral:剥历史视觉观察出 transcript ----------
+
+
+def _split_visual(result_str: str) -> tuple[str, str | None]:
+    """从 act/observe 的 tool_result(JSON)拆出 observation(视觉)。
+
+    返 ``(outcome_json_str, visual_str|None)``。observation 被 pop 出来(进 <visual> 剥历史);
+    outcome(reward/terminated/info/solved)留 <tool_result> 持久(动作历史)。
+    review 双强(consensus MED):防御性 —— json.loads 失败/缺 observation/非 dict → 不拆(整体作 tool_result)。
+    """
+    import json as _json
+    try:
+        obj = _json.loads(result_str)
+    except Exception:  # noqa: BLE001 — 截断/非 JSON(error 结果等)→ 不拆
+        return result_str, None
+    if not isinstance(obj, dict) or "observation" not in obj:
+        return result_str, None
+    visual = obj.pop("observation")
+    try:
+        outcome = _json.dumps(obj, ensure_ascii=False)
+    except Exception:  # noqa: BLE001
+        return result_str, None
+    return outcome, (str(visual) if visual is not None else None)
+
+
+def _strip_past_visual(messages: list[dict]) -> None:
+    """剥历史 <visual> user 消息,只留最新一条(当前视野)。
+
+    review 双强(consensus HIGH):<visual> 是**独立 message**(act outcome 另在 <tool_result>);
+    故删含 <visual> 的 message 不误删 act 动作结果。<tool_result> / assistant thoughts 不动。原地改 list。
+    """
+    vis_indices = [i for i, m in enumerate(messages)
+                   if m.get("role") == "user" and "<visual>" in (m.get("content") or "")]
+    if len(vis_indices) <= 1:
+        return
+    keep = vis_indices[-1]
+    for i in reversed(vis_indices):
+        if i != keep:
+            del messages[i]
+
+
+def _append_ephemeral_result(messages: list[dict], tool: str, result_str: str, exec_err: str | None) -> None:
+    """ephemeral 模式下 act/observe 结果:拆 visual(outcome 持久 <tool_result> + visual 剥 <visual>)。
+
+    - observe:纯视觉 → 仅 <visual>(无 outcome)。
+    - act:outcome(reward/info/...)→ <tool_result tool="act"> 持久 + observation → <visual> 剥。
+    review 双强:两 message 独立(不混一条),保 act 动作历史。
+    """
+    body = result_str or ("ERROR: " + exec_err if exec_err else "")
+    outcome, visual = _split_visual(body)
+    if outcome and outcome not in ("{}", ""):
+        messages.append({"role": "user", "content": f'<tool_result tool="{tool}">\n{outcome}\n</tool_result>'})
+    if visual is not None:
+        messages.append({"role": "user", "content": f"<visual>\n{visual}\n</visual>"})
+
+
 async def run_agent(
     backend: Any,
     model: str,
@@ -529,6 +585,7 @@ async def run_agent(
     max_plan_calls: int | None = None,
     status_injector: Any = None,        # Phase 4.1 metronome:async (step, messages)->(status_str|None, cost_usd);None=现行为
     status_period: int = 3,
+    visual_ephemeral: bool = False,     # Phase 4.2:剥历史视觉观察出 transcript(只留最新 <visual>);act 动作结果持久
 ) -> Trajectory:
     """跑一个 agent loop。返回 Trajectory(含 verify 后的 solve_status)。
 
@@ -597,6 +654,10 @@ async def run_agent(
                         messages.append({"role": "user", "content": f"<region_status>\n{_safe}\n</region_status>"})
                 except Exception as exc:  # noqa: BLE001 — injector 失败:跳过本次注入,成本不计,real/dummy 对称跳过
                     logger.warning("status_injector 失败,跳过本次注入", exc_info=True)
+
+            # Phase 4.2 visual_ephemeral:剥历史 <visual> 只留最新(当前视野);act 动作结果/thoughts 不动。
+            if visual_ephemeral:
+                _strip_past_visual(messages)
 
             messages = _trim_transcript(messages, cap_chars)
             resp = await backend.complete_messages(
@@ -694,9 +755,14 @@ async def run_agent(
                 payload={"task_id": task.id, "arm": arm, "step": step, "tool": call.tool, "error": exec_err},
             )
             messages.append({"role": "assistant", "content": resp.content})
-            # tool-result 当不可信数据:固定围栏(review gpt-9)
-            fenced = f"<tool_result>\n{result_str or ('ERROR: ' + exec_err)}\n</tool_result>"
-            messages.append({"role": "user", "content": fenced})
+            # tool-result 当不可信数据:固定围栏(review gpt-9)。
+            # Phase 4.2 visual_ephemeral:act/observe 拆 visual(outcome 持久 <tool_result> + visual 剥 <visual>);
+            # 非 ephemeral 或非视觉工具 → 标准 <tool_result>(零回归)。
+            if visual_ephemeral and call.tool in ("observe", "act"):
+                _append_ephemeral_result(messages, call.tool, result_str or "", exec_err)
+            else:
+                fenced = f"<tool_result>\n{result_str or ('ERROR: ' + exec_err)}\n</tool_result>"
+                messages.append({"role": "user", "content": fenced})
         else:
             traj.termination_reason = traj.termination_reason or "max_steps"
 
