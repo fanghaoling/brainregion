@@ -79,6 +79,7 @@ class EnvArm:
     metronome: bool = False            # Phase 4.1 push 臂:无 pull 工具,节拍器每 N 步推脑区状态(清测内容价值)
     visual_ephemeral: bool = False     # Phase 4.2:剥历史视觉观察出 transcript(只留最新);逼主脑调脑区拿历史
     registry: str = "none"             # Phase 4.3 脑区注册表块:"none"|"cap"(仅能力)|"full"(能力+客观触发)
+    memory_dummy: bool = False         # Phase 4.4:matched-source dummy 记忆(同 LLM 调用,固定 content-free rough_map)
 
 
 # 预设 = 常用比较的糖(CLI 也可 --arm 显式给 feature-config)
@@ -106,13 +107,19 @@ ARMS_REGISTRY: tuple[EnvArm, ...] = (         # Phase 4.3:脑区注册表块,测
     EnvArm("eph_memregion_regcap", memory_region=True, visual_ephemeral=True, registry="cap"),   # 仅能力(显著性)
     EnvArm("eph_memregion_reg",    memory_region=True, visual_ephemeral=True, registry="full"),  # 能力+客观触发
 )
+ARMS_CONTENT: tuple[EnvArm, ...] = (          # Phase 4.4:内容价值隔离(ephemeral + registry-cap 甜点,real vs matched-dummy)
+    EnvArm("eph_memregion",    memory_region=True, visual_ephemeral=True),                 # 无 registry baseline(n_recall≈0,anchor)
+    EnvArm("eph_regcap_real",  memory_region=True, visual_ephemeral=True, registry="cap"), # 真 LLM rough_map 内容
+    EnvArm("eph_regcap_dummy", memory_region=True, visual_ephemeral=True, registry="cap", memory_dummy=True),  # 同源同成本固定 content-free
+)
 ARM_PRESETS: dict[str, tuple[EnvArm, ...]] = {
     "memory-strategy": ARMS_MEMORY_STRATEGY,
     "memory-baseline": ARMS_MEMORY_BASELINE,
     "metronome": ARMS_METRONOME,
     "ephemeral": ARMS_EPHEMERAL,
     "registry": ARMS_REGISTRY,
-    "all": ARMS_MEMORY_STRATEGY + ARMS_MEMORY_BASELINE + ARMS_METRONOME + ARMS_EPHEMERAL + ARMS_REGISTRY,
+    "content": ARMS_CONTENT,
+    "all": ARMS_MEMORY_STRATEGY + ARMS_MEMORY_BASELINE + ARMS_METRONOME + ARMS_EPHEMERAL + ARMS_REGISTRY + ARMS_CONTENT,
 }
 
 
@@ -143,7 +150,7 @@ def build_regions_for_arm(
     echo→EchoStrategy,none→None。
     """
     memory_mode = arm.memory_tool or arm.memory_region
-    memory_region = MemoryRegion(start=env.start, log_len=log_len) if arm.memory_region else None
+    memory_region = MemoryRegion(start=env.start, log_len=log_len, dummy=arm.memory_dummy) if arm.memory_region else None
     if arm.strategy in ("real", "dummy"):
         strategy_region: Any = StrategyRegion()   # dummy 用真 StrategyRegion(injector 调它 match real 的 2 次调用成本,丢输出)
     elif arm.strategy == "echo":
@@ -272,6 +279,24 @@ def _coverage(env: GridWorld) -> float | None:
     return min(1.0, explored / denom)
 
 
+def _n_recall_degraded(traj: Any) -> int:
+    """Phase 4.4:recall 降级数(parse/budget 失败 → ``_recall_via_region`` 降级 env.render() oracle 完美图)。
+
+    review 双强(opus-0/gpt-5.5-2):降级 episode 两臂都拿 oracle → 对「内容价值」零贡献,把 Δsolve 拉向 0
+    (系统性偏向「内容无用」)。须记录 + 报告,高降级率时 Δ 只在非降级子集上解读。
+
+    判定 = recall_map 步中 result_preview **不含** ``rough_map`` 键(成功路径第 2 键,恒在 preview 前 ~30 字符;
+    降级路径返 ``map``/``region_degraded`` 无 ``rough_map``)。稳健(不靠末尾的 ``region_degraded`` 键,大网格不截断)。
+    """
+    n = 0
+    for s in traj.steps:
+        if s.tool != "recall_map":
+            continue
+        if "rough_map" not in (s.result_preview or ""):
+            n += 1
+    return n
+
+
 # region_status 被主脑引用的标记(review 双强:收紧为 status 专属标签,去通用词「意图/脑区/地图理解」假阳)。
 # real/dummy 注入串都含「记忆脑区/策略脑区」标签(_format_status/_DUMMY_STATUS),故两臂同标签基线;
 # thought 引用这些 status 专属词 → 视为「读了注入的 status」。
@@ -363,12 +388,14 @@ async def _run_one_episode(
         cleanup_run_dir(run_dir)
 
     positions = _positions_from_traj(traj, env)
+    n_recall = sum(1 for s in traj.steps if s.tool == "recall_map")
     return {
         "config": cfg.label, "arm": arm.name,
         "solved": bool(traj.tests_green), "steps": traj.n_steps,
         "cost": round(traj.total_main_cost_usd + traj.total_arm_cost_usd, 6),
         "termination": traj.termination_reason,
-        "n_recall": sum(1 for s in traj.steps if s.tool == "recall_map"),
+        "n_recall": n_recall,
+        "n_recall_degraded": _n_recall_degraded(traj),   # Phase 4.4:降级数(oracle fallback 稀释内容信号)
         "n_plan": sum(1 for s in traj.steps if s.tool == "plan"),
         "revisit_rate": _revisit_rate(positions),
         "coverage": _coverage(env),
@@ -393,6 +420,7 @@ def _agg_arm_runs(arm_runs: list[dict]) -> dict:
         "mean_steps": _mean("steps"), "mean_cost": _mean("cost"),
         "mean_revisit_rate": _mean("revisit_rate"), "mean_coverage": _mean("coverage"),
         "mean_n_plan": _mean("n_plan"), "mean_n_recall": _mean("n_recall"),
+        "mean_n_recall_degraded": _mean("n_recall_degraded"),   # Phase 4.4:oracle 降级稀释内容信号
         "mean_status_referenced": _mean("status_referenced"),   # Phase 4.1 push 臂(post-push 引用 status 比例)
     }
 
@@ -586,7 +614,7 @@ def write_csv(report: dict, path: str | Path) -> Path:
     """每 run 一行(平铺)落 CSV(含生成配置列,review 双强可复现)。"""
     p = Path(path)
     cols = ["config", "arm", "solved", "steps", "cost", "termination",
-            "n_recall", "n_plan", "revisit_rate", "coverage", "status_referenced",
+            "n_recall", "n_recall_degraded", "n_plan", "revisit_rate", "coverage", "status_referenced",
             "model", "temperature", "thinking", "effort"]
     with open(p, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
@@ -594,7 +622,8 @@ def write_csv(report: dict, path: str | Path) -> Path:
         for r in report["runs"]:
             w.writerow([
                 r["config"], r["arm"], r["solved"], r["steps"], r["cost"], r["termination"],
-                r["n_recall"], r["n_plan"], r["revisit_rate"], r["coverage"], r["status_referenced"],
+                r["n_recall"], r["n_recall_degraded"], r["n_plan"], r["revisit_rate"], r["coverage"],
+                r["status_referenced"],
                 report["model"], report["temperature"], report["thinking"], report["effort"],
             ])
     return p
@@ -632,13 +661,21 @@ def render_env_eval_summary(report: dict) -> str:
         lines.append(f"⚠️ cost_capped at {report['cost_capped_at']} —— 对比矩阵不完整,gate 已作废为 INCONCLUSIVE。")
 
     lines.append("\n**per-arm(池化 over configs×repeats):**")
-    lines.append("| arm | n | solve_rate | revisit | coverage | n_plan | n_recall | stat_ref | mean_steps | mean_cost |")
-    lines.append("|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("| arm | n | solve_rate | revisit | coverage | n_plan | n_recall | n_rec_degr | stat_ref | mean_steps | mean_cost |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
     for arm, s in report["per_arm"].items():
         lines.append(
             f"| {arm} | {s['n']} | {s['solve_rate']:.2f} | {_fmt(s['mean_revisit_rate'])} | "
             f"{_fmt(s['mean_coverage'])} | {(s['mean_n_plan'] or 0):.1f} | {(s['mean_n_recall'] or 0):.1f} | "
+            f"{(s.get('mean_n_recall_degraded') or 0):.1f} | "
             f"{_fmt(s.get('mean_status_referenced'))} | {(s['mean_steps'] or 0):.1f} | ${(s['mean_cost'] or 0):.4f} |"
+        )
+    # Phase 4.4:降级稀释内容信号(review 双强 opus-0/gpt-5.5-2)—— 任一臂有降级 → 警告 Δsolve 须在非降级子集解读
+    max_degr = max((s.get("mean_n_recall_degraded") or 0) for s in report["per_arm"].values()) if report["per_arm"] else 0
+    if max_degr > 0:
+        lines.append(
+            f"⚠️ recall 降级(oracle fallback)均值最高 {max_degr:.1f}/run —— 降级 episode 两臂都拿 env.render() "
+            "完美图,对「内容价值」零贡献;高降级率时 real_vs_dummy Δsolve 须在非降级子集上解读(勿 over-read null)。"
         )
 
     lines.append("\n**pairwise(config 级 bootstrap,次要 —— env 在变,标 pilot):**")

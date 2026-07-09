@@ -18,6 +18,7 @@ import tempfile
 
 from brainregion.providers.base import ModelResponse
 from brainregion.sandbox.env_eval import (
+    ARMS_CONTENT,
     ARMS_MEMORY_STRATEGY,
     ARMS_METRONOME,
     ARM_PRESETS,
@@ -26,6 +27,7 @@ from brainregion.sandbox.env_eval import (
     EnvConfig,
     _aggregate,
     _coverage,
+    _n_recall_degraded,
     _positions_from_traj,
     _revisit_rate,
     _status_referenced,
@@ -38,6 +40,7 @@ from brainregion.sandbox.env_eval import (
 from brainregion.sandbox.envs import GridWorld
 from brainregion.sandbox.loop import (
     _append_ephemeral_result,
+    _recall_via_region,
     _split_visual,
     _strip_past_visual,
     run_agent,
@@ -45,6 +48,7 @@ from brainregion.sandbox.loop import (
     scoped_memory_mode,
 )
 from brainregion.sandbox.regions import MemoryRegion, StrategyRegion
+from brainregion.sandbox.regions.memory_region import _DUMMY_ROUGH_MAP
 from brainregion.sandbox.regions.strategy_region import _strip_to_thought
 from brainregion.sandbox import cleanup_run_dir, make_run_dir
 from brainregion.sandbox.envs import build_env_system_prompt
@@ -744,3 +748,182 @@ def test_run_env_eval_registry_plumbing():
     ))
     assert set(report["per_arm"]) == {"eph_memregion", "eph_memregion_reg"}
     assert len(report["runs"]) == 2 * 2 * 2
+
+
+# ---------- Phase 4.4 内容价值隔离(real vs matched-dummy memory,ephemeral + registry-cap) ----------
+
+
+def test_dummy_memory_matched_source():
+    """review 双强:dummy 与 real 同 LLM 调用(同 cost/call-count),但喂回固定 content-free rough_map。"""
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
+
+    class _Same:
+        def __init__(self):
+            self.calls = 0
+
+        async def complete_messages(self, messages, **kw):
+            self.calls += 1
+            return ModelResponse(model="m", content=_MEMORY_JSON, usage={}, cost_usd=0.001)
+
+    with scoped_env(env):
+        # real:1 调用,rough_map = LLM 产出("东边开阔,起点在西角")
+        real = MemoryRegion(start=env.start)
+        b_r = _Same()
+        r = asyncio.run(real.reason(b_r, "m", env.relative_view()))
+        assert b_r.calls == 1 and r["cost_usd"] == 0.001
+        assert r["rough_map"] == "东边开阔,起点在西角"
+
+        # dummy:同样 1 调用(同源同成本),但 rough_map = 固定 content-free 串(非 LLM 产出)
+        dummy = MemoryRegion(start=env.start, dummy=True)
+        b_d = _Same()
+        d = asyncio.run(dummy.reason(b_d, "m", env.relative_view()))
+        assert b_d.calls == 1                              # 与 real 同调用数(matched cost)
+        assert d["cost_usd"] == r["cost_usd"]              # 成本一致(同一 LLM 调用)
+        assert d["rough_map"] == _DUMMY_ROUGH_MAP          # 固定 content-free,非 LLM 输出
+        assert "东边开阔" not in d["rough_map"]             # 丢弃了 LLM 产出
+
+
+def test_dummy_rough_map_content_free_no_strategy_hints():
+    """pilot 暴露:dummy 含「系统探索未见区域」→ 假性 systematic 探索 → 低 revisit 假胜 real = 污染。
+    锁定 _DUMMY_ROUGH_MAP 无策略/探索/方向暗示(只 trivially-true 事实),保「唯一变量=内容」干净。"""
+    for hint in ("系统探索", "未见区域", "探索未见", "继续探索", "往", "向东", "向南",
+                 "向东南", "move", "走", "方向决策", "下一步去"):
+        assert hint not in _DUMMY_ROUGH_MAP, f"dummy rough_map 含策略/方向暗示: {hint}"
+
+
+def test_dummy_parse_fail_matches_degradation():
+    """review opus-0/gpt-5.5-2:dummy 同样 parse → 同等解析失败降级率(否则 dummy 不降级 = 多拿 oracle = 混淆)。"""
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
+    bad = "not json at all"   # _parse_rough_map 返 None
+
+    class _B:
+        async def complete_messages(self, messages, **kw):
+            return ModelResponse(model="m", content=bad, usage={}, cost_usd=0.001)
+
+    with scoped_env(env):
+        real = MemoryRegion(start=env.start)
+        dummy = MemoryRegion(start=env.start, dummy=True)
+        # real 解析失败 → 抛(上层降级 env.render())
+        try:
+            asyncio.run(real.reason(_B(), "m", env.relative_view()))
+            assert False, "real 应抛解析失败"
+        except RuntimeError:
+            pass
+        # dummy 也 parse(匹配降级率)→ 同样抛(不因丢弃产出而跳过解析)
+        try:
+            asyncio.run(dummy.reason(_B(), "m", env.relative_view()))
+            assert False, "dummy 应抛解析失败(匹配 real 降级率)"
+        except RuntimeError:
+            pass
+
+
+def test_dummy_update_identical_real():
+    """dummy 标志不影响 dead-reckon update → real/dummy pose 恒等(隔离 rough_map 内容,非位置)。"""
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
+    real = MemoryRegion(start=env.start)
+    dummy = MemoryRegion(start=env.start, dummy=True)
+    view = env.relative_view()
+    for action, status in [("right", "moved"), ("right", "moved"), ("up", "blocked"), ("down", "moved")]:
+        real.update(action, status, view)
+        dummy.update(action, status, view)
+    assert real.pose == dummy.pose                       # dead-reckon 恒等(代码,非 LLM 内容)
+    assert real.movement_log == dummy.movement_log
+
+
+def test_content_arms_assembly():
+    """ARMS_CONTENT 三臂 + build_regions_for_arm(dummy=True → MemoryRegion(dummy=True))。"""
+    names = [a.name for a in ARMS_CONTENT]
+    assert names == ["eph_memregion", "eph_regcap_real", "eph_regcap_dummy"]
+    assert all(a.visual_ephemeral and a.memory_region for a in ARMS_CONTENT)
+    assert ARMS_CONTENT[0].registry == "none"
+    assert ARMS_CONTENT[1].registry == "cap" and not ARMS_CONTENT[1].memory_dummy
+    assert ARMS_CONTENT[2].registry == "cap" and ARMS_CONTENT[2].memory_dummy
+    # build_regions_for_arm
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
+    mem_real, _, _ = build_regions_for_arm(ARMS_CONTENT[1], env)
+    mem_dummy, _, _ = build_regions_for_arm(ARMS_CONTENT[2], env)
+    assert mem_real.dummy is False and mem_dummy.dummy is True
+
+
+def test_build_env_system_prompt_real_dummy_identical():
+    """review gpt-5.5-3:real vs dummy 主脑 prompt 逐字相同(唯一差 = recall_map 返回的 rough_map 内容)。"""
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
+    # real/dummy 臂的 system_prompt 入参全等(memory/strategy/metronome/registry)
+    p_real = build_env_system_prompt(env, "g", memory=True, strategy=False, metronome=False, registry="cap")
+    p_dummy = build_env_system_prompt(env, "g", memory=True, strategy=False, metronome=False, registry="cap")
+    assert p_real == p_dummy
+
+
+def test_real_vs_dummy_recall_result_diffs_only_rough_map():
+    """review gpt-5.5-3:_recall_via_region real vs dummy 返回的 tool_result 仅 rough_map 内容差;pose/结构恒等。"""
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
+
+    class _B:
+        async def complete_messages(self, messages, **kw):
+            return ModelResponse(model="m", content=_MEMORY_JSON, usage={}, cost_usd=0.001)
+
+    class _T:
+        total_main_cost_usd = 0.0
+
+    with scoped_env(env):
+        real = MemoryRegion(start=env.start)
+        dummy = MemoryRegion(start=env.start, dummy=True)
+        b = _B()
+        r_str, r_err = asyncio.run(_recall_via_region(
+            real, b, "m", env=env, endpoint_id=None, thinking=False, effort=None,
+            recall_count=0, max_recalls=99, spent=0.0, max_cost_usd=1.0, traj=_T(),
+        ))
+        d_str, d_err = asyncio.run(_recall_via_region(
+            dummy, b, "m", env=env, endpoint_id=None, thinking=False, effort=None,
+            recall_count=0, max_recalls=99, spent=0.0, max_cost_usd=1.0, traj=_T(),
+        ))
+    assert r_err is None and d_err is None
+    r_obj = json.loads(r_str)
+    d_obj = json.loads(d_str)
+    # 结构 + pose 恒等
+    assert set(r_obj) == set(d_obj) == {"rough_position", "rough_map", "region"}
+    assert r_obj["rough_position"] == d_obj["rough_position"] == [0, 0]
+    assert r_obj["region"] is True and d_obj["region"] is True
+    # 唯一差:rough_map 内容(real=LLM 产出,dummy=固定 content-free)
+    assert r_obj["rough_map"] == "东边开阔,起点在西角"
+    assert d_obj["rough_map"] == _DUMMY_ROUGH_MAP
+
+
+def test_n_recall_degraded_tracking():
+    """review opus-0:成功 recall(preview 含 rough_map)不计降级;降级 recall(无 rough_map)计入。"""
+    class _S:
+        def __init__(self, tool, preview):
+            self.tool = tool
+            self.result_preview = preview
+
+    class _T:
+        def __init__(self, steps):
+            self.steps = steps
+
+    success = '{"rough_position": [0, 0], "rough_map": "东边开阔", "region": true}'
+    degraded = '{"map": "....\\n....", "explored_cells": 4, "of_total": 16, "region_degraded": "budget_or_cap"}'
+    traj = _T([
+        _S("act", '{"observation": "..."}'),
+        _S("recall_map", success),     # 成功
+        _S("recall_map", degraded),    # 降级(无 rough_map)
+        _S("recall_map", success),     # 成功
+        _S("recall_map", degraded),    # 降级
+    ])
+    assert _n_recall_degraded(traj) == 2
+    # 大网格降级 JSON 末尾 region_degraded 被截断 → 仍靠「无 rough_map」判定成功(degraded 的 map 字段不含 rough_map 键)
+    long_degraded = '{"map": "' + "x" * 400 + '", "region_degraded": "x"}'   # map 长,region_degraded 末尾
+    traj2 = _T([_S("recall_map", long_degraded[:300])])   # 截断后无 rough_map
+    assert _n_recall_degraded(traj2) == 1
+
+
+def test_run_env_eval_content_plumbing():
+    """end-to-end:content 三臂 × 小 configs × repeats → 报告含三臂 + n_recall_degraded 字段。"""
+    configs = [EnvConfig(size=5, seed=1, visibility_radius=1), EnvConfig(size=5, seed=2, visibility_radius=1)]
+    report = asyncio.run(run_env_eval(
+        _GiveUpBackend(), "mock", configs, ARMS_CONTENT, repeats=2, max_cost_usd=2.0, log_progress=False,
+    ))
+    assert set(report["per_arm"]) == {"eph_memregion", "eph_regcap_real", "eph_regcap_dummy"}
+    assert len(report["runs"]) == 2 * 3 * 2
+    assert "n_recall_degraded" in report["runs"][0]
+    assert "mean_n_recall_degraded" in report["per_arm"]["eph_regcap_real"]
+

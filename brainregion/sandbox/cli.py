@@ -492,7 +492,10 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def _parse_arm_spec(spec: str):
-    """``--arm mem=region,strat=real`` → EnvArm(feature-config;review 双强 feature-flag 表层)。"""
+    """``--arm mem=region,strat=real`` → EnvArm(feature-config;review 双强 feature-flag 表层)。
+
+    可选 ``dummy=1``(Phase 4.4 matched-source dummy 记忆)/ ``registry=cap|full`` / ``eph=1`` / ``metronome=1``。
+    """
     from .env_eval import EnvArm
     parts: dict[str, str] = {}
     for chunk in spec.split(","):
@@ -501,14 +504,21 @@ def _parse_arm_spec(spec: str):
             parts[k.strip()] = v.strip()
     mem = parts.get("mem", "").lower()
     strat = parts.get("strat", "none").lower()
-    if strat not in ("none", "real", "echo"):
-        raise SystemExit(f"--arm strat 非法 {strat!r};合法:none/real/echo")
+    if strat not in ("none", "real", "echo", "dummy"):
+        raise SystemExit(f"--arm strat 非法 {strat!r};合法:none/real/echo/dummy")
+    registry = parts.get("registry", "none").lower()
+    if registry not in ("none", "cap", "full"):
+        raise SystemExit(f"--arm registry 非法 {registry!r};合法:none/cap/full")
     name = parts.get("name") or f"mem={mem or 'none'},strat={strat}"
     return EnvArm(
         name=name,
         memory_tool=(mem == "tool"),
         memory_region=mem in ("region", "true", "1"),
         strategy=strat,
+        metronome=parts.get("metronome", "").lower() in ("1", "true", "yes"),
+        visual_ephemeral=parts.get("eph", "").lower() in ("1", "true", "yes"),
+        registry=registry,
+        memory_dummy=parts.get("dummy", "").lower() in ("1", "true", "yes"),
     )
 
 

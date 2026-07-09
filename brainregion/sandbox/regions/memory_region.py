@@ -23,6 +23,18 @@ _ACTION_DELTA: dict[str, tuple[int, int]] = {
 }
 _ROUGH_MAP_CAP = 1000  # rough_map 字符上界(留尾:近期理解优先,旧截断;防跨 recall 膨胀撑爆 prompt)
 
+# Phase 4.4 matched-source dummy:固定 **结构化 content-free** rough_map(镜像 real 响应形状,
+# 无可执行具体信息)→ engagement-neutral(review 双强 gpt-5.5-0/opus-2:纯「无信息」串会让主脑
+# 弃用记忆 → n_recall 降 → consult 次数不等 = 混淆「唯一变量=内容」)。
+# **严禁策略/探索暗示**(pilot 暴露:含「系统探索未见区域」→ dummy 系统化探索 → 低 revisit →
+# 假性胜过 real = 污染)。只陈述 trivially-true 事实(已记录/有墙有通路/位置在已探索范围/目标未确认),
+# 无方向、无探索指引、无「未见区」措辞。长度近似典型 real。
+_DUMMY_ROUGH_MAP = (
+    "已记录部分观察;当前位置在已探索范围内;"
+    "网格中存在墙与通路,具体布局部分已知;"
+    "未发现明显异常;目标方位尚未确认"
+)
+
 
 def build_memory_region_system_prompt() -> str:
     """记忆脑区系统提示词(中文文案)。维护**定性**大致地图理解,no-advice。"""
@@ -85,7 +97,7 @@ class MemoryRegion:
 
     def __init__(
         self, *, start: tuple[int, int] = (0, 0), log_len: int = 32,
-        temperature: float = 0.0, max_tokens: int = 1024,
+        temperature: float = 0.0, max_tokens: int = 1024, dummy: bool = False,
     ) -> None:
         self.pose: tuple[int, int] = tuple(start)
         self.movement_log: list[dict] = []
@@ -93,6 +105,7 @@ class MemoryRegion:
         self.log_len = int(log_len)
         self.temperature = temperature
         self.max_tokens = max_tokens
+        self.dummy = bool(dummy)   # Phase 4.4:matched-source dummy(同 LLM 调用,固定 content-free rough_map)
 
     def update(self, action: str | None, status: str, rel_view: str) -> None:
         """代码 dead-reckon:仅 ``moved`` 推进 pose;movement_log 追 {action, status}(有界 FIFO)。不调 LLM。
@@ -113,6 +126,11 @@ class MemoryRegion:
         """LLM 修订 rough_map(**事务性**:解析成功才替换;失败抛 → 上层降级,rough_map 保留上一个)。
 
         返 ``{"rough_map": str, "cost_usd": float, "ok": True}``。抛错由 ``_recall_via_region`` 兜底降级。
+
+        ``dummy=True``(Phase 4.4 matched-source 控制臂):**同样调 LLM + 同样 parse**(→ 同 cost/
+        latency/call-count + 同等解析失败降级率,review 双强 opus-0/gpt-5.5-2:否则 dummy 不降级 = 多拿
+        env.render() oracle 完美图 = 混淆),但**丢弃 LLM 产出**,喂回固定 ``_DUMMY_ROUGH_MAP``
+        (content-free,engagement-neutral)。→ real vs dummy 唯一差 = rough_map 内容。
         """
         system = build_memory_region_system_prompt()
         user = _build_user_message(self.pose, self.movement_log, rel_view, self.rough_map)
@@ -123,10 +141,11 @@ class MemoryRegion:
         )
         if not resp.ok or not resp.content:
             raise RuntimeError(f"memory region backend failed: {resp.error or 'empty output'}")
-        new_map = _parse_rough_map(resp.content)
-        if new_map is None:
+        parsed = _parse_rough_map(resp.content)   # real & dummy 都 parse(匹配降级率;dummy 丢弃产出)
+        if parsed is None:
             raise RuntimeError("memory region output unparseable / no rough_map field")
-        self.rough_map = new_map  # 事务性:全成才替换
+        # 事务性:全成才替换。dummy 用固定 content-free 串(同 LLM 调用成本,内容退化)。
+        self.rough_map = _DUMMY_ROUGH_MAP if self.dummy else parsed
         return {"rough_map": self.rough_map, "cost_usd": float(resp.cost_usd or 0.0), "ok": True}
 
 
