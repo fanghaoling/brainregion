@@ -410,7 +410,9 @@ async def _run_one_episode(
         "cost": round(traj.total_main_cost_usd + traj.total_arm_cost_usd, 6),
         "termination": traj.termination_reason,
         "n_recall": n_recall,
-        "n_recall_degraded": _n_recall_degraded(traj),   # Phase 4.4:降级数(oracle fallback 稀释内容信号)
+        # Phase 4.4:降级数仅对 memory_region 臂有意义(_recall_via_region 失败→oracle fallback)。
+        # memory_tool 臂(oracle)走 dispatch_tool 返 {"map":...}(无 rough_map 键,非降级)→ 0,免误报。
+        "n_recall_degraded": _n_recall_degraded(traj) if arm.memory_region else 0,
         "n_plan": sum(1 for s in traj.steps if s.tool == "plan"),
         "revisit_rate": _revisit_rate(positions),
         "coverage": _coverage(env),
