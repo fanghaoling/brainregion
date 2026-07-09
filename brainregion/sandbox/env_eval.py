@@ -49,18 +49,22 @@ class EnvConfig:
     """一个 maze = 一个对比单位(bootstrap 行)。"""
 
     size: int
-    seed: int | None = None            # random_goal_seed
+    seed: int | None = None            # random_goal_seed(也作 maze_seed when maze)
     wall_seed: int | None = None
     wall_density: float = 0.0
     visibility_radius: int = 2
     max_steps: int = 30
+    maze: bool = False                 # Phase 4.5:recursive backtracker 迷宫地形(seed 作 maze_seed)
+    maze_braid: float = 0.2            # 迷宫去死胡同比例(0=完美迷宫;0.2 地牢感)
 
     @property
     def label(self) -> str:
         parts = [f"{self.size}x{self.size}"]
         if self.seed is not None:
             parts.append(f"seed{self.seed}")
-        if self.wall_density:
+        if self.maze:
+            parts.append(f"maze{self.maze_braid}")
+        elif self.wall_density:
             parts.append(f"w{self.wall_density}")
         return "_".join(parts)
 
@@ -112,6 +116,12 @@ ARMS_CONTENT: tuple[EnvArm, ...] = (          # Phase 4.4:内容价值隔离(eph
     EnvArm("eph_regcap_real",  memory_region=True, visual_ephemeral=True, registry="cap"), # 真 LLM rough_map 内容
     EnvArm("eph_regcap_dummy", memory_region=True, visual_ephemeral=True, registry="cap", memory_dummy=True),  # 同源同成本固定 content-free
 )
+ARMS_MAZE_CONTENT: tuple[EnvArm, ...] = (     # Phase 4.5:迷宫上重跑 content A/B(记忆最必需 regime)
+    EnvArm("maze_noregion", visual_ephemeral=True),                                          # 无记忆基线
+    EnvArm("maze_real",   memory_region=True, visual_ephemeral=True, registry="cap"),        # 真 LLM 内容
+    EnvArm("maze_dummy",  memory_region=True, visual_ephemeral=True, registry="cap", memory_dummy=True),  # content-free
+    EnvArm("maze_oracle", memory_tool=True,   visual_ephemeral=True, registry="cap"),        # 完美图上界(recall_map→env.render)
+)
 ARM_PRESETS: dict[str, tuple[EnvArm, ...]] = {
     "memory-strategy": ARMS_MEMORY_STRATEGY,
     "memory-baseline": ARMS_MEMORY_BASELINE,
@@ -119,7 +129,8 @@ ARM_PRESETS: dict[str, tuple[EnvArm, ...]] = {
     "ephemeral": ARMS_EPHEMERAL,
     "registry": ARMS_REGISTRY,
     "content": ARMS_CONTENT,
-    "all": ARMS_MEMORY_STRATEGY + ARMS_MEMORY_BASELINE + ARMS_METRONOME + ARMS_EPHEMERAL + ARMS_REGISTRY + ARMS_CONTENT,
+    "maze-content": ARMS_MAZE_CONTENT,
+    "all": ARMS_MEMORY_STRATEGY + ARMS_MEMORY_BASELINE + ARMS_METRONOME + ARMS_EPHEMERAL + ARMS_REGISTRY + ARMS_CONTENT + ARMS_MAZE_CONTENT,
 }
 
 
@@ -132,11 +143,15 @@ def build_env_for_config(cfg: EnvConfig) -> GridWorld:
         "size": cfg.size, "start": (0, 0),
         "visibility_radius": cfg.visibility_radius, "strict_obs": True,
     }
-    if cfg.seed is not None:
-        kw["random_goal_seed"] = cfg.seed
-    if cfg.wall_seed is not None:
-        kw["random_walls_seed"] = cfg.wall_seed
-        kw["wall_density"] = cfg.wall_density
+    if cfg.maze:  # Phase 4.5 迷宫地形(seed 作 maze_seed;maze 内部用 maze_seed 从 floor 选 goal,耦合自洽)
+        kw["maze_seed"] = cfg.seed if cfg.seed is not None else 0
+        kw["maze_braid"] = cfg.maze_braid
+    else:
+        if cfg.seed is not None:
+            kw["random_goal_seed"] = cfg.seed
+        if cfg.wall_seed is not None:
+            kw["random_walls_seed"] = cfg.wall_seed
+            kw["wall_density"] = cfg.wall_density
     return GridWorld(**kw)
 
 

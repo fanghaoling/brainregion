@@ -54,6 +54,8 @@ class GridWorld:
         strict_obs: bool = False,
         wall_density: float = 0.0,
         random_walls_seed: int | None = None,
+        maze_seed: int | None = None,
+        maze_braid: float = 0.0,
     ) -> None:
         if not (2 <= size <= 50):
             raise ValueError(f"size 须在 2..50,got {size}")
@@ -65,6 +67,8 @@ class GridWorld:
                 raise ValueError(f"visibility_radius 须 ≥0,got {visibility_radius}")
         if not (0.0 <= wall_density <= 0.6):
             raise ValueError(f"wall_density 须在 0..0.6,got {wall_density}")
+        if not (0.0 <= maze_braid <= 1.0):
+            raise ValueError(f"maze_braid 须在 0..1,got {maze_braid}")
 
         self.size = size
         self.start = tuple(start)
@@ -75,21 +79,38 @@ class GridWorld:
         if not self._in_grid(self.start):
             raise ValueError(f"start {self.start} 越界(size={size})")
 
-        # goal 先选(不避墙 —— 墙稍后生成时会避开 goal)。random_goal_seed → seeded 随机;否则显式/远角。
-        if random_goal_seed is not None:
-            self.goal = self._pick_random_goal(random_goal_seed, fog)
+        # 地形:maze_seed → recursive backtracker 迷宫(先生成定 floor,再从 floor 选 goal);
+        # 否则现行(goal 先,再 random walls 避 goal)。maze 覆盖 random_walls/wall_density。
+        if maze_seed is not None:
+            if size < 3:
+                raise ValueError(f"maze 模式 size 须 ≥3,got {size}")
+            if self.start[0] % 2 != 0 or self.start[1] % 2 != 0:
+                raise ValueError(f"maze 模式 start 须 even,even junction(=(0,0)),got {self.start}")
+            self.walls, floors = self._gen_maze(maze_seed, maze_braid)
+            if random_goal_seed is not None:
+                self.goal = self._pick_goal_from_floors(random_goal_seed, floors, fog)
+            elif goal is not None:
+                self.goal = tuple(goal)
+                if self.goal not in floors:
+                    raise ValueError(f"maze 模式显式 goal {self.goal} 不在迷宫 floor(不可达)")
+            else:
+                self.goal = self._pick_goal_from_floors(maze_seed, floors, fog)
         else:
-            self.goal = tuple(goal) if goal is not None else (size - 1, size - 1)
+            # goal 先选(不避墙 —— 墙稍后生成时会避开 goal)。random_goal_seed → seeded 随机;否则显式/远角。
+            if random_goal_seed is not None:
+                self.goal = self._pick_random_goal(random_goal_seed, fog)
+            else:
+                self.goal = tuple(goal) if goal is not None else (size - 1, size - 1)
+            # 墙:random_walls_seed → 生成(避开 start/goal + BFS 可达性保证);否则显式 walls。
+            if random_walls_seed is not None:
+                self.walls = self._gen_walls_reachable(random_walls_seed, wall_density)
+            else:
+                self.walls = frozenset(tuple(w) for w in walls)
+
         if not self._in_grid(self.goal):
             raise ValueError(f"goal {self.goal} 越界(size={size})")
         if self.goal == self.start:
             raise ValueError(f"goal {self.goal} 不能等于 start {self.start}")
-
-        # 墙:random_walls_seed → 生成(避开 start/goal + BFS 可达性保证);否则显式 walls。
-        if random_walls_seed is not None:
-            self.walls = self._gen_walls_reachable(random_walls_seed, wall_density)
-        else:
-            self.walls = frozenset(tuple(w) for w in walls)
         if self.start in self.walls:
             raise ValueError(f"start {self.start} 落在墙上")
         if self.goal in self.walls:
@@ -180,6 +201,84 @@ class GridWorld:
             if self._reachable(self.start, self.goal, walls):
                 return walls
         return frozenset()  # 最终兜底:无墙(保证可构造)
+
+    def _gen_maze(self, seed: int, braid: float) -> tuple[frozenset[tuple[int, int]], set[tuple[int, int]]]:
+        """Phase 4.5 Prim's 迷宫(even/odd:junction 在 even,even;走廊宽1 墙宽1)。
+
+        全格起墙;从 start junction 起,frontier = 相邻未访 junction 的中间墙;随机取 frontier 墙 carve
+        + 其后 junction。Prim's(随机 frontier)产 **bushy** 迷宫(多岔路多死胡同,记忆决策点多),
+        比 DFS backtracker(长走廊少岔路)更适合测记忆。完美迷宫 = spanning tree(连通无环,可达)。
+        braid>0 去死胡同加环。返 ``(walls, floors)``。
+        """
+        rng = random.Random(seed)
+        S = self.size
+        floors: set[tuple[int, int]] = {self.start}
+        # junction-to-junction delta (距离 2) + 中间墙 delta (距离 1)
+        steps = [((0, -2), (0, -1)), ((0, 2), (0, 1)), ((-2, 0), (-1, 0)), ((2, 0), (1, 0))]
+        frontier: list[tuple[tuple[int, int], tuple[int, int]]] = []  # (wall_cell, beyond_junction)
+
+        def _add_frontier(j: tuple[int, int]) -> None:
+            for (dx, dy), (bx, by) in steps:
+                nx, ny = j[0] + dx, j[1] + dy
+                beyond = (nx, ny)
+                if 0 <= nx < S and 0 <= ny < S and beyond not in floors:
+                    frontier.append(((j[0] + bx, j[1] + by), beyond))
+
+        _add_frontier(self.start)
+        while frontier:
+            idx = rng.randint(0, len(frontier) - 1)
+            wall_cell, beyond = frontier.pop(idx)
+            if beyond in floors:
+                continue  # 已被别路 carve(lazy 去重)
+            floors.add(wall_cell)
+            floors.add(beyond)
+            _add_frontier(beyond)
+        walls: set[tuple[int, int]] = {(x, y) for y in range(S) for x in range(S)} - floors
+        if braid > 0.0:
+            self._braid_maze(walls, floors, braid, rng)
+        return frozenset(walls), floors
+
+    def _braid_maze(self, walls: set, floors: set, braid: float, rng: random.Random) -> None:
+        """去死胡同加环(地牢感 + 略易):floor 邻居数=1 的 cell = 死胡同;取 braid 比例,各打通一个
+        墙邻居(其对侧是 floor → 造环,连通性不减)。原地改 walls/floors。"""
+        deltas = [(0, -1), (0, 1), (-1, 0), (1, 0)]
+
+        def _floor_neighbors(c: tuple[int, int]) -> int:
+            return sum(1 for dx, dy in deltas if (c[0] + dx, c[1] + dy) in floors)
+
+        dead_ends = [c for c in floors if _floor_neighbors(c) == 1]
+        rng.shuffle(dead_ends)
+        n = int(len(dead_ends) * max(0.0, min(1.0, braid)))
+        for c in dead_ends[:n]:
+            opts = []
+            for dx, dy in deltas:
+                wall_cell = (c[0] + dx, c[1] + dy)        # 候选墙
+                beyond = (c[0] + 2 * dx, c[1] + 2 * dy)   # 墙对侧
+                if wall_cell in walls and beyond in floors and beyond != c:
+                    opts.append(wall_cell)
+            if opts:
+                carve = rng.choice(opts)
+                walls.discard(carve)
+                floors.add(carve)
+
+    def _pick_goal_from_floors(self, seed: int, floors: set[tuple[int, int]], fog: bool) -> tuple[int, int]:
+        """maze 模式 goal:从 floor cell 选(非 start;fog 下优先 ∉ start 可见域藏起来;偏远)。
+        fallback:hidden 空 → 任意 floor;floor 不足 → 任意非 start(防御,正常不触发)。"""
+        rng = random.Random(seed)
+        candidates = [c for c in floors if c != self.start]
+        if not candidates:
+            all_cells = [(x, y) for y in range(self.size) for x in range(self.size)]
+            candidates = [c for c in all_cells if c != self.start]
+        if fog:
+            start_vis = set(self._visible_cells(self.start))
+            hidden = [c for c in candidates if c not in start_vis]
+            pool = hidden if hidden else candidates
+        else:
+            pool = candidates
+        # 偏远:取 Manhattan 距 start 远的 top 半,再随机选(逼真探索,非近邻 trivial)
+        pool = sorted(pool, key=lambda c: -(abs(c[0] - self.start[0]) + abs(c[1] - self.start[1])))
+        far = pool[: max(1, len(pool) // 2)]
+        return rng.choice(far)
 
     def reset(self, *, seed: int | None = None) -> str:
         """重置 agent 到 start,清空 frames + explored(fog 重探)。

@@ -389,6 +389,11 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
     if wall_seed is not None:
         goal_kw["random_walls_seed"] = wall_seed
         goal_kw["wall_density"] = float(getattr(args, "wall_density", None) or 0.2)  # 默认密度 0.2
+    # Phase 4.5 迷宫地形:maze_seed 用 --seed;覆盖 random_walls。fog 由 --memory-region/--fog 控制
+    # (--maze alone = 全可见迷宫,供 --debug 看地形;--maze --memory-region = fog+strict_obs 记忆测试)。
+    if bool(getattr(args, "maze", False)):
+        goal_kw["maze_seed"] = getattr(args, "seed", None) if getattr(args, "seed", None) is not None else 0
+        goal_kw["maze_braid"] = float(getattr(args, "maze_braid", 0.2) or 0.2)
     try:
         env = GridWorld(size=size, start=(0, 0), **goal_kw)
     except ValueError as exc:
@@ -555,13 +560,16 @@ async def run_env_eval(args: argparse.Namespace) -> dict[str, Any]:
     sizes = [int(x) for x in args.sizes.split(",") if x.strip()]
     seeds = [int(x) for x in args.seeds.split(",") if x.strip()]
     vis_radius = int(args.visibility_radius) if args.visibility_radius is not None else 2
+    maze_on = bool(getattr(args, "maze", False))
+    maze_braid = float(getattr(args, "maze_braid", 0.2) or 0.2)
     configs = [
         EnvConfig(
             size=sz, seed=sd,
-            wall_seed=getattr(args, "wall_seed", None),
-            wall_density=float(args.wall_density or 0.0),
+            wall_seed=getattr(args, "wall_seed", None) if not maze_on else None,
+            wall_density=float(args.wall_density or 0.0) if not maze_on else 0.0,
             visibility_radius=vis_radius,
             max_steps=int(args.max_steps or dd.get("sandbox_max_steps", 30)),
+            maze=maze_on, maze_braid=maze_braid,
         )
         for sz in sizes for sd in seeds
     ]

@@ -397,3 +397,126 @@ def test_walls_compose_with_fog_and_memory():
     env.step("right")
     assert env.observation()  # 当前视野不崩(墙在视野内显 #)
 
+
+# ---------- Phase 4.5 迷宫地形(recursive backtracker)----------
+
+
+def _floor_graph_acyclic(env: GridWorld) -> bool:
+    """floor 诱导图(4-邻接)是否无环 = 是否 forest。union-find 验完美迷宫 = spanning tree。"""
+    from collections import deque
+
+    floors = set(c for c in ((x, y) for y in range(env.size) for x in range(env.size))
+                 if c not in env.walls)
+    parent = {c: c for c in floors}
+
+    def find(c):
+        while parent[c] != c:
+            parent[c] = parent[parent[c]]
+            c = parent[c]
+        return c
+
+    for c in floors:
+        x, y = c
+        for nx, ny in ((x + 1, y), (x, y + 1)):  # 只查右/下(避免双向重)
+            n = (nx, ny)
+            if n in floors:
+                ra, rb = find(c), find(n)
+                if ra == rb:
+                    return False  # 环
+                parent[ra] = rb
+    return True
+
+
+def _floor_connected(env: GridWorld) -> bool:
+    """floor 诱导图是否单连通分量(BFS)。"""
+    from collections import deque
+
+    floors = set(c for c in ((x, y) for y in range(env.size) for x in range(env.size))
+                 if c not in env.walls)
+    if not floors:
+        return True
+    seen = {next(iter(floors))}
+    q = deque(seen)
+    while q:
+        x, y = q.popleft()
+        for dx, dy in ((0, -1), (0, 1), (-1, 0), (1, 0)):
+            n = (x + dx, y + dy)
+            if n in floors and n not in seen:
+                seen.add(n)
+                q.append(n)
+    return seen == floors
+
+
+def _count_dead_ends(env: GridWorld) -> int:
+    floors = set(c for c in ((x, y) for y in range(env.size) for x in range(env.size))
+                 if c not in env.walls)
+    deltas = ((0, -1), (0, 1), (-1, 0), (1, 0))
+    return sum(1 for c in floors
+               if sum(1 for dx, dy in deltas if (c[0] + dx, c[1] + dy) in floors) == 1)
+
+
+def test_maze_perfect_is_tree_connected_acyclic():
+    """braid=0 完美迷宫:floor 诱导图 = spanning tree(连通 + 无环)。"""
+    env = GridWorld(size=9, maze_seed=1, maze_braid=0.0)
+    assert _floor_connected(env)
+    assert _floor_graph_acyclic(env)
+    assert env.start not in env.walls
+    assert env.goal not in env.walls
+    assert env._reachable(env.start, env.goal)
+
+
+def test_maze_has_dead_ends_braid_reduces_them():
+    """braid=0 有死胡同;braid=1.0 死胡同大幅减少(理想全去,容忍少数边界残留);braid 单调大致递减。"""
+    de_0 = _count_dead_ends(GridWorld(size=9, maze_seed=2, maze_braid=0.0))
+    de_full = _count_dead_ends(GridWorld(size=9, maze_seed=2, maze_braid=1.0))
+    assert de_0 > 0                       # 完美迷宫有死胡同
+    assert de_full < de_0                 # braid 减死胡同
+    de_half = _count_dead_ends(GridWorld(size=9, maze_seed=2, maze_braid=0.5))
+    assert de_full <= de_half <= de_0     # 单调(允许等,容忍边界)
+
+
+def test_maze_deterministic_same_seed():
+    """同 maze_seed → 同 walls(可复现)。"""
+    a = GridWorld(size=9, maze_seed=42, maze_braid=0.2)
+    b = GridWorld(size=9, maze_seed=42, maze_braid=0.2)
+    assert a.walls == b.walls
+    assert a.goal == b.goal
+
+
+def test_maze_goal_on_floor_and_hidden_under_fog():
+    """maze + fog:goal ∈ floor 且 ∉ start 可见域(藏起来逼探索);可达。"""
+    env = GridWorld(size=9, maze_seed=3, maze_braid=0.2,
+                    visibility_radius=2, strict_obs=True, random_goal_seed=7)
+    assert env.goal not in env.walls
+    assert env.goal not in set(env._visible_cells(env.start))   # 藏
+    assert env._reachable(env.start, env.goal)
+    assert "#" in env.render()                                   # 迷宫墙显
+
+
+def test_maze_overrides_random_walls():
+    """maze_seed 给定时,maze 覆盖 random_walls/wall_density(忽略之)。"""
+    env = GridWorld(size=9, maze_seed=1, random_walls_seed=99, wall_density=0.4)
+    # 迷宫墙应为 spanning-tree 结构(无环),random walls 随机散墙不保证无环
+    assert _floor_graph_acyclic(env)
+
+
+def test_maze_validation():
+    """size<3 / start 非 even,even / maze_braid 越界 → 拒。"""
+    with pytest.raises(ValueError, match="size.*≥3"):
+        GridWorld(size=2, maze_seed=1)
+    with pytest.raises(ValueError, match="start.*even"):
+        GridWorld(size=9, start=(1, 1), maze_seed=1)
+    with pytest.raises(ValueError, match="maze_braid"):
+        GridWorld(size=9, maze_seed=1, maze_braid=1.5)
+
+
+def test_no_maze_seed_zero_regression():
+    """无 maze_seed(默认)→ 现行 random-walls/空网格行为零变化(回归)。"""
+    env = GridWorld(size=5, random_walls_seed=1, wall_density=0.2)
+    assert env.start == (0, 0)
+    assert env._reachable(env.start, env.goal)
+    # 无墙空网格(无 random_walls_seed)仍可达 + 无墙
+    empty = GridWorld(size=5)
+    assert empty.walls == frozenset()
+
+
