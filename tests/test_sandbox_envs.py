@@ -501,13 +501,29 @@ def test_maze_overrides_random_walls():
 
 
 def test_maze_validation():
-    """size<3 / start 非 even,even / maze_braid 越界 → 拒。"""
-    with pytest.raises(ValueError, match="size.*≥3"):
-        GridWorld(size=2, maze_seed=1)
-    with pytest.raises(ValueError, match="start.*even"):
-        GridWorld(size=9, start=(1, 1), maze_seed=1)
+    """size<5(inner 雕刻区+墙边界)/ maze_braid 越界 → 拒。maze 自设 start=(1,1),忽略传入。"""
+    with pytest.raises(ValueError, match="size.*≥5"):
+        GridWorld(size=4, maze_seed=1)
     with pytest.raises(ValueError, match="maze_braid"):
         GridWorld(size=9, maze_seed=1, maze_braid=1.5)
+
+
+def test_maze_has_wall_border_perimeter():
+    """用户:迷宫外围一圈墙(地牢 enclosure,方便辨认边缘)。perimeter (row/col 0 与 size-1) 恒墙;
+    start=(1,1) 内角;floor 全在 inner [1..size-2]。"""
+    env = GridWorld(size=9, maze_seed=1, maze_braid=0.2, visibility_radius=None)
+    S = env.size
+    for i in range(S):
+        assert (i, 0) in env.walls          # 左列
+        assert (i, S - 1) in env.walls      # 右列
+        assert (0, i) in env.walls          # 顶行
+        assert (S - 1, i) in env.walls      # 底行
+    assert env.start == (1, 1)              # 内角(非 perimeter)
+    # floor 全在 inner
+    for x, y in env.walls:
+        assert 1 <= x <= S - 2 or x in (0, S - 1)  # walls 在 perimeter 或 inner-墙
+    inner_floors = [(x, y) for y in range(1, S - 1) for x in range(1, S - 1) if (x, y) not in env.walls]
+    assert all(1 <= x <= S - 2 and 1 <= y <= S - 2 for x, y in inner_floors)
 
 
 def test_no_maze_seed_zero_regression():

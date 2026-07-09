@@ -79,13 +79,12 @@ class GridWorld:
         if not self._in_grid(self.start):
             raise ValueError(f"start {self.start} 越界(size={size})")
 
-        # 地形:maze_seed → recursive backtracker 迷宫(先生成定 floor,再从 floor 选 goal);
-        # 否则现行(goal 先,再 random walls 避 goal)。maze 覆盖 random_walls/wall_density。
+        # 地形:maze_seed → Prim's 迷宫(先生成定 floor,再从 floor 选 goal);外围一圈墙(地牢 enclosure,
+        # 用户:方便辨认边缘)。maze 在 inner [1..size-2] 雕刻,start=(1,1);perimeter 恒墙。覆盖 random_walls。
         if maze_seed is not None:
-            if size < 3:
-                raise ValueError(f"maze 模式 size 须 ≥3,got {size}")
-            if self.start[0] % 2 != 0 or self.start[1] % 2 != 0:
-                raise ValueError(f"maze 模式 start 须 even,even junction(=(0,0)),got {self.start}")
+            if size < 5:
+                raise ValueError(f"maze 模式 size 须 ≥5(inner 雕刻区 + 墙边界),got {size}")
+            self.start = (1, 1)   # maze:内角(外围墙);忽略传入 start
             self.walls, floors = self._gen_maze(maze_seed, maze_braid)
             if random_goal_seed is not None:
                 self.goal = self._pick_goal_from_floors(random_goal_seed, floors, fog)
@@ -203,12 +202,12 @@ class GridWorld:
         return frozenset()  # 最终兜底:无墙(保证可构造)
 
     def _gen_maze(self, seed: int, braid: float) -> tuple[frozenset[tuple[int, int]], set[tuple[int, int]]]:
-        """Phase 4.5 Prim's 迷宫(even/odd:junction 在 even,even;走廊宽1 墙宽1)。
+        """Phase 4.5 Prim's 迷宫(odd/odd junction 在 inner [1..size-2];走廊宽1 墙宽1;外围一圈墙)。
 
-        全格起墙;从 start junction 起,frontier = 相邻未访 junction 的中间墙;随机取 frontier 墙 carve
-        + 其后 junction。Prim's(随机 frontier)产 **bushy** 迷宫(多岔路多死胡同,记忆决策点多),
-        比 DFS backtracker(长走廊少岔路)更适合测记忆。完美迷宫 = spanning tree(连通无环,可达)。
-        braid>0 去死胡同加环。返 ``(walls, floors)``。
+        全格起墙;从 start=(1,1) junction 起,frontier = 相邻未访 junction(距离2,均在 inner)的中间墙;
+        随机取 frontier 墙 carve + 其后 junction。Prim's(随机 frontier)产 **bushy** 迷宫(多岔路多死胡同,
+        记忆决策点多)。完美迷宫 = spanning tree(连通无环,可达)。braid>0 去死胡同加环。返 ``(walls, floors)``。
+        carving 仅 inner [1..size-2] → perimeter (row/col 0 与 size-1) 恒墙(地牢 enclosure,方便辨认边缘)。
         """
         rng = random.Random(seed)
         S = self.size
@@ -221,7 +220,8 @@ class GridWorld:
             for (dx, dy), (bx, by) in steps:
                 nx, ny = j[0] + dx, j[1] + dy
                 beyond = (nx, ny)
-                if 0 <= nx < S and 0 <= ny < S and beyond not in floors:
+                # 仅 inner [1..S-2] carve → perimeter 不动(恒墙)
+                if 1 <= nx <= S - 2 and 1 <= ny <= S - 2 and beyond not in floors:
                     frontier.append(((j[0] + bx, j[1] + by), beyond))
 
         _add_frontier(self.start)
