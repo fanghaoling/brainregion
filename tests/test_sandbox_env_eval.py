@@ -685,3 +685,62 @@ def test_run_env_eval_ephemeral_plumbing():
     ))
     assert set(report["per_arm"]) == {"eph_memregion", "eph_noregion"}
     assert len(report["runs"]) == 2 * 2 * 2
+
+
+# ---------- Phase 4.3 region registry block ----------
+
+
+def test_registry_block_full_cap_none():
+    """review:full=能力+客观触发;cap=仅能力;none=无块。动态(仅 active 脑区)。"""
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
+    # full + memory only(strategy False)→ 记忆脑区行 + 触发,无策略脑区行
+    p_full = build_env_system_prompt(env, "g", memory=True, strategy=False, registry="full")
+    assert "【脑区注册表】" in p_full
+    assert "记忆脑区" in p_full and "recall_map" in p_full
+    assert "当前视野看不到远处格子" in p_full          # 客观触发
+    assert "策略脑区" not in p_full or "plan" not in p_full.split("【脑区注册表】")[1].split("\n\n")[0]  # 无策略行
+    # cap → 能力,无触发(无「何时调」)
+    p_cap = build_env_system_prompt(env, "g", memory=True, registry="cap")
+    assert "【脑区注册表】" in p_cap and "记忆脑区" in p_cap
+    assert "何时调" not in p_cap and "当前视野看不到远处格子" not in p_cap
+    # none → 无块
+    p_none = build_env_system_prompt(env, "g", memory=True, registry="none")
+    assert "【脑区注册表】" not in p_none
+
+
+def test_registry_no_forgetting_hints():
+    """review opus-6 HIGH:registry 不写遗忘暗示(「你会忘/忘了/不保留历史视觉」)。"""
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
+    p = build_env_system_prompt(env, "g", memory=True, strategy=True, registry="full")
+    for bias in ("你会忘", "忘了", "不保留历史视觉", "你的上下文不保留"):
+        assert bias not in p, f"registry 含遗忘暗示: {bias}"
+
+
+def test_registry_dynamic_strategy_line():
+    """review gpt-5.5-5:registry 动态 —— strategy 激活才列策略脑区行。"""
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
+    p = build_env_system_prompt(env, "g", memory=True, strategy=True, registry="full")
+    block = p.split("【脑区注册表】")[1]
+    assert "记忆脑区" in block and "策略脑区" in block   # 两行都列
+
+
+def test_registry_arms_assembly():
+    from brainregion.sandbox.env_eval import ARMS_REGISTRY
+    names = [a.name for a in ARMS_REGISTRY]
+    assert names == ["eph_memregion", "eph_memregion_regcap", "eph_memregion_reg"]
+    assert ARMS_REGISTRY[0].registry == "none"
+    assert ARMS_REGISTRY[1].registry == "cap"
+    assert ARMS_REGISTRY[2].registry == "full"
+    assert all(a.visual_ephemeral and a.memory_region for a in ARMS_REGISTRY)
+
+
+def test_run_env_eval_registry_plumbing():
+    """end-to-end:registry 三臂 × 小 configs × repeats → 报告含三臂。"""
+    configs = [EnvConfig(size=5, seed=1, visibility_radius=1), EnvConfig(size=5, seed=2, visibility_radius=1)]
+    arms = (EnvArm("eph_memregion", memory_region=True, visual_ephemeral=True),
+            EnvArm("eph_memregion_reg", memory_region=True, visual_ephemeral=True, registry="full"))
+    report = asyncio.run(run_env_eval(
+        _GiveUpBackend(), "mock", configs, arms, repeats=2, max_cost_usd=2.0, log_progress=False,
+    ))
+    assert set(report["per_arm"]) == {"eph_memregion", "eph_memregion_reg"}
+    assert len(report["runs"]) == 2 * 2 * 2

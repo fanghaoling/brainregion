@@ -78,6 +78,7 @@ class EnvArm:
     strategy: str = "none"             # "none" | "real" | "echo" | "dummy"(echo=主脑自产无LLM;dummy=同源同成本固定模板)
     metronome: bool = False            # Phase 4.1 push 臂:无 pull 工具,节拍器每 N 步推脑区状态(清测内容价值)
     visual_ephemeral: bool = False     # Phase 4.2:剥历史视觉观察出 transcript(只留最新);逼主脑调脑区拿历史
+    registry: str = "none"             # Phase 4.3 脑区注册表块:"none"|"cap"(仅能力)|"full"(能力+客观触发)
 
 
 # 预设 = 常用比较的糖(CLI 也可 --arm 显式给 feature-config)
@@ -100,12 +101,18 @@ ARMS_EPHEMERAL: tuple[EnvArm, ...] = (        # Phase 4.2:剥视觉出 transcrip
     EnvArm("eph_noregion",  visual_ephemeral=True),                       # 基线:仅当前视野,无记忆
     EnvArm("eph_region",    memory_tool=True,  visual_ephemeral=True),    # 上界:recall_map→env.render() 完美 oracle
 )
+ARMS_REGISTRY: tuple[EnvArm, ...] = (         # Phase 4.3:脑区注册表块,测是否触发 consult(ephemeral 失败处)
+    EnvArm("eph_memregion",        memory_region=True, visual_ephemeral=True),                # baseline(无 registry)
+    EnvArm("eph_memregion_regcap", memory_region=True, visual_ephemeral=True, registry="cap"),   # 仅能力(显著性)
+    EnvArm("eph_memregion_reg",    memory_region=True, visual_ephemeral=True, registry="full"),  # 能力+客观触发
+)
 ARM_PRESETS: dict[str, tuple[EnvArm, ...]] = {
     "memory-strategy": ARMS_MEMORY_STRATEGY,
     "memory-baseline": ARMS_MEMORY_BASELINE,
     "metronome": ARMS_METRONOME,
     "ephemeral": ARMS_EPHEMERAL,
-    "all": ARMS_MEMORY_STRATEGY + ARMS_MEMORY_BASELINE + ARMS_METRONOME + ARMS_EPHEMERAL,
+    "registry": ARMS_REGISTRY,
+    "all": ARMS_MEMORY_STRATEGY + ARMS_MEMORY_BASELINE + ARMS_METRONOME + ARMS_EPHEMERAL + ARMS_REGISTRY,
 }
 
 
@@ -345,6 +352,7 @@ async def _run_one_episode(
                         strategy=(not arm.metronome and arm.strategy in ("real", "echo")),
                         metronome=arm.metronome,
                         # ephemeral 不改 prompt(GPT #5:不强调「你会忘」,现有 memory prompt 已说 observe=当前/recall_map=历史)
+                        registry=arm.registry,   # Phase 4.3 脑区注册表块(none/cap/full)
                     ),
                     verify_fn=verify,
                     memory_region=memory_region, strategy_region=run_strategy_region,
