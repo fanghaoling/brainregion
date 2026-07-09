@@ -42,7 +42,7 @@ logger = logging.getLogger("brainregion.sandbox.loop")
 CODE_REGIME_TOOLS = frozenset(
     {"read_text", "search_text", "inspect_file", "apply_text_patch", "workspace_run_check", "list_allowed_roots"}
 )
-ENV_TOOLS = frozenset({"observe", "act", "recall_map", "plan"})
+ENV_TOOLS = frozenset({"observe", "act", "recall_map", "plan", "recall_topo"})
 ALLOWED_TOOLS = CODE_REGIME_TOOLS | ENV_TOOLS
 _RESULT_CAP_CHARS = 4000
 
@@ -54,6 +54,10 @@ _current_env: ContextVar[Any] = ContextVar("_current_env", default=None)
 # Phase C 记忆脑区 gate:recall_map 仅在 memory 模式(_memory_mode True)可用;默认 False = code-regime
 # /非 memory env-run 幻觉调 recall_map → dispatch 显式报错(不崩,镜像 observe/act None-guard)。
 _memory_mode: ContextVar[bool] = ContextVar("_memory_mode", default=False)
+
+# Phase 4.6 拓扑记忆脑区 gate:recall_topo 仅在 topo 模式(_topo_region 非 None)可用。run_agent 拦截
+# recall_topo → _recall_via_topo 返 TopologicalRegion.state(env);幻觉调 → dispatch 显式报错(不崩)。
+_current_topo: ContextVar[Any] = ContextVar("_current_topo", default=None)
 
 
 @contextmanager
@@ -74,6 +78,16 @@ def scoped_memory_mode():
         yield
     finally:
         _memory_mode.reset(token)
+
+
+@contextmanager
+def scoped_topo(region):
+    """激活拓扑记忆脑区(recall_topo 可用,Phase 4.6)。runner 侧在 topo 臂时包 run_agent。RAII:退出复位。"""
+    token = _current_topo.set(region)
+    try:
+        yield region
+    finally:
+        _current_topo.reset(token)
 
 
 def _emit_env_step(action: str, frame: str, agent_view: str, reward: float, terminated: bool, info: dict) -> None:
@@ -337,6 +351,9 @@ def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
         elif call.tool == "plan":
             # Phase D.3 策略脑区:仅 strategy_region 设时被 run_agent 拦截(dispatch 到此 = 未激活/幻觉)。
             raise RuntimeError("plan: 策略脑区未激活(用 --strategy-region 启用)")
+        elif call.tool == "recall_topo":
+            # Phase 4.6 拓扑记忆脑区:仅 _current_topo 设时被 run_agent 拦截(dispatch 到此 = 未激活/幻觉)。
+            raise RuntimeError("recall_topo: 拓扑记忆脑区未激活(用 --topo 启用)")
         else:
             return "", "unreachable: unknown tool"
         return _compact(out), None
@@ -583,6 +600,7 @@ async def run_agent(
     max_recall_calls: int | None = None,
     strategy_region: Any = None,
     max_plan_calls: int | None = None,
+    topo_region: Any = None,            # Phase 4.6 拓扑记忆脑区(代码,无 LLM):recall_topo → 解读 env 图成 Trémaux 状态
     status_injector: Any = None,        # Phase 4.1 metronome:async (step, messages)->(status_str|None, cost_usd);None=现行为
     status_period: int = 3,
     visual_ephemeral: bool = False,     # Phase 4.2:剥历史视觉观察出 transcript(只留最新 <visual>);act 动作结果持久
@@ -728,6 +746,12 @@ async def run_agent(
                     prev_assistant=resp.content,  # Phase 4 EchoStrategy 控制臂用(real 忽略)
                 )
                 _plan_count += 1
+            elif call.tool == "recall_topo" and topo_region is not None and _env is not None:
+                # Phase 4.6 拓扑记忆:代码解读 env 图成 Trémaux 动作状态(无 LLM、无成本)。
+                try:
+                    result_str, exec_err = _compact(topo_region.state(_env)), None
+                except Exception as exc:  # noqa: BLE001 — 失败隔离:错误返 agent,不崩主 run
+                    result_str, exec_err = "", f"recall_topo 失败: {exc}"
             else:
                 result_str, exec_err = dispatch_tool(call)
             # act 后 dead-reckon:仅合法 act(moved/blocked/already_done)update;invalid 跳过 → pose 不失步
@@ -743,6 +767,9 @@ async def run_agent(
                     _status = "blocked"
                 if _status != "invalid":
                     memory_region.update(call.args.get("action"), _status, _env.relative_view())
+            # Phase 4.6 拓扑记忆:每步 act 后更新 trail(实际位置;去重 —— 原地/撞墙不重复)
+            if _act_before is not None and topo_region is not None:
+                topo_region.update(_env._agent)
             consecutive_errors = 0  # 成功(或可执行)解析 → 重置(连续错误是针对 parse/模型失败)
             preview = (result_str or exec_err or "")[:300]
             traj.steps.append(StepRecord(

@@ -31,8 +31,8 @@ from brainregion.eval import stats as eval_stats
 from .eval import evaluate_gate
 from .envs import GridWorld, build_env_system_prompt
 from .isolation import cleanup_run_dir, make_run_dir
-from .loop import _current_env, run_agent, scoped_env, scoped_memory_mode
-from .regions import EchoStrategy, MemoryRegion, StrategyRegion
+from .loop import _current_env, run_agent, scoped_env, scoped_memory_mode, scoped_topo
+from .regions import EchoStrategy, MemoryRegion, StrategyRegion, TopologicalRegion
 from .regions.strategy_region import _strip_to_thought
 from .task import SandboxTask
 
@@ -84,6 +84,8 @@ class EnvArm:
     visual_ephemeral: bool = False     # Phase 4.2:剥历史视觉观察出 transcript(只留最新);逼主脑调脑区拿历史
     registry: str = "none"             # Phase 4.3 脑区注册表块:"none"|"cap"(仅能力)|"full"(能力+客观触发)
     memory_dummy: bool = False         # Phase 4.4:matched-source dummy 记忆(同 LLM 调用,固定 content-free rough_map)
+    topo: bool = False                 # Phase 4.6:拓扑记忆脑区(recall_topo → 解读 Trémaux 状态)
+    topo_proc: bool = False            # Phase 4.6:Trémaux 系统探索程序(教主脑用 topo 状态)
 
 
 # 预设 = 常用比较的糖(CLI 也可 --arm 显式给 feature-config)
@@ -122,6 +124,12 @@ ARMS_MAZE_CONTENT: tuple[EnvArm, ...] = (     # Phase 4.5:迷宫上重跑 conten
     EnvArm("maze_dummy",  memory_region=True, visual_ephemeral=True, registry="cap", memory_dummy=True),  # content-free
     EnvArm("maze_oracle", memory_tool=True,   visual_ephemeral=True, registry="cap"),        # 完美图上界(recall_map→env.render)
 )
+ARMS_TOPO: tuple[EnvArm, ...] = (            # Phase 4.6:拓扑记忆脑区 + Trémaux 程序(在可解迷宫 braid=0.4)
+    EnvArm("topo_noregion", visual_ephemeral=True),                                          # 基线(无记忆,盲走)
+    EnvArm("topo_oracle",  memory_tool=True,  visual_ephemeral=True),                        # raw 像素图(解读前)
+    EnvArm("topo_state",   topo=True,         visual_ephemeral=True),                        # 解读后拓扑状态(无程序)
+    EnvArm("topo_proc",    topo=True, topo_proc=True, visual_ephemeral=True),                # 拓扑状态 + Trémaux 程序
+)
 ARM_PRESETS: dict[str, tuple[EnvArm, ...]] = {
     "memory-strategy": ARMS_MEMORY_STRATEGY,
     "memory-baseline": ARMS_MEMORY_BASELINE,
@@ -130,7 +138,8 @@ ARM_PRESETS: dict[str, tuple[EnvArm, ...]] = {
     "registry": ARMS_REGISTRY,
     "content": ARMS_CONTENT,
     "maze-content": ARMS_MAZE_CONTENT,
-    "all": ARMS_MEMORY_STRATEGY + ARMS_MEMORY_BASELINE + ARMS_METRONOME + ARMS_EPHEMERAL + ARMS_REGISTRY + ARMS_CONTENT + ARMS_MAZE_CONTENT,
+    "topo": ARMS_TOPO,
+    "all": ARMS_MEMORY_STRATEGY + ARMS_MEMORY_BASELINE + ARMS_METRONOME + ARMS_EPHEMERAL + ARMS_REGISTRY + ARMS_CONTENT + ARMS_MAZE_CONTENT + ARMS_TOPO,
 }
 
 
@@ -157,12 +166,12 @@ def build_env_for_config(cfg: EnvConfig) -> GridWorld:
 
 def build_regions_for_arm(
     arm: EnvArm, env: GridWorld, *, log_len: int = 32,
-) -> tuple[Any, Any, bool]:
-    """返 ``(memory_region, strategy_region, memory_mode)``。
+) -> tuple[Any, Any, bool, Any]:
+    """返 ``(memory_region, strategy_region, memory_mode, topo_region)``。
 
     memory_mode=True → runner 侧包 scoped_memory_mode(recall_map 可用)。memory_tool 臂无 region 但
     开 memory_mode(Phase C 被动图);memory_region 臂 new MemoryRegion;strategy real→StrategyRegion,
-    echo→EchoStrategy,none→None。
+    echo→EchoStrategy,none→None。topo(Phase 4.6)→ new TopologicalRegion(start=env.start)。
     """
     memory_mode = arm.memory_tool or arm.memory_region
     memory_region = MemoryRegion(start=env.start, log_len=log_len, dummy=arm.memory_dummy) if arm.memory_region else None
@@ -172,7 +181,8 @@ def build_regions_for_arm(
         strategy_region = EchoStrategy()          # 占位(echo injector 不调 region,返主脑自产)
     else:
         strategy_region = None
-    return memory_region, strategy_region, memory_mode
+    topo_region = TopologicalRegion(start=env.start) if arm.topo else None
+    return memory_region, strategy_region, memory_mode, topo_region
 
 
 def _format_status(*, mem: str, strat: str) -> str:
@@ -282,6 +292,24 @@ def _revisit_rate(positions: list[tuple[int, int]]) -> float | None:
     return revisits / successful
 
 
+def _reverse_rate(positions: list[tuple[int, int]]) -> float | None:
+    """Phase 4.6 回溯代理:act 移动中「回到上一格」(pos[i]==pos[i-2],即 A→B→A 反向)的比例。
+
+    Trémaux 死胡同回溯(topo_proc)应高(遇死胡同原路退一格);盲走/oracle 应低(无系统回溯)。
+    代理指标(不区分「死胡同回溯」vs「来回横跳」,但结合 n_recall_topo + solve_rate 可读)。
+    """
+    if len(positions) < 3:
+        return None
+    reverses = 0
+    moves = 0
+    for i in range(2, len(positions)):
+        if positions[i] != positions[i - 1]:  # 成功移动(非原地)
+            moves += 1
+            if positions[i] == positions[i - 2]:
+                reverses += 1
+    return reverses / moves if moves else None
+
+
 def _coverage(env: GridWorld) -> float | None:
     """网格探索覆盖率 = min(1.0, explored/size²)。分母 size²(恒 ≥4;review 双强统一口径,免可达争议)。
 
@@ -348,13 +376,17 @@ async def _run_one_episode(
     strategy_region 传 None 给 run_agent(禁 plan-intercept),真对象由 injector 闭包持有。
     """
     env = build_env_for_config(cfg)
-    memory_region, strategy_region, memory_mode = build_regions_for_arm(arm, env, log_len=log_len)
-    # goal_text 臂感知:push 臂不提 pull 工具;无记忆臂(noregion)不提 recall_map;real/echo 提 plan。
+    memory_region, strategy_region, memory_mode, topo_region = build_regions_for_arm(arm, env, log_len=log_len)
+    # goal_text 臂感知:push 臂不提 pull 工具;无记忆臂(noregion)不提 recall_map;real/echo 提 plan;topo 提 recall_topo。
     if arm.metronome:
         goal_text = "找到并到达藏在网格里的目标 G(observe 只看当前视野;每几步收到脑区背景状态作参考;先探索再过去)"
     else:
-        has_memory = arm.memory_tool or arm.memory_region
-        tools_hint = "recall_map 拿累积探索图/记忆理解" if has_memory else "靠当前视野探索"
+        if arm.topo:
+            tools_hint = "recall_topo 拿拓扑动作状态(未探索出口/死胡同/回溯方向)"
+        elif arm.memory_tool or arm.memory_region:
+            tools_hint = "recall_map 拿累积探索图/记忆理解"
+        else:
+            tools_hint = "靠当前视野探索"
         if arm.strategy in ("real", "echo"):
             tools_hint += ",plan 拿策略意图"
         goal_text = f"找到并到达藏在网格里的目标 G(observe 只看当前视野,{tools_hint};先探索拼图再过去)"
@@ -381,24 +413,26 @@ async def _run_one_episode(
     try:
         with scoped_env(env):
             with scoped_memory_mode() if memory_mode else nullcontext():
-                traj = await run_agent(
-                    backend, model, task, run_dir=run_dir, arm="none",
-                    max_steps=cfg.max_steps, max_cost_usd=max_cost_usd,
-                    temperature=temperature, max_tokens=max_tokens,
-                    endpoint_id=endpoint_id, thinking=thinking, effort=effort,
-                    system_prompt=build_env_system_prompt(
-                        env, goal_text,
-                        memory=(arm.memory_tool or arm.memory_region) and not arm.metronome,  # 有 recall_map 才 memory=True
-                        strategy=(not arm.metronome and arm.strategy in ("real", "echo")),
-                        metronome=arm.metronome,
-                        # ephemeral 不改 prompt(GPT #5:不强调「你会忘」,现有 memory prompt 已说 observe=当前/recall_map=历史)
-                        registry=arm.registry,   # Phase 4.3 脑区注册表块(none/cap/full)
-                    ),
-                    verify_fn=verify,
-                    memory_region=memory_region, strategy_region=run_strategy_region,
-                    status_injector=injector, status_period=status_period,
-                    visual_ephemeral=arm.visual_ephemeral,
-                )
+                with scoped_topo(topo_region) if topo_region else nullcontext():
+                    traj = await run_agent(
+                        backend, model, task, run_dir=run_dir, arm="none",
+                        max_steps=cfg.max_steps, max_cost_usd=max_cost_usd,
+                        temperature=temperature, max_tokens=max_tokens,
+                        endpoint_id=endpoint_id, thinking=thinking, effort=effort,
+                        system_prompt=build_env_system_prompt(
+                            env, goal_text,
+                            memory=(arm.memory_tool or arm.memory_region) and not arm.metronome,
+                            strategy=(not arm.metronome and arm.strategy in ("real", "echo")),
+                            metronome=arm.metronome,
+                            registry=arm.registry,
+                            topo=arm.topo, topo_proc=arm.topo_proc,   # Phase 4.6 拓扑记忆 + Trémaux 程序
+                        ),
+                        verify_fn=verify,
+                        memory_region=memory_region, strategy_region=run_strategy_region,
+                        topo_region=topo_region,
+                        status_injector=injector, status_period=status_period,
+                        visual_ephemeral=arm.visual_ephemeral,
+                    )
     finally:
         cleanup_run_dir(run_dir)
 
@@ -414,6 +448,8 @@ async def _run_one_episode(
         # memory_tool 臂(oracle)走 dispatch_tool 返 {"map":...}(无 rough_map 键,非降级)→ 0,免误报。
         "n_recall_degraded": _n_recall_degraded(traj) if arm.memory_region else 0,
         "n_plan": sum(1 for s in traj.steps if s.tool == "plan"),
+        "n_recall_topo": sum(1 for s in traj.steps if s.tool == "recall_topo"),  # Phase 4.6 拓扑记忆 consult
+        "reverse_rate": _reverse_rate(positions),   # Phase 4.6 回溯代理(回到上一格比例;Trémaux 死胡同回溯应高)
         "revisit_rate": _revisit_rate(positions),
         "coverage": _coverage(env),
         "status_referenced": _status_referenced(traj, status_period) if arm.metronome else None,
@@ -438,6 +474,8 @@ def _agg_arm_runs(arm_runs: list[dict]) -> dict:
         "mean_revisit_rate": _mean("revisit_rate"), "mean_coverage": _mean("coverage"),
         "mean_n_plan": _mean("n_plan"), "mean_n_recall": _mean("n_recall"),
         "mean_n_recall_degraded": _mean("n_recall_degraded"),   # Phase 4.4:oracle 降级稀释内容信号
+        "mean_n_recall_topo": _mean("n_recall_topo"),           # Phase 4.6 拓扑记忆 consult 次数
+        "mean_reverse_rate": _mean("reverse_rate"),             # Phase 4.6 回溯代理(Trémaux 死胡同回溯)
         "mean_status_referenced": _mean("status_referenced"),   # Phase 4.1 push 臂(post-push 引用 status 比例)
     }
 

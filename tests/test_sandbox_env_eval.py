@@ -46,8 +46,9 @@ from brainregion.sandbox.loop import (
     run_agent,
     scoped_env,
     scoped_memory_mode,
+    scoped_topo,
 )
-from brainregion.sandbox.regions import MemoryRegion, StrategyRegion
+from brainregion.sandbox.regions import MemoryRegion, StrategyRegion, TopologicalRegion
 from brainregion.sandbox.regions.memory_region import _DUMMY_ROUGH_MAP
 from brainregion.sandbox.regions.strategy_region import _strip_to_thought
 from brainregion.sandbox import cleanup_run_dir, make_run_dir
@@ -239,14 +240,18 @@ def test_positions_from_traj_replays_act_steps():
 
 def test_build_regions_for_arm_assembly():
     env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
-    mem, strat, mm = build_regions_for_arm(EnvArm("memory_tool", memory_tool=True), env)
-    assert mem is None and strat is None and mm is True
-    mem, strat, mm = build_regions_for_arm(EnvArm("memory_only", memory_region=True), env)
-    assert isinstance(mem, MemoryRegion) and strat is None and mm is True
-    mem, strat, mm = build_regions_for_arm(EnvArm("memory_strategy", memory_region=True, strategy="real"), env)
+    mem, strat, mm, topo = build_regions_for_arm(EnvArm("memory_tool", memory_tool=True), env)
+    assert mem is None and strat is None and mm is True and topo is None
+    mem, strat, mm, topo = build_regions_for_arm(EnvArm("memory_only", memory_region=True), env)
+    assert isinstance(mem, MemoryRegion) and strat is None and mm is True and topo is None
+    mem, strat, mm, topo = build_regions_for_arm(EnvArm("memory_strategy", memory_region=True, strategy="real"), env)
     assert isinstance(strat, StrategyRegion) and mm is True
-    mem, strat, mm = build_regions_for_arm(EnvArm("memory_echo", memory_region=True, strategy="echo"), env)
+    mem, strat, mm, topo = build_regions_for_arm(EnvArm("memory_echo", memory_region=True, strategy="echo"), env)
     assert isinstance(strat, EchoStrategy)
+    # Phase 4.6 拓扑记忆脑区装配
+    from brainregion.sandbox.regions import TopologicalRegion
+    mem, strat, mm, topo = build_regions_for_arm(EnvArm("topo_arm", topo=True), env)
+    assert isinstance(topo, TopologicalRegion) and mem is None and mm is False
 
 
 def test_arm_presets_shape():
@@ -840,8 +845,8 @@ def test_content_arms_assembly():
     assert ARMS_CONTENT[2].registry == "cap" and ARMS_CONTENT[2].memory_dummy
     # build_regions_for_arm
     env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
-    mem_real, _, _ = build_regions_for_arm(ARMS_CONTENT[1], env)
-    mem_dummy, _, _ = build_regions_for_arm(ARMS_CONTENT[2], env)
+    mem_real, _, _, _ = build_regions_for_arm(ARMS_CONTENT[1], env)
+    mem_dummy, _, _, _ = build_regions_for_arm(ARMS_CONTENT[2], env)
     assert mem_real.dummy is False and mem_dummy.dummy is True
 
 
@@ -926,4 +931,145 @@ def test_run_env_eval_content_plumbing():
     assert len(report["runs"]) == 2 * 3 * 2
     assert "n_recall_degraded" in report["runs"][0]
     assert "mean_n_recall_degraded" in report["per_arm"]["eph_regcap_real"]
+
+
+# ---------- Phase 4.6 拓扑记忆脑区(recall_topo)+ Trémaux 程序 + 回溯 ----------
+
+
+def _maze_env_for_topo():
+    """小迷宫(Prim's,braid=0.2):供 topo region 状态测试。"""
+    return GridWorld(size=9, maze_seed=1, maze_braid=0.2, visibility_radius=2, strict_obs=True)
+
+
+def test_topo_region_state_frontier_deadend_backtrack():
+    """TopologicalRegion.state:岔路 frontier=未踩 seen-floor 邻 / 死胡同 is_dead_end / 回溯 backtrack_direction。"""
+    from brainregion.sandbox.envs import GridWorld
+    # 简单手构 env:walls 围一个 T 字;start (1,1);(2,1)(1,2) floor=岔路;(1,1) 有 frontier
+    env = GridWorld(size=5, start=(1, 1), goal=(3, 3), visibility_radius=2, strict_obs=True)
+    env._explored = {(0, 0), (1, 1), (2, 1), (1, 2), (3, 3)}  # seen floors(含未踩 (2,1)(1,2))
+    topo = TopologicalRegion(start=(1, 1))  # trail=[(1,1)]
+    st = topo.state(env)
+    # (1,1) 邻:(2,1)/(1,2) seen-floor 未踩 → frontier;(0,1)/(1,0) 视墙况
+    assert "right" in st["frontier_directions"] or "down" in st["frontier_directions"]
+    assert st["backtrack_direction"] is None  # trail 仅 start,无回溯
+    # 走到 (2,1)(死胡同:仅回 (1,1))→ is_dead_end / backtrack=left
+    topo.update((2, 1))
+    env._agent = (2, 1)
+    env._explored.add((3, 1))  # (3,1) 视情况:若墙则 (2,1) 死胡同
+    st2 = topo.state(env)
+    assert st2["backtrack_direction"] == "left"  # 回 (1,1)
+    if st2["frontier_directions"] == []:
+        assert st2["is_dead_end"] is True or st2["should_backtrack"] is True
+
+
+def test_topo_region_trail_dedup_no_move():
+    """update 同位置(撞墙/原地)不重复 append trail。"""
+    env = _maze_env_for_topo()
+    topo = TopologicalRegion(start=env.start)
+    n0 = len(topo.trail)
+    topo.update(env.start)  # 同位
+    topo.update(env.start)
+    assert len(topo.trail) == n0  # 去重
+
+
+def test_topo_arms_assembly():
+    """ARMS_TOPO 四臂 + topo/topo_proc 字段。"""
+    from brainregion.sandbox.env_eval import ARMS_TOPO
+    names = [a.name for a in ARMS_TOPO]
+    assert names == ["topo_noregion", "topo_oracle", "topo_state", "topo_proc"]
+    assert ARMS_TOPO[0].topo is False                                  # noregion 无 topo
+    assert ARMS_TOPO[1].memory_tool and ARMS_TOPO[1].topo is False     # oracle raw 图
+    assert ARMS_TOPO[2].topo and ARMS_TOPO[2].topo_proc is False       # state(无程序)
+    assert ARMS_TOPO[3].topo and ARMS_TOPO[3].topo_proc is True        # proc(拓扑+Trémaux)
+
+
+def test_build_env_system_prompt_topo_branches():
+    """topo 臂 prompt 含 recall_topo;topo_proc 含 Trémaux 程序;无 topo 不含。"""
+    env = _maze_env_for_topo()
+    p_state = build_env_system_prompt(env, "g", topo=True, topo_proc=False)
+    assert "recall_topo" in p_state and "拓扑记忆脑区" in p_state
+    assert "Trémaux" not in p_state  # state 臂无程序
+    p_proc = build_env_system_prompt(env, "g", topo=True, topo_proc=True)
+    assert "Trémaux" in p_proc and "回溯" in p_proc
+    p_none = build_env_system_prompt(env, "g", memory=True)
+    assert "recall_topo" not in p_none  # 非 topo 臂不泄漏
+
+
+def test_recall_topo_via_run_agent_intercept():
+    """run_agent 拦 recall_topo → 返 TopologicalRegion.state;topo_region None → dispatch 优雅错误。"""
+    env = _maze_env_for_topo()
+    captured = []
+
+    class _B:
+        async def complete_messages(self, messages, **kw):
+            captured.append(messages)
+            return ModelResponse(model="m", content=_J({"thought": "看拓扑", "tool": "recall_topo", "args": {}}),
+                                 usage={}, cost_usd=0.0)
+
+    task = SandboxTask(id="topo-test", goal="到 G")
+    topo = TopologicalRegion(start=env.start)
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            with scoped_topo(topo):
+                traj = asyncio.run(run_agent(
+                    _B(), "m", task, run_dir=run_dir, arm="none", max_steps=1,
+                    system_prompt=build_env_system_prompt(env, "到 G", topo=True, topo_proc=True),
+                    verify_fn=_make_env_verify(env), topo_region=topo,
+                ))
+    finally:
+        cleanup_run_dir(run_dir)
+    # recall_topo 被拦 → trajectory 含 + result 是 state(frontier_directions 字段)
+    assert any(s.tool == "recall_topo" for s in traj.steps)
+    rt = next(s for s in traj.steps if s.tool == "recall_topo")
+    assert "frontier_directions" in (rt.result_preview or "")
+
+
+def test_recall_topo_none_guard_dispatch_error():
+    """topo_region 未激活 → 幻觉调 recall_topo → dispatch 显式错误(不崩),镜像 observe/act None-guard。"""
+    env = _maze_env_for_topo()
+
+    class _B:
+        async def complete_messages(self, messages, **kw):
+            return ModelResponse(model="m", content=_J({"thought": "x", "tool": "recall_topo", "args": {}}),
+                                 usage={}, cost_usd=0.0)
+
+    task = SandboxTask(id="topo-none", goal="到 G")
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            traj = asyncio.run(run_agent(  # 无 topo_region → 走 dispatch → 报错反馈
+                _B(), "m", task, run_dir=run_dir, arm="none", max_steps=1,
+                system_prompt=build_env_system_prompt(env, "到 G", memory=True),
+                verify_fn=_make_env_verify(env),
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+    rt = next((s for s in traj.steps if s.tool == "recall_topo"), None)
+    assert rt is not None and rt.error and "未激活" in rt.error
+
+
+def test_reverse_rate_metric():
+    """A→B→A→C(1 reverse / 2 moves = 0.5)+ 纯前进(0.0)+ 太短(None)。"""
+    from brainregion.sandbox.env_eval import _reverse_rate
+    # (0,0)→(1,0)→(0,0)→(0,1): i=2 reverse(pos2==pos0), i=3 非(pos3≠pos1)→ 1/2
+    assert _reverse_rate([(0, 0), (1, 0), (0, 0), (0, 1)]) == 0.5
+    # 纯前进无 reverse
+    assert _reverse_rate([(0, 0), (1, 0), (2, 0)]) == 0.0
+    # 太短 → None
+    assert _reverse_rate([(0, 0), (1, 0)]) is None
+
+
+def test_run_env_eval_topo_plumbing():
+    """end-to-end:topo 四臂 × 小迷宫 configs × repeats → 报告含四臂 + n_recall_topo/reverse_rate 字段。"""
+    configs = [EnvConfig(size=9, seed=1, maze=True, maze_braid=0.2, visibility_radius=2)]
+    from brainregion.sandbox.env_eval import ARMS_TOPO
+    report = asyncio.run(run_env_eval(
+        _GiveUpBackend(), "mock", configs, ARMS_TOPO, repeats=2, max_cost_usd=2.0, log_progress=False,
+    ))
+    assert set(report["per_arm"]) == {"topo_noregion", "topo_oracle", "topo_state", "topo_proc"}
+    assert len(report["runs"]) == 1 * 4 * 2
+    assert "n_recall_topo" in report["runs"][0] and "reverse_rate" in report["runs"][0]
+    assert "mean_reverse_rate" in report["per_arm"]["topo_proc"]
+
 
