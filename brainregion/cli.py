@@ -297,6 +297,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_env.add_argument("--strategy-region", action="store_true",
                           help="Phase D.3 策略脑区(LLM 规划器):plan 工具调策略脑区(读记忆脑区理解,提意图"
                           "去哪/子目标,不给动作);隐含 --memory-region。A/B:Memory-only vs Memory+Strategy")
+    # --- Phase 4.2/4.3/4.4 env-regime 旋钮(单 episode 可视化用;复刻 env-eval 臂配置)---
+    p_sb_env.add_argument("--visual-ephemeral", action="store_true",
+                          help="Phase 4.2:剥历史视觉观察出 transcript(只留最新 <visual>);act 动作结果持久。"
+                          "逼主脑调 recall_map 拿历史视觉(测脑区是否变必需)。配 --memory-region 用。")
+    p_sb_env.add_argument("--registry", default="none", choices=["none", "cap", "full"],
+                          help="Phase 4.3 脑区注册表块:none=无 | cap=仅能力(显著性)| full=能力+客观触发。"
+                          "需 --memory-region/--strategy-region 才列脑区。")
+    p_sb_env.add_argument("--memory-dummy", action="store_true",
+                          help="Phase 4.4 matched-source dummy 记忆:同 LLM 调用,喂回固定 content-free "
+                          "rough_map(content-null 控制臂)。需 --memory-region。A/B:real vs dummy 内容价值。")
     p_sb_env.add_argument("--debug-port", type=int, default=8765, help="--debug 调试窗端口(默认 8765)")
 
     # --- Phase 4 formal A/B harness(env-regime)---

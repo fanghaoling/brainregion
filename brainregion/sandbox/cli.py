@@ -431,11 +431,17 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
     memory_region = None
     if memory_region_on:  # Phase D.2:有状态记忆脑区(代码 dead-reckon + LLM rough_map)
         from brainregion.sandbox.regions import MemoryRegion
-        memory_region = MemoryRegion(start=env.start, log_len=int(getattr(args, "memory_log_len", 32) or 32))
+        memory_region = MemoryRegion(
+            start=env.start, log_len=int(getattr(args, "memory_log_len", 32) or 32),
+            dummy=bool(getattr(args, "memory_dummy", False)),   # Phase 4.4:matched-source dummy 内容控制
+        )
     strategy_region = None
     if strategy_region_on:  # Phase D.3:策略脑区(读 memory.rough_map 规划,多脑区协同)
         from brainregion.sandbox.regions import StrategyRegion
         strategy_region = StrategyRegion()
+    # Phase 4.2/4.3 旋钮(单 episode 复刻 env-eval 臂配置,供 --debug 可视化)
+    visual_ephemeral = bool(getattr(args, "visual_ephemeral", False))
+    registry_mode = getattr(args, "registry", "none") or "none"
 
     run_dir = make_run_dir()
     try:
@@ -451,8 +457,12 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
                     consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
                     transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
                     endpoint_id=endpoint_id, thinking=_thinking_arg(args), effort=args.effort,
-                    system_prompt=build_env_system_prompt(env, goal_text, memory=memory, strategy=strategy_region_on), verify_fn=verify,
+                    system_prompt=build_env_system_prompt(
+                        env, goal_text, memory=memory, strategy=strategy_region_on,
+                        registry=registry_mode,   # Phase 4.3 脑区注册表块(none/cap/full)
+                    ), verify_fn=verify,
                     memory_region=memory_region, strategy_region=strategy_region,
+                    visual_ephemeral=visual_ephemeral,   # Phase 4.2:剥历史视觉(只留最新 <visual>)
                 )
     finally:
         cleanup_run_dir(run_dir)
@@ -464,6 +474,8 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         "n_steps": traj.n_steps, "termination": traj.termination_reason,
         "visibility_radius": env.visibility_radius, "goal_pos": tuple(env.goal),
         "n_walls": len(env.walls), "memory_region": memory_region_on, "strategy_region": strategy_region_on,
+        "visual_ephemeral": visual_ephemeral, "registry": registry_mode,
+        "memory_dummy": bool(getattr(args, "memory_dummy", False)),
     }
     out_dir = Path(".brain-region") / "sandbox"
     out_dir.mkdir(parents=True, exist_ok=True)
