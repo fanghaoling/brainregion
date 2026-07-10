@@ -314,6 +314,8 @@ def build_parser() -> argparse.ArgumentParser:
                           "隐含 fog(经 --memory-region)。配 --maze-braid 调难度。")
     p_sb_env.add_argument("--maze-braid", type=float, default=0.2,
                           help="迷宫去死胡同比例(0=完美迷宫最难,0.2=地牢感略易,1.0=全去)。默认 0.2。")
+    p_sb_env.add_argument("--ego-actions", action="store_true",
+                          help="Phase 4.8:ego-relative action(agent 有朝向,action=forward/turn_left/turn_right)")
     p_sb_env.add_argument("--debug-port", type=int, default=8765, help="--debug 调试窗端口(默认 8765)")
 
     # --- Phase 4 formal A/B harness(env-regime)---
@@ -331,6 +333,8 @@ def build_parser() -> argparse.ArgumentParser:
                                help="Phase 4.5 迷宫地形(recursive backtracker;seed 作 maze_seed)。覆盖随机墙。")
     p_sb_env_eval.add_argument("--maze-braid", type=float, default=0.2,
                                help="迷宫去死胡同比例(0=完美最难,0.2 地牢感,1.0 全去)。默认 0.2。")
+    p_sb_env_eval.add_argument("--ego-actions", action="store_true",
+                               help="Phase 4.8:ego-relative action(forward/turn;config 级,across all arms)")
     p_sb_env_eval.add_argument("--max-steps", type=int, default=None, help="per-run 步上限(默认 30)")
     p_sb_env_eval.add_argument("--repeats", type=int, default=3, help="每 (config,arm) 重复 run 数(pilot=3;formal≥10)")
     p_sb_env_eval.add_argument("--metronome-period", type=int, default=3,

@@ -17,9 +17,7 @@ from __future__ import annotations
 
 from typing import Any
 
-_DELTA: dict[str, tuple[int, int]] = {
-    "up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0),
-}
+from ..envs._actions import ABS_DELTA, relative_direction
 
 
 class TopologicalRegion:
@@ -47,16 +45,21 @@ class TopologicalRegion:
           → 可探索出口(Trémaux:优先去这)。
         - is_dead_end:无 frontier 且非墙出口 ≤1(只剩来路)→ 原路退回。
         - backtrack_direction:当前 → trail[-2] 的方向(原路退回方向);trail<2 时 None。
-        - has_frontier_in_trail:trail 上是否还有未探索出口的 cell(回溯目标存在与否)。
+
+        **ego 模式**(``env.ego_actions`` True,GPT#1 判模式):frontier/backtrack 转相对 heading
+        (forward/left/right/back),suggestion 吐可执行 ego 配方(turn_left 后 forward);abs 模式
+        仍吐 abs 词(零回归)。
         """
         cur = tuple(env._agent)
         walls = env.walls
         explored = getattr(env, "_explored", set())
         trail_set = set(self.trail)
+        ego = bool(getattr(env, "ego_actions", False))
+        heading = getattr(env, "_heading", None)
 
-        frontier_dirs: list[str] = []
+        frontier_abs: list[str] = []
         exit_count = 0  # 非墙邻数(出口)
-        for d, (dx, dy) in _DELTA.items():
+        for d, (dx, dy) in ABS_DELTA.items():
             n = (cur[0] + dx, cur[1] + dy)
             if n in walls:
                 continue
@@ -66,38 +69,68 @@ class TopologicalRegion:
                 continue
             exit_count += 1
             if n in explored and n not in trail_set:
-                frontier_dirs.append(d)  # seen-floor 未踩 = 可探索
+                frontier_abs.append(d)  # seen-floor 未踩 = 可探索
 
         # 回溯方向:当前 → trail[-2]
-        backtrack = None
+        backtrack_abs = None
         if len(self.trail) >= 2:
             prev = self.trail[-2]
             ddx, ddy = prev[0] - cur[0], prev[1] - cur[1]
-            for d, (dx, dy) in _DELTA.items():
+            for d, (dx, dy) in ABS_DELTA.items():
                 if (dx, dy) == (ddx, ddy):
-                    backtrack = d
+                    backtrack_abs = d
                     break
 
-        is_dead_end = (len(frontier_dirs) == 0) and exit_count <= 1
-        should_backtrack = len(frontier_dirs) == 0  # 无未探索出口 → 回溯(死胡同或岔路全探过)
+        is_dead_end = (len(frontier_abs) == 0) and exit_count <= 1
+        should_backtrack = len(frontier_abs) == 0  # 无未探索出口 → 回溯(死胡同或岔路全探过)
+
+        if ego and heading:  # ego:转相对 heading + 可执行配方(无 abs 词泄漏,review opus-3/gpt-3)
+            order = {"forward": 0, "left": 1, "right": 2, "back": 3}
+            frontier_rel = sorted((relative_direction(d, heading) for d in frontier_abs), key=lambda x: order.get(x, 9))
+            backtrack_rel = relative_direction(backtrack_abs, heading) if backtrack_abs else None
+            return {
+                "current": list(cur),
+                "heading": heading,
+                "frontier_directions": frontier_rel,
+                "is_dead_end": is_dead_end,
+                "should_backtrack": should_backtrack,
+                "backtrack_direction": backtrack_rel,
+                "trail_length": len(self.trail),
+                "suggestion": _suggest_ego(frontier_rel, backtrack_rel, should_backtrack),
+            }
 
         return {
             "current": list(cur),
-            "frontier_directions": frontier_dirs,
+            "frontier_directions": frontier_abs,
             "is_dead_end": is_dead_end,
             "should_backtrack": should_backtrack,
-            "backtrack_direction": backtrack,
+            "backtrack_direction": backtrack_abs,
             "trail_length": len(self.trail),
-            "suggestion": _suggest(frontier_dirs, backtrack, should_backtrack),
+            "suggestion": _suggest(frontier_abs, backtrack_abs, should_backtrack),
         }
 
 
 def _suggest(frontier_dirs: list[str], backtrack: str | None, should_backtrack: bool) -> str:
-    """中文可执行建议(给主脑依 Trémaux 程序用);非动作指令,是状态解读。"""
+    """中文可执行建议(abs 模式,给主脑依 Trémaux 程序用);非动作指令,是状态解读。"""
     if frontier_dirs:
         return f"有未探索出口 {frontier_dirs};依 Trémaux 选一个 act 去探"
     if should_backtrack and backtrack:
         return f"无可探索出口;原路回溯,act 向 {backtrack}"
+    return "无可探索出口也无回溯方向(起点或异常)"
+
+
+def _suggest_ego(frontier_rel: list[str], backtrack_rel: str | None, should_backtrack: bool) -> str:
+    """ego 可执行配方(相对 heading;无 abs 词,无 turn_180 → back 用 turn_left×2)。"""
+    if frontier_rel:
+        if "forward" in frontier_rel:
+            return "有未探索出口在前方;act forward 去探"
+        return f"有未探索出口在你{frontier_rel}侧;转向后 forward(如 turn_left 后 forward)"
+    if should_backtrack and backtrack_rel:
+        if backtrack_rel == "forward":
+            return "回溯在前方;act forward 原路退回"
+        if backtrack_rel == "back":
+            return "回溯在身后;turn_left turn_left(掉头)后 forward 原路退回"
+        return f"回溯在你{backtrack_rel}侧;turn_{backtrack_rel} 后 forward 原路退回"
     return "无可探索出口也无回溯方向(起点或异常)"
 
 

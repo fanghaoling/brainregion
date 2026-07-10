@@ -14,13 +14,7 @@ from __future__ import annotations
 import json
 from typing import Any
 
-# dead-reckon 动作 → pose delta(网格适配;镜像 gridworld._ACTION_DELTA)。
-_ACTION_DELTA: dict[str, tuple[int, int]] = {
-    "up": (0, -1),
-    "down": (0, 1),
-    "left": (-1, 0),
-    "right": (1, 0),
-}
+from ..envs._actions import ABS, ActionModel, INITIAL_HEADING
 _ROUGH_MAP_CAP = 1000  # rough_map 字符上界(留尾:近期理解优先,旧截断;防跨 recall 膨胀撑爆 prompt)
 
 # Phase 4.4 matched-source dummy:固定 **结构化 content-free** rough_map(镜像 real 响应形状,
@@ -98,8 +92,13 @@ class MemoryRegion:
     def __init__(
         self, *, start: tuple[int, int] = (0, 0), log_len: int = 32,
         temperature: float = 0.0, max_tokens: int = 1024, dummy: bool = False,
+        action_model: ActionModel = ABS, heading: str = INITIAL_HEADING,
     ) -> None:
         self.pose: tuple[int, int] = tuple(start)
+        # Phase 4.8:持 ActionModel(gpt-1,非裸 heading)—— abs/ego 解码统一走 model;
+        # heading = ego dead-reckon 朝向(abs 模式占位不用)。默认 ABS+INITIAL = abs 零回归。
+        self.action_model: ActionModel = action_model
+        self.heading: str = heading
         self.movement_log: list[dict] = []
         self.rough_map: str = ""
         self.log_len = int(log_len)
@@ -108,13 +107,20 @@ class MemoryRegion:
         self.dummy = bool(dummy)   # Phase 4.4:matched-source dummy(同 LLM 调用,固定 content-free rough_map)
 
     def update(self, action: str | None, status: str, rel_view: str) -> None:
-        """代码 dead-reckon:仅 ``moved`` 推进 pose;movement_log 追 {action, status}(有界 FIFO)。不调 LLM。
+        """代码 dead-reckon:``moved`` 推进 pose、``turned`` 旋转 heading(ego);movement_log 追 {action, status}。
 
-        invalid act 由调用方跳过(不调 update)→ pose 不失步。rel_view 当前未用(预留 domain-agnostic 契约)。
+        - abs:``moved`` + abs 动作 → pose += ABS_DELTA(零回归,heading 不用)。
+        - ego:``turned`` → ``heading = model.heading_after``(pose 不变);``moved`` + forward →
+          pose += HEADING_DELTA[heading]。所有 heading 变换**唯一**走 ``model.heading_after``(review opus-8)。
+        - invalid 由调用方跳过(不调 update)→ pose/heading 不失步。rel_view 预留 domain-agnostic 契约。
         """
-        if status == "moved" and action in _ACTION_DELTA:
-            dx, dy = _ACTION_DELTA[action]
-            self.pose = (self.pose[0] + dx, self.pose[1] + dy)
+        if action is not None:
+            if status == "turned" and self.action_model.is_turn(action):
+                self.heading = self.action_model.heading_after(action, self.heading)
+            elif status == "moved" and self.action_model.is_move(action):
+                delta = self.action_model.delta(action, self.heading)
+                if delta is not None:
+                    self.pose = (self.pose[0] + delta[0], self.pose[1] + delta[1])
         self.movement_log.append({"action": action, "status": status})
         if len(self.movement_log) > self.log_len:
             self.movement_log = self.movement_log[-self.log_len :]

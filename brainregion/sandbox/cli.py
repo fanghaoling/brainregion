@@ -394,6 +394,8 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
     if bool(getattr(args, "maze", False)):
         goal_kw["maze_seed"] = getattr(args, "seed", None) if getattr(args, "seed", None) is not None else 0
         goal_kw["maze_braid"] = float(getattr(args, "maze_braid", 0.2) or 0.2)
+    if bool(getattr(args, "ego_actions", False)):  # Phase 4.8 ego-relative action
+        goal_kw["ego_actions"] = True
     try:
         env = GridWorld(size=size, start=(0, 0), **goal_kw)
     except ValueError as exc:
@@ -570,6 +572,7 @@ async def run_env_eval(args: argparse.Namespace) -> dict[str, Any]:
             visibility_radius=vis_radius,
             max_steps=int(args.max_steps or dd.get("sandbox_max_steps", 30)),
             maze=maze_on, maze_braid=maze_braid,
+            ego_actions=bool(getattr(args, "ego_actions", False)),  # Phase 4.8
         )
         for sz in sizes for sd in seeds
     ]

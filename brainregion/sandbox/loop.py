@@ -62,6 +62,9 @@ _current_topo: ContextVar[Any] = ContextVar("_current_topo", default=None)
 # Phase 4.7 路径轨迹记忆脑区 gate:recall_path 仅在 path 模式(_path_region 非 None)可用。run_agent 拦截
 # recall_path → 返 PathTraceRegion.state(env)(图+走过路径标 ·);幻觉调 → dispatch 显式报错(不崩)。
 _current_path: ContextVar[Any] = ContextVar("_current_path", default=None)
+# Phase 4.8:dispatch act case 把 env.step 的**原 info dict** 透传给 run_agent dead-reckon 块
+# (不经 act result JSON 往返 → turned 字段不丢;review opus-7 消除"退回 blocked 启发式 → heading 失步"风险)。
+_last_act_info: ContextVar[dict | None] = ContextVar("_last_act_info", default=None)
 
 
 @contextmanager
@@ -331,6 +334,8 @@ def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
             if env is None:
                 raise RuntimeError("observe: 当前无 env(code-regime 不支持该工具)")
             out = {"observation": env.observation()}  # 统一接口:strict_obs → 当前视野,否则累积图(gpt high)
+            if getattr(env, "ego_actions", False):  # Phase 4.8:ego observation 带 heading metadata(GPT#2)
+                out["heading"] = getattr(env, "_heading", None)
         elif call.tool == "act":
             env = _current_env.get()
             if env is None:
@@ -343,6 +348,7 @@ def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
             if normalized not in vocab:
                 raise ValueError(f"act: 非法 action {action!r};合法:{list(vocab)}")
             obs, reward, terminated, info = env.step(normalized)
+            _last_act_info.set(info)  # Phase 4.8:原 dict 透传 dead-reckon(不经 JSON,opus-7)
             if "already_done" not in info:  # review opus:done 后冗余 act 不重复发 env.step 事件
                 _emit_env_step(normalized, env.render(), obs, reward, terminated, info)
             out = {
@@ -352,6 +358,8 @@ def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
                 "info": info,
                 "solved": bool(getattr(env, "solved", False)),
             }
+            if getattr(env, "ego_actions", False):  # Phase 4.8:ego act 结果带 heading metadata
+                out["heading"] = getattr(env, "_heading", None)
         elif call.tool == "recall_map":
             # Phase C 记忆脑区:返累积探索图(当前视野之外的记忆)。仅 _memory_mode True 可用。
             if not _memory_mode.get():
@@ -781,8 +789,11 @@ async def run_agent(
             # act 后 dead-reckon:仅合法 act(moved/blocked/already_done)update;invalid 跳过 → pose 不失步
             if _act_before is not None and memory_region is not None:
                 _after = _env._agent
+                _info = _last_act_info.get() or {}
                 if exec_err:
                     _status = "invalid"
+                elif _info.get("turned"):  # Phase 4.8 ego turn(声明式 info,优先 blocked;review opus-1/opus-7)
+                    _status = "turned"
                 elif _after != _act_before:
                     _status = "moved"
                 elif getattr(_env, "_terminated", False):

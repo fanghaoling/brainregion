@@ -17,18 +17,13 @@ from __future__ import annotations
 
 import random
 
+from ._actions import ABS, EGO, ABS_DELTA, ActionModel, INITIAL_HEADING
+
 _WALL = "#"
 _FLOOR = "."
 _GOAL = "G"
 _AGENT = "@"
 _FOG = "?"
-
-_ACTION_DELTA: dict[str, tuple[int, int]] = {
-    "up": (0, -1),
-    "down": (0, 1),
-    "left": (-1, 0),
-    "right": (1, 0),
-}
 
 
 class GridWorld:
@@ -39,8 +34,6 @@ class GridWorld:
 
     Phase A 无墙布局保证 start→goal 可达(空网格);随机墙/可达性校验 = Phase C+(本 phase 不引入)。
     """
-
-    action_vocab = tuple(_ACTION_DELTA.keys())
 
     def __init__(
         self,
@@ -56,6 +49,7 @@ class GridWorld:
         random_walls_seed: int | None = None,
         maze_seed: int | None = None,
         maze_braid: float = 0.0,
+        ego_actions: bool = False,
     ) -> None:
         if not (2 <= size <= 50):
             raise ValueError(f"size 须在 2..50,got {size}")
@@ -72,6 +66,15 @@ class GridWorld:
 
         self.size = size
         self.start = tuple(start)
+        if not isinstance(ego_actions, bool):
+            raise ValueError(f"ego_actions 须 bool, got {type(ego_actions).__name__}")
+        # Phase 4.8 ego-relative:ego_actions=True → agent 有 heading,action=forward/turn_left/turn_right。
+        # 判模式用本 flag(GPT#1),不用 hasattr(_heading)。默认 False=abs 零回归。
+        self.ego_actions = ego_actions
+        self._action_model: ActionModel = EGO if self.ego_actions else ABS
+        self.action_vocab = self._action_model.vocab
+        self._heading: str | None = INITIAL_HEADING if self.ego_actions else None
+        self._initial_heading: str | None = INITIAL_HEADING if self.ego_actions else None
         self.visibility_radius = visibility_radius
         self.strict_obs = strict_obs  # Phase C:True → observation() 只给当前视野(agent 须 recall_map 拿累积图)
         fog = visibility_radius is not None
@@ -288,6 +291,8 @@ class GridWorld:
         self._agent = self.start
         self._terminated = False
         self.total_reward = 0.0
+        if self.ego_actions:  # Phase 4.8:reset 恢复初始 heading(跨 episode 不继承上局航向,gpt-0/gpt-5)
+            self._heading = self._initial_heading
         if self.visibility_radius is not None:
             self._explored = set(self._visible_cells(self.start))
         self.frames = [self.render()]
@@ -302,18 +307,31 @@ class GridWorld:
 
         - terminal 后 → 不动 / reward 0 / terminated True / info already_done。
         - 非法动作(不在 vocab)→ 原地 / reward 0 / not terminated / info invalid。
-        - 撞墙/越界 → 原地 / reward 0 / not terminated / info blocked。
+        - **ego turn**(非 abs)→ 改 ``_heading``(位置不变)/ reward 0 / not terminated / info
+          ``{"turned": True}``,记 frame(计步:step 调一次=一步,run_agent max_steps 截断;review gpt-6
+          turn 经完整收尾,不提前返回)。
+        - 撞墙/越界(forward / abs-move)→ 原地 / reward 0 / not terminated / info blocked。
         - 到达 goal → reward 1.0 / terminated / info goal,记 frame。
         - 其余合法移动 → reward 0 / not terminated,记 frame。
 
-        fog 下成功移动后扩 _explored(新可见格);无状态改变的动作不扩/不追加 frame。
+        ego 模式 forward delta 靠 ``_heading``(``ActionModel.delta``);abs 模式靠 ABS_DELTA。
+        fog 下成功移动后扩 _explored;turn/blocked/invalid 不扩。
         """
         if self._terminated:
             return self.observation(), 0.0, True, {"already_done": True}
         a = (action or "").strip().lower()
-        if a not in _ACTION_DELTA:
+        if a not in self.action_vocab:
             return self.observation(), 0.0, False, {"invalid": action}
-        dx, dy = _ACTION_DELTA[a]
+        # ego turn:改 heading,位置不变(声明式 info["turned"] → loop 透传 memory;review opus-7/GPT#3)
+        if self._action_model.is_turn(a):
+            self._heading = self._action_model.heading_after(a, self._heading)  # type: ignore[arg-type]
+            self.frames.append(self.render())
+            return self.observation(), 0.0, False, {"turned": True}
+        # 位移动作(forward / abs up/down/...):按模式 + heading 算 delta(ActionModel 统一)
+        delta = self._action_model.delta(a, self._heading if self._heading is not None else INITIAL_HEADING)
+        if delta is None:  # 防御:vocab 内但非 move/turn(不应达)
+            return self.observation(), 0.0, False, {"invalid": action}
+        dx, dy = delta
         nx, ny = self._agent[0] + dx, self._agent[1] + dy
         if not self._in_grid((nx, ny)) or (nx, ny) in self.walls:
             return self.observation(), 0.0, False, {"blocked": True}

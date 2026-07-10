@@ -30,6 +30,7 @@ from brainregion.eval import stats as eval_stats
 
 from .eval import evaluate_gate
 from .envs import GridWorld, build_env_system_prompt
+from .envs._actions import ABS, EGO, ABS_DELTA, INITIAL_HEADING
 from .isolation import cleanup_run_dir, make_run_dir
 from .loop import _current_env, run_agent, scoped_env, scoped_memory_mode, scoped_topo, scoped_path
 from .regions import EchoStrategy, MemoryRegion, StrategyRegion, TopologicalRegion, PathTraceRegion
@@ -37,11 +38,6 @@ from .regions.strategy_region import _strip_to_thought
 from .task import SandboxTask
 
 logger = logging.getLogger("brainregion.sandbox.env_eval")
-
-# 网格动作 → pose delta(镜像 gridworld._ACTION_DELTA / memory_region._ACTION_DELTA;网格约定 y 向下增)。
-_ACTION_DELTA: dict[str, tuple[int, int]] = {
-    "up": (0, -1), "down": (0, 1), "left": (-1, 0), "right": (1, 0),
-}
 
 
 @dataclass(frozen=True)
@@ -56,6 +52,7 @@ class EnvConfig:
     max_steps: int = 30
     maze: bool = False                 # Phase 4.5:recursive backtracker 迷宫地形(seed 作 maze_seed)
     maze_braid: float = 0.2            # 迷宫去死胡同比例(0=完美迷宫;0.2 地牢感)
+    ego_actions: bool = False          # Phase 4.8:ego-relative action(agent 有 heading,action=forward/turn)
 
     @property
     def label(self) -> str:
@@ -160,6 +157,7 @@ def build_env_for_config(cfg: EnvConfig) -> GridWorld:
     kw: dict[str, Any] = {
         "size": cfg.size, "start": (0, 0),
         "visibility_radius": cfg.visibility_radius, "strict_obs": True,
+        "ego_actions": cfg.ego_actions,  # Phase 4.8:ego-relative action
     }
     if cfg.maze:  # Phase 4.5 迷宫地形(seed 作 maze_seed;maze 内部用 maze_seed 从 floor 选 goal,耦合自洽)
         kw["maze_seed"] = cfg.seed if cfg.seed is not None else 0
@@ -183,7 +181,16 @@ def build_regions_for_arm(
     echo→EchoStrategy,none→None。topo(Phase 4.6)→ TopologicalRegion;path(Phase 4.7)→ PathTraceRegion。
     """
     memory_mode = arm.memory_tool or arm.memory_region
-    memory_region = MemoryRegion(start=env.start, log_len=log_len, dummy=arm.memory_dummy) if arm.memory_region else None
+    if arm.memory_region:
+        # Phase 4.8:ego env → memory 持 EGO model + 初始 heading(gpt-1 持 model);abs → ABS(零回归)。
+        _ego = bool(getattr(env, "ego_actions", False))
+        memory_region = MemoryRegion(
+            start=env.start, log_len=log_len, dummy=arm.memory_dummy,
+            action_model=EGO if _ego else ABS,
+            heading=getattr(env, "_initial_heading", INITIAL_HEADING),
+        )
+    else:
+        memory_region = None
     if arm.strategy in ("real", "dummy"):
         strategy_region: Any = StrategyRegion()   # dummy 用真 StrategyRegion(injector 调它 match real 的 2 次调用成本,丢输出)
     elif arm.strategy == "echo":
@@ -256,25 +263,40 @@ def _positions_from_traj(traj: Any, env: GridWorld) -> list[tuple[int, int]]:
     """从 trajectory 的 act steps 重放位置序列(确定性:动作=单位步,墙/越界挡)。
 
     用 act args + env.walls/grid 重放 → 与 env 实际位置一致(无需 run_agent per-step 钩子)。
-    每 act step 追一个位置(成功移动则变,blocked/invalid 则同位)。
+    每 act step 追一个位置(成功移动则变,blocked/invalid/turn 则同位)。**恒含初始位**(空安全,review C1)。
+
+    Phase 4.8 ego:turn→旋转 heading(位置不变)、forward→HEADING_DELTA[heading] **查墙**(opus-0:撞墙不位移,
+    否则一致性断言失败);abs 走 ABS_DELTA。所有 heading 变换走 ActionModel(opus-8)。
     """
     pos = tuple(env.start)
     positions: list[tuple[int, int]] = [pos]
     walls = env.walls
     size = env.size
+    ego = bool(getattr(env, "ego_actions", False))
+    heading = getattr(env, "_initial_heading", None) if ego else None
     for s in traj.steps:
         if s.tool != "act":
             continue
         action = (s.args or {}).get("action", "")
         action = action.strip().lower() if isinstance(action, str) else ""
-        delta = _ACTION_DELTA.get(action)
-        if delta is None:
-            positions.append(pos)
-            continue
-        dx, dy = delta
-        nxt = (pos[0] + dx, pos[1] + dy)
-        if 0 <= nxt[0] < size and 0 <= nxt[1] < size and nxt not in walls:
-            pos = nxt
+        if ego and heading is not None:
+            if EGO.is_turn(action):  # turn→旋转 heading,位置不变
+                heading = EGO.heading_after(action, heading)
+            elif action == "forward":  # forward→查墙移动(opus-0)
+                delta = EGO.delta(action, heading)
+                if delta is not None:
+                    dx, dy = delta
+                    nxt = (pos[0] + dx, pos[1] + dy)
+                    if 0 <= nxt[0] < size and 0 <= nxt[1] < size and nxt not in walls:
+                        pos = nxt
+            # 非法/unknown → 位置不变
+        else:  # abs
+            delta = ABS_DELTA.get(action)
+            if delta is not None:
+                dx, dy = delta
+                nxt = (pos[0] + dx, pos[1] + dy)
+                if 0 <= nxt[0] < size and 0 <= nxt[1] < size and nxt not in walls:
+                    pos = nxt
         positions.append(pos)
     return positions
 
