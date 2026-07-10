@@ -10,6 +10,7 @@ env-loop 原本单主脑 + 工具;Phase D 加「脑区缝」。脑区:
 from .memory_region import MemoryRegion, build_memory_region_system_prompt
 from .strategy_region import StrategyRegion, EchoStrategy, build_strategy_region_system_prompt
 from .topo_region import TopologicalRegion
+from .path_region import PathTraceRegion
 
 __all__ = [
     "MemoryRegion",
@@ -18,4 +19,5 @@ __all__ = [
     "EchoStrategy",
     "build_strategy_region_system_prompt",
     "TopologicalRegion",
+    "PathTraceRegion",
 ]

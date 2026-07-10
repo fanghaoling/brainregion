@@ -42,7 +42,7 @@ logger = logging.getLogger("brainregion.sandbox.loop")
 CODE_REGIME_TOOLS = frozenset(
     {"read_text", "search_text", "inspect_file", "apply_text_patch", "workspace_run_check", "list_allowed_roots"}
 )
-ENV_TOOLS = frozenset({"observe", "act", "recall_map", "plan", "recall_topo"})
+ENV_TOOLS = frozenset({"observe", "act", "recall_map", "plan", "recall_topo", "recall_path"})
 ALLOWED_TOOLS = CODE_REGIME_TOOLS | ENV_TOOLS
 _RESULT_CAP_CHARS = 4000
 
@@ -58,6 +58,10 @@ _memory_mode: ContextVar[bool] = ContextVar("_memory_mode", default=False)
 # Phase 4.6 拓扑记忆脑区 gate:recall_topo 仅在 topo 模式(_topo_region 非 None)可用。run_agent 拦截
 # recall_topo → _recall_via_topo 返 TopologicalRegion.state(env);幻觉调 → dispatch 显式报错(不崩)。
 _current_topo: ContextVar[Any] = ContextVar("_current_topo", default=None)
+
+# Phase 4.7 路径轨迹记忆脑区 gate:recall_path 仅在 path 模式(_path_region 非 None)可用。run_agent 拦截
+# recall_path → 返 PathTraceRegion.state(env)(图+走过路径标 ·);幻觉调 → dispatch 显式报错(不崩)。
+_current_path: ContextVar[Any] = ContextVar("_current_path", default=None)
 
 
 @contextmanager
@@ -88,6 +92,16 @@ def scoped_topo(region):
         yield region
     finally:
         _current_topo.reset(token)
+
+
+@contextmanager
+def scoped_path(region):
+    """激活路径轨迹记忆脑区(recall_path 可用,Phase 4.7)。runner 侧在 path 臂时包 run_agent。RAII:退出复位。"""
+    token = _current_path.set(region)
+    try:
+        yield region
+    finally:
+        _current_path.reset(token)
 
 
 def _emit_env_step(action: str, frame: str, agent_view: str, reward: float, terminated: bool, info: dict) -> None:
@@ -354,6 +368,9 @@ def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
         elif call.tool == "recall_topo":
             # Phase 4.6 拓扑记忆脑区:仅 _current_topo 设时被 run_agent 拦截(dispatch 到此 = 未激活/幻觉)。
             raise RuntimeError("recall_topo: 拓扑记忆脑区未激活(用 --topo 启用)")
+        elif call.tool == "recall_path":
+            # Phase 4.7 路径轨迹记忆脑区:仅 _current_path 设时被 run_agent 拦截(dispatch 到此 = 未激活/幻觉)。
+            raise RuntimeError("recall_path: 路径轨迹记忆脑区未激活(用 --path 启用)")
         else:
             return "", "unreachable: unknown tool"
         return _compact(out), None
@@ -601,6 +618,7 @@ async def run_agent(
     strategy_region: Any = None,
     max_plan_calls: int | None = None,
     topo_region: Any = None,            # Phase 4.6 拓扑记忆脑区(代码,无 LLM):recall_topo → 解读 env 图成 Trémaux 状态
+    path_region: Any = None,            # Phase 4.7 路径轨迹记忆脑区(代码,无 LLM):recall_path → 图+走过路径标 ·
     status_injector: Any = None,        # Phase 4.1 metronome:async (step, messages)->(status_str|None, cost_usd);None=现行为
     status_period: int = 3,
     visual_ephemeral: bool = False,     # Phase 4.2:剥历史视觉观察出 transcript(只留最新 <visual>);act 动作结果持久
@@ -752,6 +770,12 @@ async def run_agent(
                     result_str, exec_err = _compact(topo_region.state(_env)), None
                 except Exception as exc:  # noqa: BLE001 — 失败隔离:错误返 agent,不崩主 run
                     result_str, exec_err = "", f"recall_topo 失败: {exc}"
+            elif call.tool == "recall_path" and path_region is not None and _env is not None:
+                # Phase 4.7 路径轨迹记忆:代码渲染 env 图+走过路径标 ·(无 LLM、无成本)。
+                try:
+                    result_str, exec_err = _compact(path_region.state(_env)), None
+                except Exception as exc:  # noqa: BLE001 — 失败隔离:错误返 agent,不崩主 run
+                    result_str, exec_err = "", f"recall_path 失败: {exc}"
             else:
                 result_str, exec_err = dispatch_tool(call)
             # act 后 dead-reckon:仅合法 act(moved/blocked/already_done)update;invalid 跳过 → pose 不失步
@@ -770,6 +794,9 @@ async def run_agent(
             # Phase 4.6 拓扑记忆:每步 act 后更新 trail(实际位置;去重 —— 原地/撞墙不重复)
             if _act_before is not None and topo_region is not None:
                 topo_region.update(_env._agent)
+            # Phase 4.7 路径轨迹记忆:每步 act 后更新 trail(同 topo;渲染图用)
+            if _act_before is not None and path_region is not None:
+                path_region.update(_env._agent)
             consecutive_errors = 0  # 成功(或可执行)解析 → 重置(连续错误是针对 parse/模型失败)
             preview = (result_str or exec_err or "")[:300]
             traj.steps.append(StepRecord(

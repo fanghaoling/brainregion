@@ -240,18 +240,22 @@ def test_positions_from_traj_replays_act_steps():
 
 def test_build_regions_for_arm_assembly():
     env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
-    mem, strat, mm, topo = build_regions_for_arm(EnvArm("memory_tool", memory_tool=True), env)
-    assert mem is None and strat is None and mm is True and topo is None
-    mem, strat, mm, topo = build_regions_for_arm(EnvArm("memory_only", memory_region=True), env)
+    mem, strat, mm, topo, path = build_regions_for_arm(EnvArm("memory_tool", memory_tool=True), env)
+    assert mem is None and strat is None and mm is True and topo is None and path is None
+    mem, strat, mm, topo, path = build_regions_for_arm(EnvArm("memory_only", memory_region=True), env)
     assert isinstance(mem, MemoryRegion) and strat is None and mm is True and topo is None
-    mem, strat, mm, topo = build_regions_for_arm(EnvArm("memory_strategy", memory_region=True, strategy="real"), env)
+    mem, strat, mm, topo, path = build_regions_for_arm(EnvArm("memory_strategy", memory_region=True, strategy="real"), env)
     assert isinstance(strat, StrategyRegion) and mm is True
-    mem, strat, mm, topo = build_regions_for_arm(EnvArm("memory_echo", memory_region=True, strategy="echo"), env)
+    mem, strat, mm, topo, path = build_regions_for_arm(EnvArm("memory_echo", memory_region=True, strategy="echo"), env)
     assert isinstance(strat, EchoStrategy)
     # Phase 4.6 拓扑记忆脑区装配
     from brainregion.sandbox.regions import TopologicalRegion
-    mem, strat, mm, topo = build_regions_for_arm(EnvArm("topo_arm", topo=True), env)
+    mem, strat, mm, topo, path = build_regions_for_arm(EnvArm("topo_arm", topo=True), env)
     assert isinstance(topo, TopologicalRegion) and mem is None and mm is False
+    # Phase 4.7 路径轨迹记忆脑区装配
+    from brainregion.sandbox.regions import PathTraceRegion
+    mem, strat, mm, topo, path = build_regions_for_arm(EnvArm("path_arm", path=True), env)
+    assert isinstance(path, PathTraceRegion) and topo is None and mem is None and mm is False
 
 
 def test_arm_presets_shape():
@@ -845,8 +849,8 @@ def test_content_arms_assembly():
     assert ARMS_CONTENT[2].registry == "cap" and ARMS_CONTENT[2].memory_dummy
     # build_regions_for_arm
     env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
-    mem_real, _, _, _ = build_regions_for_arm(ARMS_CONTENT[1], env)
-    mem_dummy, _, _, _ = build_regions_for_arm(ARMS_CONTENT[2], env)
+    mem_real, _, _, _, _ = build_regions_for_arm(ARMS_CONTENT[1], env)
+    mem_dummy, _, _, _, _ = build_regions_for_arm(ARMS_CONTENT[2], env)
     assert mem_real.dummy is False and mem_dummy.dummy is True
 
 
@@ -1071,5 +1075,98 @@ def test_run_env_eval_topo_plumbing():
     assert len(report["runs"]) == 1 * 4 * 2
     assert "n_recall_topo" in report["runs"][0] and "reverse_rate" in report["runs"][0]
     assert "mean_reverse_rate" in report["per_arm"]["topo_proc"]
+
+
+# ---------- Phase 4.7 路径轨迹记忆脑区(recall_path)----------
+
+
+def test_path_region_render_marks_trail():
+    """PathTraceRegion.render_with_path:走过格子标 `·`,看到没踩 `.`,墙 `#`,agent `@`,未探索 `?`。"""
+    from brainregion.sandbox.regions import PathTraceRegion
+    env = GridWorld(size=5, start=(1, 1), goal=(3, 3), visibility_radius=2, strict_obs=True)
+    # 手设 explored + agent;trail=(1,1)->(2,1)
+    env._explored = {(0, 0), (1, 1), (2, 1), (3, 3), (1, 2)}
+    env._agent = (2, 1)
+    reg = PathTraceRegion(start=(1, 1))
+    reg.update((2, 1))
+    m = reg.render_with_path(env)
+    rows = m.split("\n")
+    # (2,1)=agent @ ;(1,1)=走过 · ;(1,2)=看到没踩 . (in explored, not trail)
+    row1 = rows[1]  # y=1:含 (1,1),(2,1)
+    assert row1[1] == "·"   # (1,1) 走过
+    assert row1[2] == "@"   # (2,1) agent
+
+
+def test_path_region_trail_dedup():
+    """update 同位置不重复 append。"""
+    from brainregion.sandbox.regions import PathTraceRegion
+    env = GridWorld(size=5, start=(1, 1), goal=(3, 3), visibility_radius=2, strict_obs=True)
+    reg = PathTraceRegion(start=env.start)
+    n0 = len(reg.trail)
+    reg.update(env.start)
+    reg.update(env.start)
+    assert len(reg.trail) == n0
+
+
+def test_path_arms_assembly():
+    """ARMS_PATH 三臂 + path 字段。"""
+    from brainregion.sandbox.env_eval import ARMS_PATH
+    names = [a.name for a in ARMS_PATH]
+    assert names == ["path_noregion", "path_oracle", "path_trace"]
+    assert ARMS_PATH[0].path is False                       # noregion
+    assert ARMS_PATH[1].memory_tool and ARMS_PATH[1].path is False  # oracle 裸图
+    assert ARMS_PATH[2].path is True                        # path_trace 图+路径标
+
+
+def test_build_env_system_prompt_path_branch():
+    """path 臂 prompt 含 recall_path + 路径标记图例;非 path 不含。"""
+    env = GridWorld(size=9, maze_seed=1, maze_braid=0.2, visibility_radius=2, strict_obs=True)
+    p = build_env_system_prompt(env, "g", path=True)
+    assert "recall_path" in p and "路径轨迹记忆脑区" in p and "·" in p   # 图例含 ·
+    p_none = build_env_system_prompt(env, "g", memory=True)
+    assert "recall_path" not in p_none
+
+
+def test_recall_path_via_run_agent_intercept():
+    """run_agent 拦 recall_path → 返 PathTraceRegion.state(path_map);None → dispatch 优雅错误。"""
+    from brainregion.sandbox.regions import PathTraceRegion
+    from brainregion.sandbox.loop import scoped_path
+    env = GridWorld(size=9, maze_seed=1, maze_braid=0.2, visibility_radius=2, strict_obs=True)
+
+    class _B:
+        async def complete_messages(self, messages, **kw):
+            return ModelResponse(model="m", content=_J({"thought": "看路径图", "tool": "recall_path", "args": {}}),
+                                 usage={}, cost_usd=0.0)
+
+    task = SandboxTask(id="path-test", goal="到 G")
+    reg = PathTraceRegion(start=env.start)
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            with scoped_path(reg):
+                traj = asyncio.run(run_agent(
+                    _B(), "m", task, run_dir=run_dir, arm="none", max_steps=1,
+                    system_prompt=build_env_system_prompt(env, "到 G", path=True),
+                    verify_fn=_make_env_verify(env), path_region=reg,
+                ))
+    finally:
+        cleanup_run_dir(run_dir)
+    assert any(s.tool == "recall_path" for s in traj.steps)
+    rp = next(s for s in traj.steps if s.tool == "recall_path")
+    assert "path_map" in (rp.result_preview or "")
+
+
+def test_run_env_eval_path_plumbing():
+    """end-to-end:path 三臂 × 小迷宫 → 报告含三臂 + n_recall_path 字段。"""
+    from brainregion.sandbox.env_eval import ARMS_PATH
+    configs = [EnvConfig(size=9, seed=1, maze=True, maze_braid=0.2, visibility_radius=2)]
+    report = asyncio.run(run_env_eval(
+        _GiveUpBackend(), "mock", configs, ARMS_PATH, repeats=2, max_cost_usd=2.0, log_progress=False,
+    ))
+    assert set(report["per_arm"]) == {"path_noregion", "path_oracle", "path_trace"}
+    assert len(report["runs"]) == 1 * 3 * 2
+    assert "n_recall_path" in report["runs"][0]
+    assert "mean_n_recall_path" in report["per_arm"]["path_trace"]
+
 
 
