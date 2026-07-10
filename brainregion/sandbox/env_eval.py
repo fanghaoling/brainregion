@@ -87,6 +87,7 @@ class EnvArm:
     topo: bool = False                 # Phase 4.6:拓扑记忆脑区(recall_topo → 解读 Trémaux 状态)
     topo_proc: bool = False            # Phase 4.6:Trémaux 系统探索程序(教主脑用 topo 状态)
     path: bool = False                 # Phase 4.7:路径轨迹记忆脑区(recall_path → 图+走过路径标 ·)
+    path_ego: bool = False             # Phase 4.7b:egocentric 路径图(agent 居中相对偏移;path=True 时生效)
 
 
 # 预设 = 常用比较的糖(CLI 也可 --arm 显式给 feature-config)
@@ -134,7 +135,8 @@ ARMS_TOPO: tuple[EnvArm, ...] = (            # Phase 4.6:拓扑记忆脑区 + Tr
 ARMS_PATH: tuple[EnvArm, ...] = (            # Phase 4.7:路径轨迹记忆(图+走过路径标 ·);contrast 裸图(oracle)
     EnvArm("path_noregion", visual_ephemeral=True),                                          # 基线(无记忆,盲走)
     EnvArm("path_oracle",  memory_tool=True, visual_ephemeral=True),                         # 裸图(env.render,无路径标)
-    EnvArm("path_trace",   path=True,        visual_ephemeral=True),                         # 图+走过路径标 ·(新表征)
+    EnvArm("path_trace",   path=True,        visual_ephemeral=True),                         # 图+走过路径标 ·(allocentric)
+    EnvArm("path_ego",     path=True, path_ego=True, visual_ephemeral=True),                 # 同上但 egocentric(agent 居中相对偏移)
 )
 ARM_PRESETS: dict[str, tuple[EnvArm, ...]] = {
     "memory-strategy": ARMS_MEMORY_STRATEGY,
@@ -189,7 +191,7 @@ def build_regions_for_arm(
     else:
         strategy_region = None
     topo_region = TopologicalRegion(start=env.start) if arm.topo else None
-    path_region = PathTraceRegion(start=env.start) if arm.path else None
+    path_region = PathTraceRegion(start=env.start, egocentric=arm.path_ego) if arm.path else None
     return memory_region, strategy_region, memory_mode, topo_region, path_region
 
 
@@ -392,7 +394,7 @@ async def _run_one_episode(
         if arm.topo:
             tools_hint = "recall_topo 拿拓扑动作状态(未探索出口/死胡同/回溯方向)"
         elif arm.path:
-            tools_hint = "recall_path 拿标了走过路径的场景图"
+            tools_hint = "recall_path 拿标了走过路径的场景图" + ("(agent 居中相对偏移)" if arm.path_ego else "")
         elif arm.memory_tool or arm.memory_region:
             tools_hint = "recall_map 拿累积探索图/记忆理解"
         else:
@@ -437,7 +439,7 @@ async def _run_one_episode(
                                 metronome=arm.metronome,
                                 registry=arm.registry,
                                 topo=arm.topo, topo_proc=arm.topo_proc,   # Phase 4.6
-                                path=arm.path,                             # Phase 4.7 路径轨迹记忆
+                                path=arm.path, path_ego=arm.path_ego,     # Phase 4.7/4.7b 路径轨迹(alloc/ego)
                             ),
                             verify_fn=verify,
                             memory_region=memory_region, strategy_region=run_strategy_region,

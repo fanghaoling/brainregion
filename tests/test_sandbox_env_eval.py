@@ -1109,13 +1109,31 @@ def test_path_region_trail_dedup():
 
 
 def test_path_arms_assembly():
-    """ARMS_PATH 三臂 + path 字段。"""
+    """ARMS_PATH 四臂 + path/path_ego 字段。"""
     from brainregion.sandbox.env_eval import ARMS_PATH
     names = [a.name for a in ARMS_PATH]
-    assert names == ["path_noregion", "path_oracle", "path_trace"]
+    assert names == ["path_noregion", "path_oracle", "path_trace", "path_ego"]
     assert ARMS_PATH[0].path is False                       # noregion
     assert ARMS_PATH[1].memory_tool and ARMS_PATH[1].path is False  # oracle 裸图
-    assert ARMS_PATH[2].path is True                        # path_trace 图+路径标
+    assert ARMS_PATH[2].path is True and ARMS_PATH[2].path_ego is False   # path_trace allocentric
+    assert ARMS_PATH[3].path is True and ARMS_PATH[3].path_ego is True    # path_ego egocentric
+
+
+def test_path_region_egocentric_render():
+    """egocentric 视觉居中:agent @ 恒在窗口中心;走过格子 · 在相对偏移位置。"""
+    from brainregion.sandbox.regions import PathTraceRegion
+    env = GridWorld(size=7, start=(1, 1), goal=(5, 5), visibility_radius=2, strict_obs=True)
+    env._explored = {(1, 1), (2, 1), (3, 1)}   # 同一行,agent (3,1)
+    env._agent = (3, 1)
+    reg = PathTraceRegion(start=(1, 1), egocentric=True)
+    reg.update((2, 1)); reg.update((3, 1))
+    m = reg.render_with_path(env)
+    rows = m.split("\n")
+    # rels: (-2,0),(-1,0),(0,0) → R=max(2,0)=2 → 5×5 窗口;agent @ 在中心 (2,2)
+    assert len(rows) == 5 and all(len(r) == 5 for r in rows)
+    assert rows[2][2] == "@"                      # agent 恒在中心
+    assert rows[2][0] == "·" and rows[2][1] == "·"  # (1,1),(2,1) 走过,在 agent 左侧(相对偏移)
+    assert reg.state(env)["egocentric"] is True
 
 
 def test_build_env_system_prompt_path_branch():
@@ -1163,8 +1181,8 @@ def test_run_env_eval_path_plumbing():
     report = asyncio.run(run_env_eval(
         _GiveUpBackend(), "mock", configs, ARMS_PATH, repeats=2, max_cost_usd=2.0, log_progress=False,
     ))
-    assert set(report["per_arm"]) == {"path_noregion", "path_oracle", "path_trace"}
-    assert len(report["runs"]) == 1 * 3 * 2
+    assert set(report["per_arm"]) == {"path_noregion", "path_oracle", "path_trace", "path_ego"}
+    assert len(report["runs"]) == 1 * 4 * 2
     assert "n_recall_path" in report["runs"][0]
     assert "mean_n_recall_path" in report["per_arm"]["path_trace"]
 

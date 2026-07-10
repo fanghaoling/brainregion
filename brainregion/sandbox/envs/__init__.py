@@ -12,7 +12,7 @@ from .replay import render_replay_html, write_replay_html
 def build_env_system_prompt(env, goal: str, *, memory: bool = False, strategy: bool = False,
                            metronome: bool = False, registry: str = "none",
                            topo: bool = False, topo_proc: bool = False,
-                           path: bool = False) -> str:
+                           path: bool = False, path_ego: bool = False) -> str:
     """env-regime system prompt(Phase A 全可见 + Phase B fog + Phase C 记忆脑区 + Phase D.3 策略脑区)。
 
     runner(CLI/smoke/test)调此构建 prompt,经 run_agent 的 ``system_prompt`` 注入参传入(覆盖
@@ -78,12 +78,20 @@ def build_env_system_prompt(env, goal: str, *, memory: bool = False, strategy: b
                 "4. 看到 goal → act 直奔。\n"
             )
     elif path:  # Phase 4.7 路径轨迹记忆脑区:严格观察 + recall_path 拿「图上标了走过路径」的场景
-        legend = "@=你 G=目标(看到才显) #=墙 .=看到没踩 ·=走过(你的路径) ?=未探索/视野外"
+        if path_ego:  # Phase 4.7b:egocentric(agent 居中相对偏移)
+            legend = "@=你(图中心,相对原点) G=目标 #=墙 .=看到没踩 ·=走过(你的路径) ?=未探索/界外"
+            ego_note = (
+                "图**以你为中心**:`@` 在中心,其余格子是**相对你的偏移位置**(同行=东西,同列=南北)。"
+                "不用算自己在哪,直接读 goal/路径相对你的方位决定往哪走。"
+            )
+        else:
+            legend = "@=你 G=目标(看到才显) #=墙 .=看到没踩 ·=走过(你的路径) ?=未探索/视野外"
+            ego_note = ""
         visibility = (
             f"**严格部分可观 + 路径轨迹记忆脑区**:observe 只返回角色周围 {radius} 格的**当前视野**(视野外 `?`,"
             "历史不保留)。你的**路径轨迹记忆脑区**记着你走过的连续路径 → 调 **recall_path** 拿一张**场景图**:"
-            "已探索的地图,且**你走过的格子标 `·`**(连成你的路径),看到但没踩的标 `.`,墙 `#`,未探索 `?`。"
-            "看你的路径避免重复走、识别死胡同(路径末端)、规划未探索区。\n"
+            "已探索的区域,且**你走过的格子标 `·`**(连成你的路径),看到但没踩的标 `.`,墙 `#`,未探索 `?`。"
+            "看你的路径避免重复走、识别死胡同(路径末端)、规划未探索区。" + ego_note + "\n"
         )
         tools_extra = (
             '  路径:{"thought":"<一句话>","tool":"recall_path","args":{}}(拿标了路径的场景图,不计步)\n'

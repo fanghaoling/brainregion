@@ -33,8 +33,9 @@ class PathTraceRegion:
       seen-未踩 标 `.`,墙 `#`,未探索 `?`,agent `@`,goal `G`)。返 ``{path_map, trail_length}``。
     """
 
-    def __init__(self, start: tuple[int, int] = (0, 0)) -> None:
+    def __init__(self, start: tuple[int, int] = (0, 0), *, egocentric: bool = False) -> None:
         self.trail: list[tuple[int, int]] = [tuple(start)]
+        self.egocentric = bool(egocentric)   # True → agent 居中相对坐标(egocentric);False → 绝对世界图(allocentric)
 
     def update(self, position) -> None:
         """run_agent 每步调:append actual position(去重 —— 原地/撞墙不重复 append)。"""
@@ -46,7 +47,12 @@ class PathTraceRegion:
         """env 同源图(explored/walls/agent/goal)+ trail 标 `·`(走过的连续路径)。fog 下未探索显 `?`。
 
         与 oracle(env.render())唯一差:trail cell 标 `·`(走过)vs `.`(看到没踩)→ 路径可视化。
+        ``egocentric=True``(用户洞察:LLM 动作决策以自我为中心):渲染**探索区 bounding-box**并平移到
+        agent 为坐标原点(`@` 在 (0,0),其余相对偏移;省掉「我在哪→goal 在哪→往哪走」的 abs→动作翻译)。
+        bounding-box 紧凑(只含探索过的行列)+ 信息完整(同 allocentric,只换坐标系)。
         """
+        if self.egocentric:
+            return self._render_egocentric(env)
         fog = env.visibility_radius is not None
         trail_set = set(self.trail)
         rows: list[str] = []
@@ -69,11 +75,42 @@ class PathTraceRegion:
             rows.append("".join(chars))
         return "\n".join(rows)
 
+    def _render_egocentric(self, env: Any) -> str:
+        """agent **视觉居中**:渲染 (2R+1)×(2R+1) 窗口,`@` 恒在中心(R,R);R = explored 相对 agent 的
+        最大偏移(完整显示所有探索过的格子,agent 居中)。其余格按相对偏移定位:`?` 未探索/界外(填充使
+        agent 居中)。agent 恒在中心 → LLM 按位置直接读方向(goal 在中心上方=北),省 abs→动作翻译。"""
+        ax, ay = env._agent
+        explored = getattr(env, "_explored", set()) | {env._agent}
+        trail_set = set(self.trail)
+        size = env.size
+        rels = [(x - ax, y - ay) for (x, y) in explored]
+        R = max(max(abs(dx) for dx, _ in rels), max(abs(dy) for _, dy in rels), 1)
+        rows: list[str] = []
+        for dy in range(-R, R + 1):
+            chars = []
+            for dx in range(-R, R + 1):
+                cell = (ax + dx, ay + dy)
+                if not (0 <= cell[0] < size and 0 <= cell[1] < size) or cell not in explored:
+                    chars.append(_FOG)   # 界外 / 未探索 → ?(填充使 agent 居中)
+                elif cell == env._agent:
+                    chars.append(_AGENT)
+                elif cell == env.goal:
+                    chars.append(_GOAL)
+                elif cell in env.walls:
+                    chars.append(_WALL)
+                elif cell in trail_set:
+                    chars.append(_PATH)
+                else:
+                    chars.append(_FLOOR)
+            rows.append("".join(chars))
+        return "\n".join(rows)
+
     def state(self, env: Any) -> dict:
-        """渲染路径图 + trail 长度(无 LLM)。"""
+        """渲染路径图(allocentric 或 egocentric,看构造 flag)+ trail 长度(无 LLM)。"""
         return {
             "path_map": self.render_with_path(env),
             "trail_length": len(self.trail),
+            "egocentric": self.egocentric,
         }
 
 
