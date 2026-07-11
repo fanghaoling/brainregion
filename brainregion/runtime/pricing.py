@@ -29,6 +29,10 @@ _BUILTIN_PRICES: dict[str, ModelPrice] = {
     "gpt-4o": ModelPrice("gpt-4o", 2.5, 10.0),
     "gpt-5": ModelPrice("gpt-5", 5.0, 15.0),
     "gpt-5.5": ModelPrice("gpt-5.5", 5.0, 15.0),
+    # DeepSeek document prices captured in 2026-06: CNY 1/2 and 3/6
+    # per 1M input/output tokens, converted at approximately CNY 7.2/USD.
+    "deepseek-v4-flash": ModelPrice("deepseek-v4-flash", 1.0 / 7.2, 2.0 / 7.2),
+    "deepseek-v4-pro": ModelPrice("deepseek-v4-pro", 3.0 / 7.2, 6.0 / 7.2),
 }
 
 
@@ -121,7 +125,15 @@ def model_usage_payload(
     error: str | None = None,
 ) -> dict[str, Any]:
     estimated_cost, price_source = estimate_cost_usd(resolved_model or model, usage)
-    final_cost = cost_usd if cost_usd is not None else estimated_cost
+    provider_cost = float(cost_usd) if cost_usd is not None else None
+    # LiteLLM reports 0.0 for some OpenAI-compatible models whose price is
+    # unknown to its own registry. Prefer a known positive local estimate in
+    # that case; a genuinely free model still remains zero when its configured
+    # estimate is also zero.
+    use_provider_cost = provider_cost is not None and (
+        provider_cost > 0 or estimated_cost is None or estimated_cost <= 0
+    )
+    final_cost = provider_cost if use_provider_cost else estimated_cost
     return {
         "provider": provider,
         "model": model,
@@ -131,7 +143,7 @@ def model_usage_payload(
         "usage": normalize_usage(usage),
         "raw_usage": usage or {},
         "cost_usd": final_cost,
-        "cost_source": "provider" if cost_usd is not None else price_source,
+        "cost_source": "provider" if use_provider_cost else price_source,
         "latency_ms": latency_ms,
         "status": status,
         "error": error,

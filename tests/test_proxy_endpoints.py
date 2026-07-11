@@ -475,6 +475,60 @@ def test_backend_emits_model_usage_events(monkeypatch):
     assert payload["cost_source"] == "provider"
 
 
+def test_backend_returns_estimated_cost_when_provider_reports_zero(monkeypatch):
+    emitted = []
+
+    class _Msg:
+        content = '{"thought":"done","done":true,"answer":"ok"}'
+
+    class _Choice:
+        message = _Msg()
+
+    class _Usage:
+        def model_dump(self):
+            return {"prompt_tokens": 1_000, "completion_tokens": 500, "total_tokens": 1_500}
+
+    class _Resp:
+        choices = [_Choice()]
+        usage = _Usage()
+        _hidden_params = {"response_cost": 0.0}
+
+    async def fake_acompletion(**kw):
+        return _Resp()
+
+    import litellm
+    monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
+    monkeypatch.setattr(
+        "brainregion.providers.litellm.emit_event",
+        lambda event_type, **fields: emitted.append((event_type, fields)),
+    )
+    reg = {
+        "deepseek_openai": {
+            "provider": "openai",
+            "base_url": "https://api.deepseek.com",
+            "api_key": "k",
+            "headers": {},
+            "timeout": None,
+        }
+    }
+    backend = LiteLLMBackend(endpoint_registry=reg)
+
+    resp = asyncio.run(
+        backend.complete(
+            model="deepseek-v4-flash",
+            system="s",
+            user="u",
+            endpoint_id="deepseek_openai",
+        )
+    )
+
+    expected = (1_000 * (1.0 / 7.2) + 500 * (2.0 / 7.2)) / 1_000_000
+    assert resp.cost_usd == expected
+    payload = emitted[1][1]["payload"]
+    assert payload["cost_usd"] == expected
+    assert payload["cost_source"] == "builtin"
+
+
 def test_backend_multi_endpoint_no_crosstalk(monkeypatch):
     """多 endpoint 并存：各自收到自己的 base/key，不串。"""
     cap = _patch_litellm(monkeypatch)

@@ -215,26 +215,27 @@ class LiteLLMBackend:
             content = resp.choices[0].message.content or ""
             latency_ms = round((time.perf_counter() - started) * 1000, 3)
             cost_usd = hp.get("response_cost")
+            usage_payload = model_usage_payload(
+                provider=provider_for_event,
+                model=model,
+                resolved_model=litellm_model,
+                endpoint_id=endpoint_id,
+                usage=usage,
+                cost_usd=cost_usd,
+                latency_ms=latency_ms,
+                status="ok",
+            )
             emit_event(
                 "model.call_finished",
                 model=model,
                 provider=provider_for_event,
-                payload=model_usage_payload(
-                    provider=provider_for_event,
-                    model=model,
-                    resolved_model=litellm_model,
-                    endpoint_id=endpoint_id,
-                    usage=usage,
-                    cost_usd=cost_usd,
-                    latency_ms=latency_ms,
-                    status="ok",
-                ),
+                payload=usage_payload,
             )
             return ModelResponse(
                 model=model,
                 content=content,
                 usage=usage,
-                cost_usd=cost_usd,
+                cost_usd=usage_payload["cost_usd"],
             )
         except Exception as e:  # noqa: BLE001 — 失败隔离，不向上抛
             logger.warning("LiteLLMBackend 调用失败 model=%s: %s: %s", model, type(e).__name__, e)

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from brainregion.runtime.pricing import (
     canonical_model_name,
     estimate_cost_usd,
@@ -63,6 +65,32 @@ def test_model_usage_payload_prefers_provider_cost():
     assert payload["usage"]["input_tokens"] == 10
     assert payload["cost_usd"] == 0.123
     assert payload["cost_source"] == "provider"
+
+
+def test_deepseek_builtin_price_estimates_openai_compatible_usage():
+    usage = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}
+
+    cost, source = estimate_cost_usd("openai/deepseek-v4-flash", usage)
+
+    assert cost == pytest.approx(3.0 / 7.2)
+    assert source == "builtin"
+
+
+def test_model_usage_payload_replaces_unknown_provider_zero_with_known_estimate():
+    payload = model_usage_payload(
+        provider="openai",
+        model="deepseek-v4-flash",
+        resolved_model="openai/deepseek-v4-flash",
+        endpoint_id="deepseek_openai",
+        usage={"prompt_tokens": 1_000, "completion_tokens": 500},
+        cost_usd=0.0,
+        latency_ms=10,
+        status="ok",
+    )
+
+    expected = (1_000 * (1.0 / 7.2) + 500 * (2.0 / 7.2)) / 1_000_000
+    assert payload["cost_usd"] == expected
+    assert payload["cost_source"] == "builtin"
 
 
 def test_price_for_unknown_model_missing():
