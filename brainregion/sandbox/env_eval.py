@@ -515,9 +515,9 @@ async def _run_one_episode(
                             verify_fn=verify,
                             memory_region=memory_region, strategy_region=run_strategy_region,
                             topo_region=topo_region, path_region=path_region,
-                            navigation_region=navigation_region,
-                            navigation_autorun_actions=(min(8, cfg.max_steps) if navigation_active else 0),
-                            navigation_continuous=navigation_active,
+                            option_region=navigation_region,
+                            option_autorun_actions=(min(8, cfg.max_steps) if navigation_active else 0),
+                            option_continuous=navigation_active,
                             status_injector=injector, status_period=status_period,
                             visual_ephemeral=arm.visual_ephemeral,
                         )

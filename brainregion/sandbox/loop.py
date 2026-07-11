@@ -33,6 +33,13 @@ from brainregion.workspace.files import scoped_workspace_root
 
 from .task import SandboxTask, WorktreeTask
 from .verify import verify_solution
+from .option_runtime import (
+    ActivationRecord,
+    CognitiveScheduler,
+    OptionRegion,
+    OptionResult,
+    select_region_observation,
+)
 
 logger = logging.getLogger("brainregion.sandbox.loop")
 
@@ -142,6 +149,17 @@ def _emit_env_step(
         logger.warning("env.step emit_event 失败(已忽略)", exc_info=True)
 
 
+def _emit_option_activation(record: dict[str, Any] | None = None, *, error: str | None = None) -> None:
+    """Best-effort scheduler event for dashboard/history consumers."""
+    try:
+        payload = dict(record or {})
+        if error:
+            payload["error"] = error
+        emit_event("sandbox.option.activation", payload=payload)
+    except Exception:  # noqa: BLE001 — observability must never break the control loop
+        logger.warning("sandbox.option.activation emit failed (ignored)", exc_info=True)
+
+
 @dataclass
 class ToolCall:
     thought: str
@@ -235,6 +253,16 @@ class Trajectory:
     cumulative_cost_usd: float | None = None
     accept_reason: str = ""  # termination_reason="accepted" 时的细分:normal/weak_test/orthogonal_cleared
 
+    @property
+    def option_delegations(self) -> int:
+        """Generic alias;navigation_delegations remains for artifact compatibility."""
+        return self.navigation_delegations
+
+    @property
+    def option_activations(self) -> list[dict[str, Any]]:
+        """Generic alias;navigation_options remains for artifact compatibility."""
+        return self.navigation_options
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
@@ -256,8 +284,10 @@ class Trajectory:
             "blocked_actions": self.blocked_actions,
             "delegated_actions": self.delegated_actions,
             "navigation_delegations": self.navigation_delegations,
+            "option_delegations": self.option_delegations,
             "automatic_region_activations": self.automatic_region_activations,
             "navigation_options": self.navigation_options,
+            "option_activations": self.option_activations,
             "region_tool_calls": self.region_tool_calls,
             "region_model_calls": self.region_model_calls,
             "env_action_trace": self.env_action_trace,
@@ -335,17 +365,17 @@ def _record_env_action(
     })
 
 
-def _execute_navigation_option(
+def _execute_env_option(
     traj: Trajectory,
     *,
-    region: Any,
+    region: OptionRegion,
     env: Any,
     requested_actions: int,
     max_env_actions: int | None,
     memory_region: Any = None,
     topo_region: Any = None,
     path_region: Any = None,
-) -> dict[str, Any]:
+) -> OptionResult:
     """Execute one bounded navigation option while the runtime retains env authority."""
     if requested_actions <= 0:
         raise ValueError("action_budget must be positive")
@@ -356,17 +386,13 @@ def _execute_navigation_option(
     trace_start = len(traj.env_action_trace)
     stop_reason = "env_action_budget" if budget == 0 else "action_budget"
     traj.navigation_delegations += 1
-    access_mode = str(getattr(region, "access_mode", "oracle"))
-    if access_mode not in {"oracle", "grounded"}:
-        raise ValueError(f"unsupported navigation access_mode: {access_mode!r}")
+    actor = f"{region.name}_region"
 
     for _ in range(budget):
-        # The grounded policy receives text only. Keep this branch explicit so
-        # adding fields to an input DTO cannot accidentally leak the env later.
-        if access_mode == "grounded":
-            action = region.next_action(env.observation())
-        else:
-            action = region.next_action(env)
+        region_observation = select_region_observation(
+            region, public_observation=env.observation(), privileged_observation=env,
+        )
+        action = region.next_action(region_observation)
         if action is None:
             stop_reason = "no_known_route"
             break
@@ -377,17 +403,17 @@ def _execute_navigation_option(
         if "already_done" not in info:
             _emit_env_step(
                 action, env.render(), obs, reward, terminated, info,
-                actor="navigation_region",
+                actor=actor,
             )
         _record_env_action(
-            traj, actor="navigation_region", action=action,
+            traj, actor=actor, action=action,
             before=before, after=after, status=status,
             reward=reward, terminated=terminated, info=info,
         )
-        if access_mode == "grounded":
-            region.observe_transition(action=action, observation=obs, status=status)
-        else:
-            region.observe_position(after)
+        post_observation = select_region_observation(
+            region, public_observation=obs, privileged_observation=env,
+        )
+        region.observe_transition(action=action, observation=post_observation, status=status)
         if memory_region is not None and status not in {"invalid", "already_done"}:
             memory_region.update(action, status, env.relative_view())
         if topo_region is not None:
@@ -397,38 +423,25 @@ def _execute_navigation_option(
         if terminated:
             stop_reason = "goal_reached"
             break
-        if access_mode == "grounded":
-            boundary = region.option_boundary(obs, actions_executed=len(traj.env_action_trace) - trace_start)
-            if boundary:
-                stop_reason = f"decision_boundary:{boundary}"
-                break
+        boundary = region.option_boundary(
+            post_observation, actions_executed=len(traj.env_action_trace) - trace_start,
+        )
+        if boundary:
+            stop_reason = f"decision_boundary:{boundary}"
+            break
 
     option_trace = traj.env_action_trace[trace_start:]
-    return {
-        "actor": "navigation_region",
-        "access_mode": access_mode,
-        "executed_actions": len(option_trace),
-        "stop_reason": stop_reason,
-        "solved": bool(getattr(env, "solved", False)),
-        "final_observation": env.observation(),
-        "trace": option_trace,
-        "region_state": region.snapshot(),
-    }
-
-
-def _navigation_option_summary(option: dict[str, Any], *, trigger: str) -> dict[str, Any]:
-    trace = option.get("trace") or []
-    state = option.get("region_state") or {}
-    return {
-        "trigger": trigger,
-        "access_mode": option.get("access_mode"),
-        "executed_actions": option.get("executed_actions", 0),
-        "actions": [item.get("action") for item in trace],
-        "stop_reason": option.get("stop_reason"),
-        "solved": bool(option.get("solved", False)),
-        "confidence": state.get("confidence"),
-        "last_decision": state.get("last_decision"),
-    }
+    return OptionResult(
+        region=region.name,
+        actor=actor,
+        access_mode=region.access_mode,
+        executed_actions=len(option_trace),
+        stop_reason=stop_reason,
+        solved=bool(getattr(env, "solved", False)),
+        final_observation=env.observation(),
+        trace=option_trace,
+        region_state=region.snapshot(),
+    )
 
 
 def parse_tool_call(content: str) -> tuple[ToolCall | None, str | None]:
@@ -818,8 +831,11 @@ async def run_agent(
     max_plan_calls: int | None = None,
     topo_region: Any = None,            # Phase 4.6 拓扑记忆脑区(代码,无 LLM):recall_topo → 解读 env 图成 Trémaux 状态
     path_region: Any = None,            # Phase 4.7 路径轨迹记忆脑区(代码,无 LLM):recall_path → 图+走过路径标 ·
+    option_region: OptionRegion | None = None,  # 通用有界执行脑区；与 navigation_region 二选一
     navigation_region: Any = None,      # Phase 4.9 导航执行脑区(代码,无 LLM):delegate_navigation → 执行一段动作
+    option_autorun_actions: int | None = None,  # 通用参数；None 时回退 navigation_autorun_actions
     navigation_autorun_actions: int = 0,  # Phase 4.9 region-first:主脑首轮前自动执行一次 option 并注入轨迹
+    option_continuous: bool | None = None,  # 通用参数；None 时回退 navigation_continuous
     navigation_continuous: bool = False,  # Phase 4.10:主脑 act 后事件驱动再唤醒;不按每模型轮盲轮询
     status_injector: Any = None,        # Phase 4.1 metronome:async (step, messages)->(status_str|None, cost_usd);None=现行为
     status_period: int = 3,
@@ -857,6 +873,13 @@ async def run_agent(
     _plan_count = 0
     _max_plans = int(max_plan_calls) if max_plan_calls is not None else int(max_steps)
     _max_env_actions = None if max_env_actions is None else max(0, int(max_env_actions))
+    if option_region is not None and navigation_region is not None and option_region is not navigation_region:
+        raise ValueError("option_region and navigation_region cannot both be set")
+    _option_region: OptionRegion | None = option_region or navigation_region
+    _option_autorun_actions = (
+        int(navigation_autorun_actions) if option_autorun_actions is None else int(option_autorun_actions)
+    )
+    _option_continuous = bool(navigation_continuous) if option_continuous is None else bool(option_continuous)
 
     with scoped_workspace_root(run_dir):
         system = system_prompt if system_prompt is not None else _build_system_prompt(task, python_exe)
@@ -876,39 +899,54 @@ async def run_agent(
             if inject:
                 messages.append({"role": "user", "content": inject})
 
-        def _activate_navigation(trigger: str) -> dict[str, Any]:
-            option = _execute_navigation_option(
-                traj, region=navigation_region, env=_env,
-                requested_actions=int(navigation_autorun_actions),
+        scheduler = CognitiveScheduler(continuous=_option_continuous)
+
+        def _activate_option(trigger: str) -> OptionResult:
+            if _option_region is None:
+                raise RuntimeError("option region unavailable")
+            option = _execute_env_option(
+                traj, region=_option_region, env=_env,
+                requested_actions=_option_autorun_actions,
                 max_env_actions=_max_env_actions,
                 memory_region=memory_region, topo_region=topo_region, path_region=path_region,
             )
             traj.automatic_region_activations += 1
-            traj.navigation_options.append(_navigation_option_summary(option, trigger=trigger))
+            record = ActivationRecord.from_result(option, trigger=trigger).to_dict()
+            traj.option_activations.append(record)
+            _emit_option_activation(record)
             messages.append({
                 "role": "user",
                 "content": (
-                    f'<region_execution actor="navigation_region" trigger="{trigger}">\n'
-                    + _compact(option)
+                    f'<region_execution actor="{option.actor}" trigger="{trigger}">\n'
+                    + _compact(option.to_dict())
                     + "\n</region_execution>\n该块是脑区执行事实,不是你亲自执行的动作。"
                 ),
             })
             return option
 
         # Region-first:activate before the first main-model decision.
-        if navigation_region is not None and _env is not None and navigation_autorun_actions > 0:
+        initial_decision = scheduler.initial(
+            region_available=_option_region is not None and _env is not None,
+            action_budget=_option_autorun_actions,
+        )
+        if initial_decision.activate:
             try:
-                _activate_navigation("initial")
+                _activate_option(initial_decision.trigger)
             except Exception as exc:  # noqa: BLE001 — automatic region failure must not crash main loop
                 logger.warning("navigation autorun failed;continuing with main model", exc_info=True)
+                _emit_option_activation({"trigger": initial_decision.trigger}, error=str(exc)[:300])
                 messages.append({
                     "role": "user",
-                    "content": f'<region_execution actor="navigation_region" error="true">{exc}</region_execution>',
+                    "content": (
+                        f'<region_execution actor="{getattr(_option_region, "name", "option")}_region" '
+                        f'error="true">{exc}</region_execution>'
+                    ),
                 })
+            finally:
+                scheduler.mark_activated(action_clock=traj.env_actions)
 
         consecutive_errors = 0
         _last_status_env_actions = -1
-        _last_auto_env_actions = traj.env_actions
         for step in range(max_steps):
             if _max_env_actions is not None and traj.env_actions >= _max_env_actions:
                 traj.termination_reason = (
@@ -922,22 +960,24 @@ async def run_agent(
 
             # Event-driven reactivation:only after the main brain actually changed/attempted the environment.
             # Model-only turns (observe/consult/parse retry) do not wake the region or consume action budget.
-            should_reactivate = (
-                navigation_continuous
-                and navigation_region is not None
-                and _env is not None
-                and navigation_autorun_actions > 0
-                and traj.env_actions != _last_auto_env_actions
-                and bool(traj.env_action_trace)
-                and traj.env_action_trace[-1].get("actor") == "main"
-                and not bool(getattr(_env, "solved", False))
+            remaining_actions = (
+                None if _max_env_actions is None else max(0, _max_env_actions - traj.env_actions)
             )
-            if should_reactivate:
+            reactivation = scheduler.after_environment_change(
+                action_clock=traj.env_actions,
+                last_actor=(traj.env_action_trace[-1].get("actor") if traj.env_action_trace else None),
+                solved=bool(getattr(_env, "solved", False)),
+                region_available=_option_region is not None and _env is not None,
+                remaining_actions=remaining_actions,
+            )
+            if reactivation.activate:
                 try:
-                    _activate_navigation("after_main_action")
+                    _activate_option(reactivation.trigger)
                 except Exception:  # noqa: BLE001 — scheduler sidecar failure must not crash main loop
                     logger.warning("continuous navigation activation failed", exc_info=True)
-                _last_auto_env_actions = traj.env_actions
+                    _emit_option_activation({"trigger": reactivation.trigger}, error="activation_failed")
+                finally:
+                    scheduler.mark_activated(action_clock=traj.env_actions)
 
             # Phase 4.1 metronome:每 status_period 个环境动作注入脑区状态 user message。
             # 加性:status_injector None → 现行为(零变化)。injector 返 (status_str|None, cost);失败隔离不崩主 run。
@@ -1053,17 +1093,24 @@ async def run_agent(
                     result_str, exec_err = _compact(path_region.state(_env)), None
                 except Exception as exc:  # noqa: BLE001 — 失败隔离:错误返 agent,不崩主 run
                     result_str, exec_err = "", f"recall_path 失败: {exc}"
-            elif call.tool == "delegate_navigation" and navigation_region is not None and _env is not None:
+            elif (
+                call.tool == "delegate_navigation"
+                and _option_region is not None
+                and _option_region.name == "navigation"
+                and _env is not None
+            ):
                 # Runtime owns env.step;the region only selects actions. This preserves authority and actor provenance.
                 try:
                     requested = _as_int(call.args, "action_budget", 8)
-                    option = _execute_navigation_option(
-                        traj, region=navigation_region, env=_env,
+                    option = _execute_env_option(
+                        traj, region=_option_region, env=_env,
                         requested_actions=requested, max_env_actions=_max_env_actions,
                         memory_region=memory_region, topo_region=topo_region, path_region=path_region,
                     )
-                    traj.navigation_options.append(_navigation_option_summary(option, trigger="main_tool"))
-                    result_str = _compact(option)
+                    record = ActivationRecord.from_result(option, trigger="main_tool").to_dict()
+                    traj.option_activations.append(record)
+                    _emit_option_activation(record)
+                    result_str = _compact(option.to_dict())
                     exec_err = None
                 except Exception as exc:  # noqa: BLE001 — region failure becomes tool feedback
                     result_str, exec_err = "", f"delegate_navigation 失败: {exc}"
@@ -1093,14 +1140,15 @@ async def run_agent(
             # Phase 4.7 路径轨迹记忆:每步 act 后更新 trail(同 topo;渲染图用)
             if _act_before is not None and path_region is not None:
                 path_region.update(_env._agent)
-            if _act_before is not None and navigation_region is not None and _status not in {"invalid", "already_done"}:
-                if getattr(navigation_region, "access_mode", "oracle") == "grounded":
-                    navigation_region.observe_transition(
-                        action=str(call.args.get("action", "")),
-                        observation=_env.observation(), status=_status,
-                    )
-                else:
-                    navigation_region.observe_position(_env._agent)
+            if _act_before is not None and _option_region is not None and _status not in {"invalid", "already_done"}:
+                region_observation = select_region_observation(
+                    _option_region,
+                    public_observation=_env.observation(), privileged_observation=_env,
+                )
+                _option_region.observe_transition(
+                    action=str(call.args.get("action", "")),
+                    observation=region_observation, status=_status,
+                )
             consecutive_errors = 0  # 成功(或可执行)解析 → 重置(连续错误是针对 parse/模型失败)
             preview = (result_str or exec_err or "")[:300]
             traj.steps.append(StepRecord(

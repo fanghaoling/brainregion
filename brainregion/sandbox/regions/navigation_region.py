@@ -26,6 +26,7 @@ class NavigationRegion:
     """Privileged oracle DFS policy retained as an explicit control arm."""
 
     uses_model = False
+    name = "navigation"
     access_mode = "oracle"
 
     def __init__(self, start: tuple[int, int] = (0, 0)) -> None:
@@ -87,6 +88,16 @@ class NavigationRegion:
         self._sync_path(current)
         self.visited.add(current)
 
+    def observe_transition(self, *, action: str, observation: Any, status: str) -> None:
+        """OptionRegion adapter:oracle observation is the privileged env object."""
+        del action, status
+        self.observe_position(tuple(observation._agent))
+
+    def option_boundary(self, observation: Any, *, actions_executed: int) -> str | None:
+        """Oracle control runs to goal/budget;it is the privileged upper bound."""
+        del observation, actions_executed
+        return None
+
     def _sync_path(self, current: tuple[int, int]) -> None:
         if not self.path:
             self.path = [current]
@@ -111,6 +122,7 @@ class GroundedNavigationRegion:
     """
 
     uses_model = False
+    name = "navigation"
     access_mode = "grounded"
 
     def __init__(self) -> None:

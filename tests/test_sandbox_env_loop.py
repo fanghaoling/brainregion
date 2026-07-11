@@ -11,6 +11,8 @@ import asyncio
 import json
 import sys
 
+import pytest
+
 from brainregion.providers.base import ModelResponse
 from brainregion.sandbox import cleanup_run_dir, make_run_dir
 from brainregion.sandbox.envs import GridWorld, build_env_system_prompt
@@ -560,7 +562,7 @@ def test_grounded_navigation_autorun_solves_dead_end_without_env_access():
                 max_steps=3, max_env_actions=8,
                 system_prompt=build_env_system_prompt(env, task.goal, navigation=True),
                 verify_fn=_make_env_verify(env),
-                navigation_region=TextOnlyRegion(), navigation_autorun_actions=8,
+                option_region=TextOnlyRegion(), option_autorun_actions=8,
             ))
     finally:
         cleanup_run_dir(run_dir)
@@ -634,3 +636,64 @@ def test_continuous_navigation_reactivates_only_after_main_action():
     assert [item["actor"] for item in traj.env_action_trace] == [
         "navigation_region", "main", "navigation_region",
     ]
+
+
+def test_option_region_failure_isolated_and_reported_to_main():
+    class BrokenRegion:
+        name = "broken"
+        access_mode = "grounded"
+
+        def next_action(self, observation):
+            raise RuntimeError("region exploded")
+
+        def observe_transition(self, *, action, observation, status):
+            pass
+
+        def option_boundary(self, observation, *, actions_executed):
+            return None
+
+        def snapshot(self):
+            return {}
+
+    env = GridWorld(size=3, start=(0, 0), goal=(2, 2), visibility_radius=1, strict_obs=True)
+    task = SandboxTask(id="env-option-failure", goal="找到 G")
+    backend = MockBackend([_J({"thought": "脑区失败后继续", "done": True, "answer": "停止"})])
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            traj = asyncio.run(run_agent(
+                backend, "mock", task, run_dir=run_dir, arm="none",
+                max_steps=2, max_env_actions=4,
+                system_prompt=build_env_system_prompt(env, task.goal, navigation=True),
+                verify_fn=_make_env_verify(env),
+                navigation_region=BrokenRegion(), navigation_autorun_actions=2,
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+
+    assert traj.done is True and traj.n_steps == 1
+    assert traj.automatic_region_activations == 0 and traj.navigation_options == []
+    injected = "\n".join(m["content"] for m in backend.last_messages if m["role"] == "user")
+    assert 'region_execution actor="broken_region" error="true"' in injected
+    assert "region exploded" in injected
+
+
+def test_option_region_and_legacy_navigation_region_are_mutually_exclusive():
+    from brainregion.sandbox.regions import GroundedNavigationRegion, NavigationRegion
+
+    env = GridWorld(size=3, start=(0, 0), goal=(2, 2), visibility_radius=1, strict_obs=True)
+    task = SandboxTask(id="env-option-conflict", goal="找到 G")
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            with pytest.raises(ValueError, match="cannot both be set"):
+                asyncio.run(run_agent(
+                    MockBackend([_J({"done": True})]), "mock", task,
+                    run_dir=run_dir, max_steps=1,
+                    system_prompt=build_env_system_prompt(env, task.goal, navigation=True),
+                    verify_fn=_make_env_verify(env),
+                    option_region=GroundedNavigationRegion(),
+                    navigation_region=NavigationRegion(start=env.start),
+                ))
+    finally:
+        cleanup_run_dir(run_dir)

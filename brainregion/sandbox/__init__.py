@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
 from .loop import Trajectory, run_agent
+from .option_runtime import ActivationRecord, CognitiveScheduler, OptionRegion, OptionResult
 from .task import SandboxTask, WorktreeTask
 from .verify import verify_solution
 from .worktree import (
@@ -38,6 +39,10 @@ __all__ = [
     "make_run_dir",
     "cleanup_run_dir",
     "run_agent",
+    "OptionRegion",
+    "OptionResult",
+    "ActivationRecord",
+    "CognitiveScheduler",
     "verify_solution",
     "WorktreeError",
     "WorktreeHandle",
