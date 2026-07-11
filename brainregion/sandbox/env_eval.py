@@ -33,7 +33,14 @@ from .envs import GridWorld, build_env_system_prompt
 from .envs._actions import ABS, EGO, ABS_DELTA, INITIAL_HEADING
 from .isolation import cleanup_run_dir, make_run_dir
 from .loop import _current_env, run_agent, scoped_env, scoped_memory_mode, scoped_topo, scoped_path
-from .regions import EchoStrategy, MemoryRegion, StrategyRegion, TopologicalRegion, PathTraceRegion
+from .regions import (
+    EchoStrategy,
+    MemoryRegion,
+    NavigationRegion,
+    PathTraceRegion,
+    StrategyRegion,
+    TopologicalRegion,
+)
 from .regions.strategy_region import _strip_to_thought
 from .task import SandboxTask
 
@@ -49,7 +56,8 @@ class EnvConfig:
     wall_seed: int | None = None
     wall_density: float = 0.0
     visibility_radius: int = 2
-    max_steps: int = 30
+    max_steps: int = 30                # 环境原始动作预算(act 次数,含 turn/blocked)
+    max_main_turns: int | None = None  # 主脑模型轮次安全上限;None → 由动作预算派生
     maze: bool = False                 # Phase 4.5:recursive backtracker 迷宫地形(seed 作 maze_seed)
     maze_braid: float = 0.2            # 迷宫去死胡同比例(0=完美迷宫;0.2 地牢感)
     ego_actions: bool = False          # Phase 4.8:ego-relative action(agent 有 heading,action=forward/turn)
@@ -85,6 +93,7 @@ class EnvArm:
     topo_proc: bool = False            # Phase 4.6:Trémaux 系统探索程序(教主脑用 topo 状态)
     path: bool = False                 # Phase 4.7:路径轨迹记忆脑区(recall_path → 图+走过路径标 ·)
     path_ego: bool = False             # Phase 4.7b:egocentric 路径图(agent 居中相对偏移;path=True 时生效)
+    navigation_delegate: bool = False  # Phase 4.9:导航脑区直接执行一段动作,主脑只收 actor-attributed trace
 
 
 # 预设 = 常用比较的糖(CLI 也可 --arm 显式给 feature-config)
@@ -135,6 +144,11 @@ ARMS_PATH: tuple[EnvArm, ...] = (            # Phase 4.7:路径轨迹记忆(图+
     EnvArm("path_trace",   path=True,        visual_ephemeral=True),                         # 图+走过路径标 ·(allocentric)
     EnvArm("path_ego",     path=True, path_ego=True, visual_ephemeral=True),                 # 同上但 egocentric(agent 居中相对偏移)
 )
+ARMS_NAVIGATION: tuple[EnvArm, ...] = (      # Phase 4.9:同策略直控/建议/委托,隔离控制边界价值
+    EnvArm("nav_direct", visual_ephemeral=True),
+    EnvArm("nav_advice", topo=True, topo_proc=True, visual_ephemeral=True),
+    EnvArm("nav_delegate", navigation_delegate=True, visual_ephemeral=True),
+)
 ARM_PRESETS: dict[str, tuple[EnvArm, ...]] = {
     "memory-strategy": ARMS_MEMORY_STRATEGY,
     "memory-baseline": ARMS_MEMORY_BASELINE,
@@ -145,7 +159,8 @@ ARM_PRESETS: dict[str, tuple[EnvArm, ...]] = {
     "maze-content": ARMS_MAZE_CONTENT,
     "topo": ARMS_TOPO,
     "path": ARMS_PATH,
-    "all": ARMS_MEMORY_STRATEGY + ARMS_MEMORY_BASELINE + ARMS_METRONOME + ARMS_EPHEMERAL + ARMS_REGISTRY + ARMS_CONTENT + ARMS_MAZE_CONTENT + ARMS_TOPO + ARMS_PATH,
+    "navigation": ARMS_NAVIGATION,
+    "all": ARMS_MEMORY_STRATEGY + ARMS_MEMORY_BASELINE + ARMS_METRONOME + ARMS_EPHEMERAL + ARMS_REGISTRY + ARMS_CONTENT + ARMS_MAZE_CONTENT + ARMS_TOPO + ARMS_PATH + ARMS_NAVIGATION,
 }
 
 
@@ -253,6 +268,7 @@ def make_status_injector(
             return _DUMMY_STATUS, cost
         return _format_status(mem=memory_region.rough_map, strat=s["intent"])[:_STATUS_BUDGET], cost   # real 截断到预算
 
+    setattr(inject, "region_model_calls", 0 if arm.strategy == "echo" else 2)
     return inject
 
 
@@ -268,6 +284,10 @@ def _positions_from_traj(traj: Any, env: GridWorld) -> list[tuple[int, int]]:
     Phase 4.8 ego:turn→旋转 heading(位置不变)、forward→HEADING_DELTA[heading] **查墙**(opus-0:撞墙不位移,
     否则一致性断言失败);abs 走 ABS_DELTA。所有 heading 变换走 ActionModel(opus-8)。
     """
+    action_trace = getattr(traj, "env_action_trace", None)
+    if action_trace:
+        return [tuple(env.start)] + [tuple(item["after"]) for item in action_trace]
+
     pos = tuple(env.start)
     positions: list[tuple[int, int]] = [pos]
     walls = env.walls
@@ -379,14 +399,19 @@ _STATUS_MARKERS = ("记忆脑区", "策略脑区", "记忆显示", "根据记忆
 
 
 def _status_referenced(traj: Any, period: int) -> float | None:
-    """post-push 步(注入在 step 顶部,该步 thought 即收 status 后的推理)thought 引用 region_status 的比例。
+    """post-push 步(该轮 thought 已收到 status)引用 region_status 的比例。
 
     review 双强:粗粒度,仅作诊断。负对照基线(无注入 run 的标记率)应另测 —— 若 ≈0 则本指标可信;
     若高则需收紧到 status 具体内容 token。real/dummy 同标签 → real 高 dummy 低 = engage real 内容。
     """
     if not period or period <= 0:
         return None
-    push_steps = [s for s in traj.steps if s.index > 0 and s.index % period == 0]
+    instrumented = any(hasattr(s, "status_injected") for s in traj.steps)
+    if instrumented:
+        push_steps = [s for s in traj.steps if bool(getattr(s, "status_injected", False))]
+    else:
+        # 兼容旧 artifact / 测试替身:旧调度按主脑 step 取模。
+        push_steps = [s for s in traj.steps if s.index > 0 and s.index % period == 0]
     if not push_steps:
         return None
     hit = sum(1 for s in push_steps if any(m in (s.thought or "") for m in _STATUS_MARKERS))
@@ -409,11 +434,14 @@ async def _run_one_episode(
     """
     env = build_env_for_config(cfg)
     memory_region, strategy_region, memory_mode, topo_region, path_region = build_regions_for_arm(arm, env, log_len=log_len)
+    navigation_region = NavigationRegion(start=env.start) if arm.navigation_delegate else None
     # goal_text 臂感知:push 臂不提 pull 工具;无记忆臂(noregion)不提 recall_map;real/echo 提 plan;topo/path 提各自工具。
     if arm.metronome:
         goal_text = "找到并到达藏在网格里的目标 G(observe 只看当前视野;每几步收到脑区背景状态作参考;先探索再过去)"
     else:
-        if arm.topo:
+        if arm.navigation_delegate:
+            tools_hint = "delegate_navigation 把局部探索直接交给导航执行脑区,再审阅带 actor 的动作轨迹"
+        elif arm.topo:
             tools_hint = "recall_topo 拿拓扑动作状态(未探索出口/死胡同/回溯方向)"
         elif arm.path:
             tools_hint = "recall_path 拿标了走过路径的场景图" + ("(agent 居中相对偏移)" if arm.path_ego else "")
@@ -443,6 +471,14 @@ async def _run_one_episode(
         )
         run_strategy_region = None
 
+    # max_steps 历史上同时充当「主脑轮次」和「环境动作」预算，pull consult 会挤掉 act。
+    # env-eval 现在把 cfg.max_steps 固定为动作预算；主脑轮次仅作防空转安全上限。
+    main_turn_cap = (
+        int(cfg.max_main_turns)
+        if cfg.max_main_turns is not None
+        else max(int(cfg.max_steps) * 4, int(cfg.max_steps) + 8)
+    )
+
     run_dir = make_run_dir()
     try:
         with scoped_env(env):
@@ -451,7 +487,9 @@ async def _run_one_episode(
                     with scoped_path(path_region) if path_region else nullcontext():
                         traj = await run_agent(
                             backend, model, task, run_dir=run_dir, arm="none",
-                            max_steps=cfg.max_steps, max_cost_usd=max_cost_usd,
+                            max_steps=main_turn_cap, max_env_actions=cfg.max_steps,
+                            max_recall_calls=cfg.max_steps, max_plan_calls=cfg.max_steps,
+                            max_cost_usd=max_cost_usd,
                             temperature=temperature, max_tokens=max_tokens,
                             endpoint_id=endpoint_id, thinking=thinking, effort=effort,
                             system_prompt=build_env_system_prompt(
@@ -462,10 +500,13 @@ async def _run_one_episode(
                                 registry=arm.registry,
                                 topo=arm.topo, topo_proc=arm.topo_proc,   # Phase 4.6
                                 path=arm.path, path_ego=arm.path_ego,     # Phase 4.7/4.7b 路径轨迹(alloc/ego)
+                                navigation=arm.navigation_delegate,       # Phase 4.9 导航执行委托
                             ),
                             verify_fn=verify,
                             memory_region=memory_region, strategy_region=run_strategy_region,
                             topo_region=topo_region, path_region=path_region,
+                            navigation_region=navigation_region,
+                            navigation_autorun_actions=(min(8, cfg.max_steps) if arm.navigation_delegate else 0),
                             status_injector=injector, status_period=status_period,
                             visual_ephemeral=arm.visual_ephemeral,
                         )
@@ -476,8 +517,23 @@ async def _run_one_episode(
     n_recall = sum(1 for s in traj.steps if s.tool == "recall_map")
     return {
         "config": cfg.label, "arm": arm.name,
-        "solved": bool(traj.tests_green), "steps": traj.n_steps,
+        "solved": bool(traj.tests_green),
+        "steps": traj.n_steps,  # 兼容旧 artifact:steps=主脑轮次
+        "main_turns": traj.n_steps,
+        "main_turn_cap": main_turn_cap,
+        "env_actions": traj.env_actions,
+        "env_action_budget": cfg.max_steps,
+        "successful_moves": traj.successful_moves,
+        "turn_actions": traj.turn_actions,
+        "blocked_actions": traj.blocked_actions,
+        "delegated_actions": traj.delegated_actions,
+        "navigation_delegations": traj.navigation_delegations,
+        "automatic_region_activations": traj.automatic_region_activations,
+        "region_tool_calls": traj.region_tool_calls,
+        "region_model_calls": traj.region_model_calls,
         "cost": round(traj.total_main_cost_usd + traj.total_arm_cost_usd, 6),
+        "main_cost": round(traj.total_main_cost_usd, 6),
+        "region_cost": round(traj.total_arm_cost_usd, 6),
         "termination": traj.termination_reason,
         "n_recall": n_recall,
         # Phase 4.4:降级数仅对 memory_region 臂有意义(_recall_via_region 失败→oracle fallback)。
@@ -486,6 +542,7 @@ async def _run_one_episode(
         "n_plan": sum(1 for s in traj.steps if s.tool == "plan"),
         "n_recall_topo": sum(1 for s in traj.steps if s.tool == "recall_topo"),  # Phase 4.6 拓扑记忆 consult
         "n_recall_path": sum(1 for s in traj.steps if s.tool == "recall_path"),  # Phase 4.7 路径轨迹 consult
+        "n_delegate_navigation": sum(1 for s in traj.steps if s.tool == "delegate_navigation"),
         "reverse_rate": _reverse_rate(positions),   # Phase 4.6 回溯代理(回到上一格比例;Trémaux 死胡同回溯应高)
         "revisit_rate": _revisit_rate(positions),
         "coverage": _coverage(env),
@@ -508,11 +565,24 @@ def _agg_arm_runs(arm_runs: list[dict]) -> dict:
     return {
         "n_runs": n, "n_solved": n_solved, "solve_rate": (n_solved / n) if n else 0.0,
         "mean_steps": _mean("steps"), "mean_cost": _mean("cost"),
+        "mean_main_turns": _mean("main_turns"),
+        "mean_env_actions": _mean("env_actions"),
+        "mean_successful_moves": _mean("successful_moves"),
+        "mean_turn_actions": _mean("turn_actions"),
+        "mean_blocked_actions": _mean("blocked_actions"),
+        "mean_delegated_actions": _mean("delegated_actions"),
+        "mean_navigation_delegations": _mean("navigation_delegations"),
+        "mean_automatic_region_activations": _mean("automatic_region_activations"),
+        "mean_region_tool_calls": _mean("region_tool_calls"),
+        "mean_region_model_calls": _mean("region_model_calls"),
+        "mean_main_cost": _mean("main_cost"),
+        "mean_region_cost": _mean("region_cost"),
         "mean_revisit_rate": _mean("revisit_rate"), "mean_coverage": _mean("coverage"),
         "mean_n_plan": _mean("n_plan"), "mean_n_recall": _mean("n_recall"),
         "mean_n_recall_degraded": _mean("n_recall_degraded"),   # Phase 4.4:oracle 降级稀释内容信号
         "mean_n_recall_topo": _mean("n_recall_topo"),           # Phase 4.6 拓扑记忆 consult 次数
         "mean_n_recall_path": _mean("n_recall_path"),           # Phase 4.7 路径轨迹 consult 次数
+        "mean_n_delegate_navigation": _mean("n_delegate_navigation"),
         "mean_reverse_rate": _mean("reverse_rate"),             # Phase 4.6 回溯代理(Trémaux 死胡同回溯)
         "mean_status_referenced": _mean("status_referenced"),   # Phase 4.1 push 臂(post-push 引用 status 比例)
     }
@@ -522,7 +592,8 @@ def _solve_rate_delta(rows: list[dict], control: str, treatment: str) -> float |
     """跨 config 均值 (solve_rate[t] − solve_rate[c])(bootstrap stat_fn;row 带 per-arm 聚合)。"""
     ds = []
     for r in rows:
-        c = r[control]; t = r[treatment]
+        c = r[control]
+        t = r[treatment]
         if c["n_runs"] < 1 or t["n_runs"] < 1:
             continue  # 不完整 config 跳过
         ds.append(t["solve_rate"] - c["solve_rate"])
@@ -534,8 +605,10 @@ def _metric_delta(key: str):
     def _fn(rows: list[dict], control: str, treatment: str) -> float | None:
         ds = []
         for r in rows:
-            c = r[control]; t = r[treatment]
-            cv = c.get(key); tv = t.get(key)
+            c = r[control]
+            t = r[treatment]
+            cv = c.get(key)
+            tv = t.get(key)
             if cv is None or tv is None:
                 continue
             ds.append(tv - cv)
@@ -550,6 +623,9 @@ def _bootstrap_pair(rows: list[dict], control: str, treatment: str, run_id: str,
         "revisit_delta": _metric_delta("mean_revisit_rate"),
         "coverage_delta": _metric_delta("mean_coverage"),
         "steps_delta": _metric_delta("mean_steps"),
+        "main_turns_delta": _metric_delta("mean_main_turns"),
+        "env_actions_delta": _metric_delta("mean_env_actions"),
+        "region_model_calls_delta": _metric_delta("mean_region_model_calls"),
         "cost_delta": _metric_delta("mean_cost"),
     }
     out: dict[str, dict] = {}
@@ -614,6 +690,9 @@ def _aggregate(
             "revisit_delta": boot["revisit_delta"],
             "coverage_delta": boot["coverage_delta"],
             "steps_delta": boot["steps_delta"],
+            "main_turns_delta": boot["main_turns_delta"],
+            "env_actions_delta": boot["env_actions_delta"],
+            "region_model_calls_delta": boot["region_model_calls_delta"],
             "cost_delta": boot["cost_delta"],
             "n_complete_configs": len(complete),
             "gate": gate,
@@ -706,16 +785,27 @@ async def run_env_eval(
 def write_csv(report: dict, path: str | Path) -> Path:
     """每 run 一行(平铺)落 CSV(含生成配置列,review 双强可复现)。"""
     p = Path(path)
-    cols = ["config", "arm", "solved", "steps", "cost", "termination",
-            "n_recall", "n_recall_degraded", "n_plan", "revisit_rate", "coverage", "status_referenced",
+    cols = ["config", "arm", "solved", "steps", "main_turns", "main_turn_cap",
+            "env_actions", "env_action_budget", "successful_moves", "turn_actions", "blocked_actions",
+            "delegated_actions", "navigation_delegations", "automatic_region_activations",
+            "region_tool_calls", "region_model_calls", "cost", "main_cost", "region_cost",
+            "termination", "n_recall", "n_recall_degraded", "n_plan", "n_delegate_navigation",
+            "revisit_rate", "coverage", "status_referenced",
             "model", "temperature", "thinking", "effort"]
     with open(p, "w", newline="", encoding="utf-8") as f:
         w = csv.writer(f)
         w.writerow(cols)
         for r in report["runs"]:
             w.writerow([
-                r["config"], r["arm"], r["solved"], r["steps"], r["cost"], r["termination"],
-                r["n_recall"], r["n_recall_degraded"], r["n_plan"], r["revisit_rate"], r["coverage"],
+                r["config"], r["arm"], r["solved"], r["steps"],
+                r.get("main_turns"), r.get("main_turn_cap"),
+                r.get("env_actions"), r.get("env_action_budget"), r.get("successful_moves"),
+                r.get("turn_actions"), r.get("blocked_actions"),
+                r.get("delegated_actions"), r.get("navigation_delegations"),
+                r.get("automatic_region_activations"), r.get("region_tool_calls"), r.get("region_model_calls"),
+                r["cost"], r.get("main_cost"), r.get("region_cost"), r["termination"],
+                r["n_recall"], r["n_recall_degraded"], r["n_plan"], r.get("n_delegate_navigation"),
+                r["revisit_rate"], r["coverage"],
                 r["status_referenced"],
                 report["model"], report["temperature"], report["thinking"], report["effort"],
             ])
@@ -754,14 +844,20 @@ def render_env_eval_summary(report: dict) -> str:
         lines.append(f"⚠️ cost_capped at {report['cost_capped_at']} —— 对比矩阵不完整,gate 已作废为 INCONCLUSIVE。")
 
     lines.append("\n**per-arm(池化 over configs×repeats):**")
-    lines.append("| arm | n | solve_rate | revisit | coverage | n_plan | n_recall | n_rec_degr | stat_ref | mean_steps | mean_cost |")
-    lines.append("|---|---|---|---|---|---|---|---|---|---|---|")
+    lines.append("| arm | n | solve | main_turns | env_actions | delegated | nav_options | auto_wakes | moves | turns | region_tools | region_models | revisit | main_cost | region_cost | total_cost |")
+    lines.append("|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for arm, s in report["per_arm"].items():
         lines.append(
-            f"| {arm} | {s['n']} | {s['solve_rate']:.2f} | {_fmt(s['mean_revisit_rate'])} | "
-            f"{_fmt(s['mean_coverage'])} | {(s['mean_n_plan'] or 0):.1f} | {(s['mean_n_recall'] or 0):.1f} | "
-            f"{(s.get('mean_n_recall_degraded') or 0):.1f} | "
-            f"{_fmt(s.get('mean_status_referenced'))} | {(s['mean_steps'] or 0):.1f} | ${(s['mean_cost'] or 0):.4f} |"
+            f"| {arm} | {s['n']} | {s['solve_rate']:.2f} | "
+            f"{(s.get('mean_main_turns') or s.get('mean_steps') or 0):.1f} | "
+            f"{(s.get('mean_env_actions') or 0):.1f} | {(s.get('mean_delegated_actions') or 0):.1f} | "
+            f"{(s.get('mean_navigation_delegations') or 0):.1f} | "
+            f"{(s.get('mean_automatic_region_activations') or 0):.1f} | "
+            f"{(s.get('mean_successful_moves') or 0):.1f} | "
+            f"{(s.get('mean_turn_actions') or 0):.1f} | {(s.get('mean_region_tool_calls') or 0):.1f} | "
+            f"{(s.get('mean_region_model_calls') or 0):.1f} | {_fmt(s['mean_revisit_rate'])} | "
+            f"{(s.get('mean_main_cost') or 0):.4f} | {(s.get('mean_region_cost') or 0):.4f} | "
+            f"{(s['mean_cost'] or 0):.4f} |"
         )
     # Phase 4.4:降级稀释内容信号(review 双强 opus-0/gpt-5.5-2)—— 任一臂有降级 → 警告 Δsolve 须在非降级子集解读
     max_degr = max((s.get("mean_n_recall_degraded") or 0) for s in report["per_arm"].values()) if report["per_arm"] else 0
@@ -778,7 +874,8 @@ def render_env_eval_summary(report: dict) -> str:
             f"- {pk}: solve_rate Δ point={_fmt(d['point'])} CI=[{_fmt(d['low'])},{_fmt(d['high'])}] "
             f"(n_configs={pv['n_complete_configs']}) → **{pv['gate']['decision']}**"
         )
-        rd = pv["revisit_delta"]; cd = pv["coverage_delta"]
+        rd = pv["revisit_delta"]
+        cd = pv["coverage_delta"]
         if rd["point"] is not None or cd["point"] is not None:
             lines.append(f"    过程:revisit Δ={_fmt(rd['point'])} coverage Δ={_fmt(cd['point'])}")
     return "\n".join(lines)

@@ -134,6 +134,32 @@ def _agg(runs, configs, arms, *, cost_capped=False, cost_capped_at=None):
                       0.0, False, None, None, 2048)
 
 
+def test_sandbox_backend_only_resolves_selected_endpoint_credentials(monkeypatch):
+    """未选 endpoint 缺 key 不阻断本次单模型 sandbox；选中 endpoint 仍严格解析 key。"""
+    from brainregion.sandbox.cli import _build_backend, _endpoint_ids_for_refs
+
+    monkeypatch.setenv("USED_KEY", "used-secret")
+    monkeypatch.delenv("UNUSED_KEY", raising=False)
+    dd = {
+        "endpoints": {
+            "used": {
+                "provider": "openai", "base_url": "https://used.invalid/v1",
+                "api_key_env": "USED_KEY", "models": ["model-a"],
+            },
+            "unused": {
+                "provider": "anthropic", "base_url": "https://unused.invalid",
+                "api_key_env": "UNUSED_KEY", "models": ["model-b"],
+            },
+        },
+    }
+    selected = _endpoint_ids_for_refs(dd, ["used/model-a"])
+    backend, registry = _build_backend(dd, endpoint_ids=selected)
+
+    assert selected == {"used"}
+    assert set(registry) == {"used"}
+    assert backend.endpoint_registry is registry
+
+
 # ---------- EchoStrategy 单元 + _strip_to_thought ----------
 
 
@@ -200,6 +226,28 @@ def test_echo_via_run_agent_plan_no_extra_llm_call():
     plan_step = next(s for s in traj.steps if s.tool == "plan")
     assert '"strategy": true' in plan_step.result_preview
     assert "问策略我在(1,1)" in plan_step.result_preview   # echo 复述主脑 plan-call 轮 thought
+    assert traj.region_tool_calls == 2 and traj.region_model_calls == 1  # Memory 调模;Echo 不调
+
+
+def test_region_model_cost_and_calls_are_separate_from_main():
+    """主脑 recall/done 两次调用与 MemoryRegion 一次调用分别计数、分账。"""
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
+    mem = MemoryRegion(start=env.start)
+    backend = MockBackend([
+        _J({"thought": "查记忆", "tool": "recall_map", "args": {}}),
+        _MEMORY_JSON,
+        _J({"thought": "结束", "done": True, "answer": "记录完成"}),
+    ], cost=0.001)
+
+    traj = _run(backend, env, memory_region=mem)
+
+    assert traj.n_steps == 2
+    assert traj.region_tool_calls == 1 and traj.region_model_calls == 1
+    assert abs(traj.total_main_cost_usd - 0.002) < 1e-12
+    assert abs(traj.total_arm_cost_usd - 0.001) < 1e-12
+    recall_step = next(s for s in traj.steps if s.tool == "recall_map")
+    assert abs(recall_step.main_cost_usd - 0.001) < 1e-12
+    assert abs(recall_step.arm_cost_usd - 0.001) < 1e-12
 
 
 # ---------- 过程指标 ----------
@@ -320,6 +368,10 @@ def test_run_env_eval_plumbing_structure_and_csv():
     assert len(report["runs"]) == 2 * 2 * 2          # configs × arms × repeats
     assert report["signal_regime"] == "all_fail"     # 全 give-up
     assert report["per_arm"]["memory_only"]["solve_rate"] == 0.0
+    assert "mean_main_turns" in report["per_arm"]["memory_only"]
+    assert "mean_env_actions" in report["per_arm"]["memory_only"]
+    assert "mean_region_model_calls" in report["per_arm"]["memory_only"]
+    assert {"main_turns", "env_actions", "main_cost", "region_cost"} <= report["runs"][0].keys()
     assert report["cost_capped"] is False
     # 生成配置记录(gpt-5 可复现)
     assert report["temperature"] == 0.0 and report["model"] == "mock"
@@ -444,12 +496,56 @@ def test_status_injector_fires_every_period_not_step0():
     assert any("MARKER_6" in c for c in captured[6])            # step 6 注入
 
 
+def test_status_injector_period_uses_env_actions_not_main_turns():
+    """observe 会增加主脑轮次但不推进 metronome;完成第 2 个 act 后才 push。"""
+    env = GridWorld(size=6, start=(0, 0), goal=(5, 5), visibility_radius=1, strict_obs=True)
+    injected_at = []
+    task = SandboxTask(id="t-action-clock", goal="探索")
+    backend = MockBackend([
+        _J({"thought": "看1", "tool": "observe", "args": {}}),
+        _J({"thought": "走1", "tool": "act", "args": {"action": "right"}}),
+        _J({"thought": "看2", "tool": "observe", "args": {}}),
+        _J({"thought": "走2", "tool": "act", "args": {"action": "right"}}),
+        _J({"thought": "看3", "tool": "observe", "args": {}}),
+        _J({"thought": "走3", "tool": "act", "args": {"action": "right"}}),
+    ])
+
+    async def inj(action_count, messages):
+        injected_at.append(action_count)
+        return f"ACTIONS_{action_count}", 0.0
+
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            traj = asyncio.run(run_agent(
+                backend, "mock", task, run_dir=run_dir, arm="none",
+                max_steps=12, max_env_actions=3,
+                system_prompt=build_env_system_prompt(env, task.goal),
+                verify_fn=_make_env_verify(env),
+                status_injector=inj, status_period=2,
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+
+    assert traj.env_actions == 3 and traj.n_steps == 6
+    assert injected_at == [2]
+    pushed = [s for s in traj.steps if s.status_injected]
+    assert len(pushed) == 1 and pushed[0].index == 4
+
+
 def test_status_referenced_metric():
     class _S:
         def __init__(self, index, thought):
-            self.index = index; self.thought = thought; self.tool = "act"; self.args = {}
-            self.done = False; self.result_chars = 0; self.result_preview = ""; self.error = None
-            self.main_cost_usd = 0.0; self.arm_cost_usd = 0.0
+            self.index = index
+            self.thought = thought
+            self.tool = "act"
+            self.args = {}
+            self.done = False
+            self.result_chars = 0
+            self.result_preview = ""
+            self.error = None
+            self.main_cost_usd = 0.0
+            self.arm_cost_usd = 0.0
 
     class _T:
         def __init__(self, steps):
@@ -511,7 +607,7 @@ def test_status_period_zero_or_none_no_crash():
 
 def test_status_injector_failure_isolated_main_run_continues():
     """review 双强:injector 抛异常 → 跳过本次注入,主 run 不崩,后续步继续。"""
-    env = GridWorld(size=6, start=(0, 0), goal=(5, 0), visibility_radius=1, strict_obs=True)
+    env = GridWorld(size=8, start=(0, 0), goal=(7, 0), visibility_radius=1, strict_obs=True)
     injected = []
 
     async def inj(step, messages):
@@ -529,7 +625,7 @@ def test_status_injector_failure_isolated_main_run_continues():
     run_dir = make_run_dir()
     try:
         with scoped_env(env):
-            traj = asyncio.run(run_agent(
+            asyncio.run(run_agent(
                 _Act(), "m", task, run_dir=run_dir, arm="none", max_steps=7,
                 system_prompt=build_env_system_prompt(env, "g"), verify_fn=_make_env_verify(env),
                 status_injector=inj, status_period=3,
@@ -1126,7 +1222,8 @@ def test_path_region_egocentric_render():
     env._explored = {(1, 1), (2, 1), (3, 1)}   # 同一行,agent (3,1)
     env._agent = (3, 1)
     reg = PathTraceRegion(start=(1, 1), egocentric=True)
-    reg.update((2, 1)); reg.update((3, 1))
+    reg.update((2, 1))
+    reg.update((3, 1))
     m = reg.render_with_path(env)
     rows = m.split("\n")
     # rels: (-2,0),(-1,0),(0,0) → R=max(2,0)=2 → 5×5 窗口;agent @ 在中心 (2,2)
@@ -1187,4 +1284,36 @@ def test_run_env_eval_path_plumbing():
     assert "mean_n_recall_path" in report["per_arm"]["path_trace"]
 
 
+def test_navigation_arms_and_prompt_contract():
+    from brainregion.sandbox.cli import _parse_arm_spec
+    from brainregion.sandbox.env_eval import ARMS_NAVIGATION
 
+    assert [a.name for a in ARMS_NAVIGATION] == ["nav_direct", "nav_advice", "nav_delegate"]
+    assert ARMS_NAVIGATION[0].topo is False and ARMS_NAVIGATION[0].navigation_delegate is False
+    assert ARMS_NAVIGATION[1].topo is True and ARMS_NAVIGATION[1].topo_proc is True
+    assert ARMS_NAVIGATION[2].navigation_delegate is True
+    assert ARM_PRESETS["navigation"] == ARMS_NAVIGATION
+
+    env = GridWorld(size=5, start=(0, 0), goal=(4, 4), visibility_radius=1, strict_obs=True)
+    prompt = build_env_system_prompt(env, "找到 G", navigation=True)
+    assert '"tool":"delegate_navigation"' in prompt
+    assert "actor=navigation_region" in prompt
+    assert '{{"thought"' not in prompt
+
+    explicit = _parse_arm_spec("name=custom-nav,nav=delegate,eph=1")
+    assert explicit.name == "custom-nav" and explicit.navigation_delegate is True
+
+
+def test_navigation_delegate_arm_autoruns_before_main():
+    from brainregion.sandbox.env_eval import ARMS_NAVIGATION
+
+    configs = [EnvConfig(size=5, seed=1, visibility_radius=1, max_steps=6, max_main_turns=12)]
+    report = asyncio.run(run_env_eval(
+        _GiveUpBackend(), "mock", configs, ARMS_NAVIGATION,
+        repeats=1, max_cost_usd=1.0, log_progress=False,
+    ))
+    delegated = next(r for r in report["runs"] if r["arm"] == "nav_delegate")
+    assert delegated["automatic_region_activations"] == 1
+    assert delegated["navigation_delegations"] == 1
+    assert delegated["delegated_actions"] > 0
+    assert report["per_arm"]["nav_delegate"]["mean_automatic_region_activations"] == 1

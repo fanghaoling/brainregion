@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import random
 
-from ._actions import ABS, EGO, ABS_DELTA, ActionModel, INITIAL_HEADING
+from ._actions import ABS, EGO, ActionModel, INITIAL_HEADING
 
 _WALL = "#"
 _FLOOR = "."

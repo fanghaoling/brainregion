@@ -82,6 +82,8 @@ class StrategyRegion:
     抛错(backend 失败 / 解析失败 / 缺 intent)由 ``_plan_via_strategy`` 兜底降级。
     """
 
+    uses_model = True
+
     def __init__(self, *, temperature: float = 0.0, max_tokens: int = 1024) -> None:
         self.temperature = temperature
         self.max_tokens = max_tokens
@@ -126,6 +128,8 @@ class EchoStrategy:
     自己上一句作 plan 结果可能有「自我复述」副作用 → 由 ``memory_echo − memory_only`` delta 作控制洁净度
     诊断(≠0 则据此读 ``memory_strategy − memory_echo``)。
     """
+
+    uses_model = False
 
     def __init__(self, *, max_tokens: int = 1024) -> None:
         self.max_tokens = max_tokens

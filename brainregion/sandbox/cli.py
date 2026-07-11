@@ -38,8 +38,23 @@ from .worktree import (
 logger = logging.getLogger("brainregion.sandbox.cli")
 
 
-def _build_backend(dd: dict[str, Any]) -> tuple[LiteLLMBackend, dict[str, Any]]:
-    registry = _resolve_endpoints(dd.get("endpoints") or {})
+def _endpoint_ids_for_refs(dd: dict[str, Any], refs: list[str]) -> set[str]:
+    """从 endpoint_id/model 引用提取本次实际需要的 endpoint；裸 provider 模型不命中。"""
+    configured = set((dd.get("endpoints") or {}).keys())
+    return {
+        ref.split("/", 1)[0]
+        for ref in refs
+        if isinstance(ref, str) and "/" in ref and ref.split("/", 1)[0] in configured
+    }
+
+
+def _build_backend(
+    dd: dict[str, Any], *, endpoint_ids: set[str] | None = None,
+) -> tuple[LiteLLMBackend, dict[str, Any]]:
+    endpoints_cfg = dd.get("endpoints") or {}
+    if endpoint_ids is not None:
+        endpoints_cfg = {eid: endpoints_cfg[eid] for eid in endpoint_ids if eid in endpoints_cfg}
+    registry = _resolve_endpoints(endpoints_cfg)
     backend = LiteLLMBackend(timeout=float(dd.get("timeout", 90)), endpoint_registry=registry)
     return backend, registry
 
@@ -513,7 +528,8 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
 def _parse_arm_spec(spec: str):
     """``--arm mem=region,strat=real`` → EnvArm(feature-config;review 双强 feature-flag 表层)。
 
-    可选 ``dummy=1``(Phase 4.4 matched-source dummy 记忆)/ ``registry=cap|full`` / ``eph=1`` / ``metronome=1``。
+    可选 ``dummy=1``(Phase 4.4 matched-source dummy 记忆)/ ``registry=cap|full`` / ``eph=1`` /
+    ``metronome=1`` / ``nav=delegate``。
     """
     from .env_eval import EnvArm
     parts: dict[str, str] = {}
@@ -538,6 +554,7 @@ def _parse_arm_spec(spec: str):
         visual_ephemeral=parts.get("eph", "").lower() in ("1", "true", "yes"),
         registry=registry,
         memory_dummy=parts.get("dummy", "").lower() in ("1", "true", "yes"),
+        navigation_delegate=parts.get("nav", "").lower() in ("delegate", "1", "true", "yes"),
     )
 
 
@@ -553,10 +570,12 @@ async def run_env_eval(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     dd = _defaults_mod.apply()
-    backend, registry = _build_backend(dd)
     model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
     if not model_str:
         raise SystemExit("--main-brain 必填(或配置 sandbox_main_brain)")
+    backend, registry = _build_backend(
+        dd, endpoint_ids=_endpoint_ids_for_refs(dd, [model_str]),
+    )
     model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
 
     sizes = [int(x) for x in args.sizes.split(",") if x.strip()]
@@ -564,13 +583,20 @@ async def run_env_eval(args: argparse.Namespace) -> dict[str, Any]:
     vis_radius = int(args.visibility_radius) if args.visibility_radius is not None else 2
     maze_on = bool(getattr(args, "maze", False))
     maze_braid = float(getattr(args, "maze_braid", 0.2) or 0.2)
+    action_budget = int(args.max_steps or dd.get("sandbox_max_steps", 30))
+    main_turn_cap = getattr(args, "max_main_turns", None)
+    main_turn_cap = int(main_turn_cap) if main_turn_cap is not None else None
+    if action_budget < 1:
+        raise SystemExit("--max-steps 须为正整数")
+    if main_turn_cap is not None and main_turn_cap < 1:
+        raise SystemExit("--max-main-turns 须为正整数")
     configs = [
         EnvConfig(
             size=sz, seed=sd,
             wall_seed=getattr(args, "wall_seed", None) if not maze_on else None,
             wall_density=float(args.wall_density or 0.0) if not maze_on else 0.0,
             visibility_radius=vis_radius,
-            max_steps=int(args.max_steps or dd.get("sandbox_max_steps", 30)),
+            max_steps=action_budget, max_main_turns=main_turn_cap,
             maze=maze_on, maze_braid=maze_braid,
             ego_actions=bool(getattr(args, "ego_actions", False)),  # Phase 4.8
         )

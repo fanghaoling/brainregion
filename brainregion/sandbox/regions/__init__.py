@@ -11,6 +11,7 @@ from .memory_region import MemoryRegion, build_memory_region_system_prompt
 from .strategy_region import StrategyRegion, EchoStrategy, build_strategy_region_system_prompt
 from .topo_region import TopologicalRegion
 from .path_region import PathTraceRegion
+from .navigation_region import NavigationRegion
 
 __all__ = [
     "MemoryRegion",
@@ -20,4 +21,5 @@ __all__ = [
     "build_strategy_region_system_prompt",
     "TopologicalRegion",
     "PathTraceRegion",
+    "NavigationRegion",
 ]

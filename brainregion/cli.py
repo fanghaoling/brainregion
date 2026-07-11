@@ -335,7 +335,14 @@ def build_parser() -> argparse.ArgumentParser:
                                help="迷宫去死胡同比例(0=完美最难,0.2 地牢感,1.0 全去)。默认 0.2。")
     p_sb_env_eval.add_argument("--ego-actions", action="store_true",
                                help="Phase 4.8:ego-relative action(forward/turn;config 级,across all arms)")
-    p_sb_env_eval.add_argument("--max-steps", type=int, default=None, help="per-run 步上限(默认 30)")
+    p_sb_env_eval.add_argument(
+        "--max-steps", type=int, default=None,
+        help="per-run 环境动作预算(act 次数,含 turn/blocked;默认 30)",
+    )
+    p_sb_env_eval.add_argument(
+        "--max-main-turns", type=int, default=None,
+        help="主脑模型轮次安全上限(默认由动作预算派生为 max(4x, +8))",
+    )
     p_sb_env_eval.add_argument("--repeats", type=int, default=3, help="每 (config,arm) 重复 run 数(pilot=3;formal≥10)")
     p_sb_env_eval.add_argument("--metronome-period", type=int, default=3,
                                help="Phase 4.1 push 臂:每 N 步注入 region_status(默认 3;正式扫 {2,3,5})")

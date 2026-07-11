@@ -11,8 +11,6 @@ import asyncio
 import json
 import sys
 
-import pytest
-
 from brainregion.providers.base import ModelResponse
 from brainregion.sandbox import cleanup_run_dir, make_run_dir
 from brainregion.sandbox.envs import GridWorld, build_env_system_prompt
@@ -43,8 +41,10 @@ class MockBackend:
         self.script = script
         self.i = 0
         self.cost = cost
+        self.last_messages = None
 
     async def complete_messages(self, messages, **kw):
+        self.last_messages = [dict(m) for m in messages]
         content = self.script[min(self.i, len(self.script) - 1)]
         self.i += 1
         return ModelResponse(model=kw.get("model", "mock"), content=content, usage={}, cost_usd=self.cost)
@@ -185,6 +185,70 @@ def test_run_agent_env_solves_mockbackend():
     assert traj.n_steps == 2
 
 
+def test_env_action_budget_does_not_charge_observe_or_recall():
+    """主脑轮次与环境动作预算分离:observe/recall 占 turn,不挤掉 2 次 act 机会。"""
+    env = GridWorld(
+        size=5, start=(0, 0), goal=(4, 4),
+        visibility_radius=1, strict_obs=True,
+    )
+    task = SandboxTask(id="env-budget", goal="探索")
+    backend = MockBackend([
+        _J({"thought": "看", "tool": "observe", "args": {}}),
+        _J({"thought": "回忆", "tool": "recall_map", "args": {}}),
+        _J({"thought": "走1", "tool": "act", "args": {"action": "right"}}),
+        _J({"thought": "再回忆", "tool": "recall_map", "args": {}}),
+        _J({"thought": "走2", "tool": "act", "args": {"action": "right"}}),
+    ])
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env), scoped_memory_mode():
+            traj = asyncio.run(run_agent(
+                backend, "mock", task, run_dir=run_dir, arm="none",
+                max_steps=10, max_env_actions=2,
+                system_prompt=build_env_system_prompt(env, task.goal, memory=True),
+                verify_fn=_make_env_verify(env),
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+
+    assert traj.n_steps == 5 and traj.env_actions == 2
+    assert traj.successful_moves == 2 and env._agent == (2, 0)
+    assert traj.region_tool_calls == 2 and traj.region_model_calls == 0
+    assert traj.termination_reason == "env_action_budget"
+    assert traj.to_dict()["main_turns"] == 5
+
+
+def test_env_action_metrics_count_turn_block_and_move():
+    """ego 原始动作口径:撞墙、转向、成功 forward 都占动作额度,但分类分开。"""
+    env = GridWorld(
+        size=4, start=(0, 0), goal=(3, 3), walls=((1, 0),),
+        visibility_radius=1, strict_obs=True, ego_actions=True,
+    )
+    task = SandboxTask(id="env-ego-budget", goal="探索")
+    backend = MockBackend([
+        _J({"thought": "前方撞墙", "tool": "act", "args": {"action": "forward"}}),
+        _J({"thought": "右转", "tool": "act", "args": {"action": "turn_right"}}),
+        _J({"thought": "向南前进", "tool": "act", "args": {"action": "forward"}}),
+    ])
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            traj = asyncio.run(run_agent(
+                backend, "mock", task, run_dir=run_dir, arm="none",
+                max_steps=8, max_env_actions=3,
+                system_prompt=build_env_system_prompt(env, task.goal),
+                verify_fn=_make_env_verify(env),
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+
+    assert traj.env_actions == 3
+    assert traj.blocked_actions == 1
+    assert traj.turn_actions == 1
+    assert traj.successful_moves == 1
+    assert env._agent == (0, 1)
+
+
 def test_env_verify_fn_returns_full_shape():
     """verify_fn env 路径返完整 verify_solution shape(防下游 KeyError;opus #10)。"""
     env = GridWorld(size=3, start=(0, 0), goal=(1, 0))
@@ -280,6 +344,11 @@ def test_sandbox_env_cli_argparse():
     ns3 = parser.parse_args(["sandbox", "env", "--memory", "--size", "8", "--debug-port", "9000"])
     assert ns3.memory is True and ns3.size == 8 and ns3.debug_port == 9000
 
+    ns4 = parser.parse_args([
+        "sandbox", "env-eval", "--max-steps", "20", "--max-main-turns", "90",
+    ])
+    assert ns4.max_steps == 20 and ns4.max_main_turns == 90
+
 
 # ---------- Phase C 记忆脑区:recall_map + strict observation ----------
 
@@ -369,3 +438,100 @@ def test_run_agent_memory_loop_mockbackend():
     observe_step = next(s for s in traj.steps if s.tool == "observe")
     assert '"observation"' in observe_step.result_preview
     assert traj.tests_green is True and env.solved is True  # grounded
+
+
+# ---------- Phase 4.9 导航执行委托 ----------
+
+
+def test_delegate_navigation_executes_dfs_with_actor_trace():
+    """导航脑区走入死路后正确回溯,主脑只调用一次工具；每个原始动作保留 actor provenance。"""
+    from brainregion.sandbox.regions import NavigationRegion
+
+    env = GridWorld(
+        size=4, start=(0, 0), goal=(0, 2), walls=((2, 0), (1, 1)),
+        visibility_radius=1, strict_obs=True,
+    )
+    task = SandboxTask(id="env-nav-delegate", goal="找到 G")
+    backend = MockBackend([
+        _J({"thought": "委托局部探索", "tool": "delegate_navigation", "args": {"action_budget": 8}}),
+        _J({"thought": "轨迹显示已到达", "done": True, "answer": "到 G"}),
+    ])
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            traj = asyncio.run(run_agent(
+                backend, "mock", task, run_dir=run_dir, arm="none",
+                max_steps=4, max_env_actions=8,
+                system_prompt=build_env_system_prompt(env, task.goal, navigation=True),
+                verify_fn=_make_env_verify(env),
+                navigation_region=NavigationRegion(start=env.start),
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+
+    assert env.solved is True and traj.tests_green is True
+    assert [x["action"] for x in traj.env_action_trace] == ["right", "left", "down", "down"]
+    assert all(x["actor"] == "navigation_region" for x in traj.env_action_trace)
+    assert traj.env_actions == 4 and traj.delegated_actions == 4
+    assert traj.successful_moves == 4 and traj.blocked_actions == 0
+    assert traj.region_tool_calls == 1 and traj.region_model_calls == 0
+    assert traj.navigation_delegations == 1 and traj.automatic_region_activations == 0
+    assert '"actor": "navigation_region"' in traj.steps[0].result_preview
+
+
+def test_delegate_navigation_respects_global_env_action_budget():
+    from brainregion.sandbox.regions import NavigationRegion
+
+    env = GridWorld(size=4, start=(0, 0), goal=(3, 3), visibility_radius=1, strict_obs=True)
+    task = SandboxTask(id="env-nav-budget", goal="找到 G")
+    backend = MockBackend([
+        _J({"thought": "委托", "tool": "delegate_navigation", "args": {"action_budget": 16}}),
+    ])
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            traj = asyncio.run(run_agent(
+                backend, "mock", task, run_dir=run_dir, arm="none",
+                max_steps=3, max_env_actions=1,
+                system_prompt=build_env_system_prompt(env, task.goal, navigation=True),
+                verify_fn=_make_env_verify(env),
+                navigation_region=NavigationRegion(start=env.start),
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+
+    assert traj.env_actions == 1 and traj.delegated_actions == 1
+    assert traj.termination_reason == "env_action_budget"
+
+
+def test_delegate_navigation_without_region_is_graceful():
+    result, error = dispatch_tool(_tc("delegate_navigation", {"action_budget": 2}))
+    assert result == "" and "导航执行脑区未激活" in error
+
+
+def test_navigation_autorun_executes_before_main_and_injects_attributed_trace():
+    from brainregion.sandbox.regions import NavigationRegion
+
+    env = GridWorld(size=3, start=(0, 0), goal=(2, 0), visibility_radius=1, strict_obs=True)
+    task = SandboxTask(id="env-nav-autorun", goal="找到 G")
+    backend = MockBackend([_J({"thought": "脑区已经到达", "done": True, "answer": "到 G"})])
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            traj = asyncio.run(run_agent(
+                backend, "mock", task, run_dir=run_dir, arm="none",
+                max_steps=3, max_env_actions=8,
+                system_prompt=build_env_system_prompt(env, task.goal, navigation=True),
+                verify_fn=_make_env_verify(env),
+                navigation_region=NavigationRegion(start=env.start),
+                navigation_autorun_actions=8,
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+
+    assert env.solved is True and traj.delegated_actions == 2
+    assert traj.navigation_delegations == 1 and traj.automatic_region_activations == 1
+    assert traj.region_tool_calls == 0  # automatic activation is not a main-model tool call
+    injected = "\n".join(m["content"] for m in backend.last_messages if m["role"] == "user")
+    assert '<region_execution actor="navigation_region">' in injected
+    assert "不是你亲自执行的动作" in injected

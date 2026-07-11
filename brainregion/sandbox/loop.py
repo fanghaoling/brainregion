@@ -42,7 +42,9 @@ logger = logging.getLogger("brainregion.sandbox.loop")
 CODE_REGIME_TOOLS = frozenset(
     {"read_text", "search_text", "inspect_file", "apply_text_patch", "workspace_run_check", "list_allowed_roots"}
 )
-ENV_TOOLS = frozenset({"observe", "act", "recall_map", "plan", "recall_topo", "recall_path"})
+ENV_TOOLS = frozenset(
+    {"observe", "act", "recall_map", "plan", "recall_topo", "recall_path", "delegate_navigation"}
+)
 ALLOWED_TOOLS = CODE_REGIME_TOOLS | ENV_TOOLS
 _RESULT_CAP_CHARS = 4000
 
@@ -107,7 +109,16 @@ def scoped_path(region):
         _current_path.reset(token)
 
 
-def _emit_env_step(action: str, frame: str, agent_view: str, reward: float, terminated: bool, info: dict) -> None:
+def _emit_env_step(
+    action: str,
+    frame: str,
+    agent_view: str,
+    reward: float,
+    terminated: bool,
+    info: dict,
+    *,
+    actor: str = "main",
+) -> None:
     """best-effort 调试窗事件(review 双强):debug server 未启/SSE 断/payload 不可序列化 → 记 warning,绝不毁 act。
 
     ``frame`` = env.render() 累积探索图(viewer/场景页 友好,总显示完整已知地图);
@@ -118,6 +129,7 @@ def _emit_env_step(action: str, frame: str, agent_view: str, reward: float, term
             "env.step",
             payload={
                 "action": action,
+                "actor": actor,
                 "frame": frame,
                 "agent_view": agent_view,
                 "reward": reward,
@@ -151,6 +163,7 @@ class StepRecord:
     error: str | None
     main_cost_usd: float
     arm_cost_usd: float
+    status_injected: bool = False
 
 
 @dataclass
@@ -204,6 +217,16 @@ class Trajectory:
     total_arm_cost_usd: float = 0.0
     wake_calls: int = 0
     consult_calls: int = 0
+    env_actions: int = 0
+    successful_moves: int = 0
+    turn_actions: int = 0
+    blocked_actions: int = 0
+    delegated_actions: int = 0
+    navigation_delegations: int = 0
+    automatic_region_activations: int = 0
+    region_tool_calls: int = 0
+    region_model_calls: int = 0
+    env_action_trace: list[dict[str, Any]] = field(default_factory=list)
     gold_diff: str = ""
     brain_verify: dict[str, Any] | None = None
     delegate: dict[str, Any] | None = None
@@ -225,6 +248,17 @@ class Trajectory:
             "total_arm_cost_usd": round(self.total_arm_cost_usd, 6),
             "wake_calls": self.wake_calls,
             "consult_calls": self.consult_calls,
+            "main_turns": self.n_steps,
+            "env_actions": self.env_actions,
+            "successful_moves": self.successful_moves,
+            "turn_actions": self.turn_actions,
+            "blocked_actions": self.blocked_actions,
+            "delegated_actions": self.delegated_actions,
+            "navigation_delegations": self.navigation_delegations,
+            "automatic_region_activations": self.automatic_region_activations,
+            "region_tool_calls": self.region_tool_calls,
+            "region_model_calls": self.region_model_calls,
+            "env_action_trace": self.env_action_trace,
             "gold_diff": self.gold_diff,
             "brain_verify": self.brain_verify,
             "delegate": self.delegate,
@@ -244,10 +278,123 @@ class Trajectory:
                     "error": s.error,
                     "main_cost_usd": round(s.main_cost_usd, 6),
                     "arm_cost_usd": round(s.arm_cost_usd, 6),
+                    "status_injected": s.status_injected,
                 }
                 for s in self.steps
             ],
         }
+
+
+def _classify_env_action(env: Any, before: tuple[int, int], info: dict, error: str | None = None) -> str:
+    if error:
+        return "invalid"
+    if info.get("already_done"):
+        return "already_done"
+    if info.get("turned"):
+        return "turned"
+    if tuple(env._agent) != tuple(before):
+        return "moved"
+    return "blocked"
+
+
+def _record_env_action(
+    traj: Trajectory,
+    *,
+    actor: str,
+    action: str,
+    before: tuple[int, int],
+    after: tuple[int, int],
+    status: str,
+    reward: float,
+    terminated: bool,
+    info: dict,
+) -> None:
+    """Record one primitive environment action with explicit actor provenance."""
+    if status in {"invalid", "already_done"}:
+        return
+    traj.env_actions += 1
+    if actor != "main":
+        traj.delegated_actions += 1
+    if status == "turned":
+        traj.turn_actions += 1
+    elif status == "moved":
+        traj.successful_moves += 1
+    elif status == "blocked":
+        traj.blocked_actions += 1
+    traj.env_action_trace.append({
+        "actor": actor,
+        "action": action,
+        "before": list(before),
+        "after": list(after),
+        "status": status,
+        "reward": float(reward),
+        "terminated": bool(terminated),
+        "info": dict(info),
+    })
+
+
+def _execute_navigation_option(
+    traj: Trajectory,
+    *,
+    region: Any,
+    env: Any,
+    requested_actions: int,
+    max_env_actions: int | None,
+    memory_region: Any = None,
+    topo_region: Any = None,
+    path_region: Any = None,
+) -> dict[str, Any]:
+    """Execute one bounded navigation option while the runtime retains env authority."""
+    if requested_actions <= 0:
+        raise ValueError("action_budget must be positive")
+    remaining = requested_actions
+    if max_env_actions is not None:
+        remaining = min(remaining, max(0, max_env_actions - traj.env_actions))
+    budget = min(16, remaining)
+    trace_start = len(traj.env_action_trace)
+    stop_reason = "env_action_budget" if budget == 0 else "action_budget"
+    traj.navigation_delegations += 1
+
+    for _ in range(budget):
+        action = region.next_action(env)
+        if action is None:
+            stop_reason = "no_known_route"
+            break
+        before = tuple(env._agent)
+        obs, reward, terminated, info = env.step(action)
+        after = tuple(env._agent)
+        status = _classify_env_action(env, before, info)
+        if "already_done" not in info:
+            _emit_env_step(
+                action, env.render(), obs, reward, terminated, info,
+                actor="navigation_region",
+            )
+        _record_env_action(
+            traj, actor="navigation_region", action=action,
+            before=before, after=after, status=status,
+            reward=reward, terminated=terminated, info=info,
+        )
+        region.observe_position(after)
+        if memory_region is not None and status not in {"invalid", "already_done"}:
+            memory_region.update(action, status, env.relative_view())
+        if topo_region is not None:
+            topo_region.update(after)
+        if path_region is not None:
+            path_region.update(after)
+        if terminated:
+            stop_reason = "goal_reached"
+            break
+
+    option_trace = traj.env_action_trace[trace_start:]
+    return {
+        "actor": "navigation_region",
+        "executed_actions": len(option_trace),
+        "stop_reason": stop_reason,
+        "solved": bool(getattr(env, "solved", False)),
+        "final_observation": env.observation(),
+        "trace": option_trace,
+        "region_state": region.snapshot(),
+    }
 
 
 def parse_tool_call(content: str) -> tuple[ToolCall | None, str | None]:
@@ -379,6 +526,8 @@ def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
         elif call.tool == "recall_path":
             # Phase 4.7 路径轨迹记忆脑区:仅 _current_path 设时被 run_agent 拦截(dispatch 到此 = 未激活/幻觉)。
             raise RuntimeError("recall_path: 路径轨迹记忆脑区未激活(用 --path 启用)")
+        elif call.tool == "delegate_navigation":
+            raise RuntimeError("delegate_navigation: 导航执行脑区未激活")
         else:
             return "", "unreachable: unknown tool"
         return _compact(out), None
@@ -470,7 +619,7 @@ async def _recall_via_region(
 
     成功 → ``{"rough_position": pose, "rough_map": <定性理解>, "region": True}``(事务性替换 rough_map)。
     超 recall-cap / 预算不足 / 调用/解析失败 → **降级** Phase C(``{"map": env.render(), ...,
-    region_degraded}``;**不替换 rough_map** → 事务性保留上一个有效值)。成功 cost 记 main;降级不计费。
+    region_degraded}``;**不替换 rough_map** → 事务性保留上一个有效值)。成功 cost 记 region;降级不计费。
     """
     if recall_count >= max_recalls or spent >= max_cost_usd:
         out = {
@@ -481,11 +630,14 @@ async def _recall_via_region(
         }
         return _compact(out), None
     try:
+        traj.region_model_calls = int(getattr(traj, "region_model_calls", 0) or 0) + 1
         res = await memory_region.reason(
             backend, model, env.relative_view(),
             endpoint_id=endpoint_id, thinking=thinking, effort=effort,
         )
-        traj.total_main_cost_usd += float(res.get("cost_usd", 0.0) or 0.0)
+        traj.total_arm_cost_usd = float(getattr(traj, "total_arm_cost_usd", 0.0) or 0.0) + float(
+            res.get("cost_usd", 0.0) or 0.0
+        )
         out = {
             "rough_position": list(memory_region.pose),
             "rough_map": res.get("rough_map", ""),
@@ -513,7 +665,7 @@ async def _plan_via_strategy(
 
     成功 → ``{intent, rationale, expected_outcome, strategy: True}``。**memory_region None / rough_map 空
     / 超 cap / 调用失败 → 降级**返 ``{strategy_degraded}``(不崩主 run;review consensus:空图不规划)。
-    成功 cost 记 main;降级不计费。``prev_assistant``(Phase 4 EchoStrategy 控制臂用,real 忽略)= 主脑
+    成功 cost 记 region;降级不计费。``prev_assistant``(Phase 4 EchoStrategy 控制臂用,real 忽略)= 主脑
     当前轮内容(run_agent 透传)。
     """
     # 不变量 + 空图守卫:strategy 在则 memory 必在;rough_map 空 → 降级(防 Strategy 基空图误导)
@@ -523,6 +675,8 @@ async def _plan_via_strategy(
     if plan_count >= max_plans or spent >= max_cost_usd:
         return _compact({"strategy_degraded": "budget_or_cap"}), None
     try:
+        if bool(getattr(strategy_region, "uses_model", True)):
+            traj.region_model_calls = int(getattr(traj, "region_model_calls", 0) or 0) + 1
         res = await strategy_region.reason(
             backend, model,
             memory_rough_map=memory_region.rough_map, current_view=env.relative_view(),
@@ -530,7 +684,9 @@ async def _plan_via_strategy(
             prev_assistant=prev_assistant,
             endpoint_id=endpoint_id, thinking=thinking, effort=effort,
         )
-        traj.total_main_cost_usd += float(res.get("cost_usd", 0.0) or 0.0)
+        traj.total_arm_cost_usd = float(getattr(traj, "total_arm_cost_usd", 0.0) or 0.0) + float(
+            res.get("cost_usd", 0.0) or 0.0
+        )
         out = {
             "intent": res.get("intent", ""),
             "rationale": res.get("rationale", ""),
@@ -607,6 +763,7 @@ async def run_agent(
     run_dir: str,
     arm: str = "none",
     max_steps: int = 10,
+    max_env_actions: int | None = None,
     max_cost_usd: float = 0.5,
     temperature: float = 0.0,
     max_tokens: int = 2048,
@@ -627,6 +784,8 @@ async def run_agent(
     max_plan_calls: int | None = None,
     topo_region: Any = None,            # Phase 4.6 拓扑记忆脑区(代码,无 LLM):recall_topo → 解读 env 图成 Trémaux 状态
     path_region: Any = None,            # Phase 4.7 路径轨迹记忆脑区(代码,无 LLM):recall_path → 图+走过路径标 ·
+    navigation_region: Any = None,      # Phase 4.9 导航执行脑区(代码,无 LLM):delegate_navigation → 执行一段动作
+    navigation_autorun_actions: int = 0,  # Phase 4.9 region-first:主脑首轮前自动执行一次 option 并注入轨迹
     status_injector: Any = None,        # Phase 4.1 metronome:async (step, messages)->(status_str|None, cost_usd);None=现行为
     status_period: int = 3,
     visual_ephemeral: bool = False,     # Phase 4.2:剥历史视觉观察出 transcript(只留最新 <visual>);act 动作结果持久
@@ -643,6 +802,10 @@ async def run_agent(
     ``memory_region`` / ``max_recall_calls``(Phase D 记忆脑区,加性):非 None 时 recall_map 在 dispatch
     前拦下转调记忆脑区 LLM(``_recall_via_region``,region-as-tool)—— env-regime 第一个真·多脑区实验。
     positions(实际到过)/attempts(每次尝试含失败)分轨喂脑区。默认 None = Phase C 行为(recall_map 被动倒图)。
+
+    max_steps 始终是主模型轮次安全上限；max_env_actions 是独立的环境原始动作预算。
+    后者默认 None，保持 code-regime/旧调用行为；env-eval 显式传入后，recall/observe 不再挤占
+    可执行动作额度。
     """
     import sys
 
@@ -658,6 +821,7 @@ async def run_agent(
     _max_recalls = int(max_recall_calls) if max_recall_calls is not None else int(max_steps)
     _plan_count = 0
     _max_plans = int(max_plan_calls) if max_plan_calls is not None else int(max_steps)
+    _max_env_actions = None if max_env_actions is None else max(0, int(max_env_actions))
 
     with scoped_workspace_root(run_dir):
         system = system_prompt if system_prompt is not None else _build_system_prompt(task, python_exe)
@@ -677,26 +841,69 @@ async def run_agent(
             if inject:
                 messages.append({"role": "user", "content": inject})
 
+        # Region-first experiment:the runtime activates navigation before the main model's first decision.
+        # The main model receives an attributed execution trace, not a fabricated first-person memory.
+        if navigation_region is not None and _env is not None and navigation_autorun_actions > 0:
+            try:
+                option = _execute_navigation_option(
+                    traj, region=navigation_region, env=_env,
+                    requested_actions=int(navigation_autorun_actions),
+                    max_env_actions=_max_env_actions,
+                    memory_region=memory_region, topo_region=topo_region, path_region=path_region,
+                )
+                traj.automatic_region_activations += 1
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        '<region_execution actor="navigation_region">\n'
+                        + _compact(option)
+                        + "\n</region_execution>\n该块是脑区执行事实,不是你亲自执行的动作。"
+                    ),
+                })
+            except Exception as exc:  # noqa: BLE001 — automatic region failure must not crash main loop
+                logger.warning("navigation autorun failed;continuing with main model", exc_info=True)
+                messages.append({
+                    "role": "user",
+                    "content": f'<region_execution actor="navigation_region" error="true">{exc}</region_execution>',
+                })
+
         consecutive_errors = 0
+        _last_status_env_actions = -1
         for step in range(max_steps):
+            if _max_env_actions is not None and traj.env_actions >= _max_env_actions:
+                traj.termination_reason = (
+                    "env_solved" if bool(getattr(_env, "solved", False)) else "env_action_budget"
+                )
+                break
             spent = traj.total_main_cost_usd + traj.total_arm_cost_usd
             if spent >= max_cost_usd:  # per-run 预算预检(review consensus-2)
                 traj.termination_reason = "budget_exceeded"
                 break
 
-            # Phase 4.1 metronome:每 status_period 步(status>0)注入脑区状态 user message。
+            # Phase 4.1 metronome:每 status_period 个环境动作注入脑区状态 user message。
             # 加性:status_injector None → 现行为(零变化)。injector 返 (status_str|None, cost);失败隔离不崩主 run。
             # review 双强:period 须为正(guard 防 ZeroDivisionError)+ status sanitize fence token(防 LLM rough_map
             # 含 </region_status> 逃逸围栏 / instruction-hierarchy 注入)。
-            if status_injector is not None and status_period and status_period > 0 \
-                    and step > 0 and step % status_period == 0:
+            status_injected = False
+            should_inject_status = (
+                status_injector is not None
+                and status_period
+                and status_period > 0
+                and traj.env_actions > 0
+                and traj.env_actions % status_period == 0
+                and traj.env_actions != _last_status_env_actions
+            )
+            if should_inject_status:
+                _last_status_env_actions = traj.env_actions
                 try:
-                    _status, _inj_cost = await status_injector(step, messages)
-                    traj.total_main_cost_usd += float(_inj_cost or 0.0)
+                    _status, _inj_cost = await status_injector(traj.env_actions, messages)
+                    traj.total_arm_cost_usd += float(_inj_cost or 0.0)
+                    traj.region_model_calls += int(getattr(status_injector, "region_model_calls", 0) or 0)
                     if _status:
                         _safe = _status.replace("</region_status>", "").replace("<region_status>", "")
                         messages.append({"role": "user", "content": f"<region_status>\n{_safe}\n</region_status>"})
-                except Exception as exc:  # noqa: BLE001 — injector 失败:跳过本次注入,成本不计,real/dummy 对称跳过
+                        status_injected = True
+                except Exception:  # noqa: BLE001 — injector 失败:跳过本次注入,成本不计,real/dummy 对称跳过
                     logger.warning("status_injector 失败,跳过本次注入", exc_info=True)
 
             # Phase 4.2 visual_ephemeral:剥历史 <visual> 只留最新(当前视野);act 动作结果/thoughts 不动。
@@ -716,7 +923,7 @@ async def run_agent(
                 traj.steps.append(StepRecord(
                     index=step, thought="", tool=None, args={}, done=False,
                     result_chars=0, result_preview="", error=resp.error or "empty model output",
-                    main_cost_usd=step_main_cost, arm_cost_usd=0.0,
+                    main_cost_usd=step_main_cost, arm_cost_usd=0.0, status_injected=status_injected,
                 ))
                 emit_event("sandbox.step", payload={"task_id": task.id, "arm": arm, "step": step, "model_error": resp.error})
                 if consecutive_errors >= consecutive_error_limit:
@@ -732,7 +939,7 @@ async def run_agent(
                 traj.steps.append(StepRecord(
                     index=step, thought="", tool=None, args={}, done=False,
                     result_chars=0, result_preview="", error=parse_err,
-                    main_cost_usd=step_main_cost, arm_cost_usd=0.0,
+                    main_cost_usd=step_main_cost, arm_cost_usd=0.0, status_injected=status_injected,
                 ))
                 emit_event("sandbox.step", payload={"task_id": task.id, "arm": arm, "step": step, "parse_error": parse_err})
                 if consecutive_errors >= consecutive_error_limit:
@@ -746,7 +953,7 @@ async def run_agent(
                 traj.steps.append(StepRecord(
                     index=step, thought=call.thought, tool=None, args={}, done=True,
                     result_chars=0, result_preview=call.answer[:300], error=None,
-                    main_cost_usd=step_main_cost, arm_cost_usd=0.0,
+                    main_cost_usd=step_main_cost, arm_cost_usd=0.0, status_injected=status_injected,
                 ))
                 traj.done = True
                 traj.termination_reason = "done"
@@ -755,6 +962,9 @@ async def run_agent(
 
             # Phase D.2 记忆脑区(有状态):recall → region.reason(相对视野);合法 act 后 region.update(dead-reckon)。
             _act_before = _env._agent if (call.tool == "act" and _env is not None) else None
+            if call.tool in {"recall_map", "plan", "recall_topo", "recall_path", "delegate_navigation"}:
+                traj.region_tool_calls += 1
+            _arm_cost_before = traj.total_arm_cost_usd
             if call.tool == "recall_map" and memory_region is not None and _env is not None:
                 result_str, exec_err = await _recall_via_region(
                     memory_region, backend, model, env=_env,
@@ -784,24 +994,39 @@ async def run_agent(
                     result_str, exec_err = _compact(path_region.state(_env)), None
                 except Exception as exc:  # noqa: BLE001 — 失败隔离:错误返 agent,不崩主 run
                     result_str, exec_err = "", f"recall_path 失败: {exc}"
+            elif call.tool == "delegate_navigation" and navigation_region is not None and _env is not None:
+                # Runtime owns env.step;the region only selects actions. This preserves authority and actor provenance.
+                try:
+                    requested = _as_int(call.args, "action_budget", 8)
+                    option = _execute_navigation_option(
+                        traj, region=navigation_region, env=_env,
+                        requested_actions=requested, max_env_actions=_max_env_actions,
+                        memory_region=memory_region, topo_region=topo_region, path_region=path_region,
+                    )
+                    result_str = _compact(option)
+                    exec_err = None
+                except Exception as exc:  # noqa: BLE001 — region failure becomes tool feedback
+                    result_str, exec_err = "", f"delegate_navigation 失败: {exc}"
             else:
                 result_str, exec_err = dispatch_tool(call)
             # act 后 dead-reckon:仅合法 act(moved/blocked/already_done)update;invalid 跳过 → pose 不失步
             if _act_before is not None and memory_region is not None:
                 _after = _env._agent
                 _info = _last_act_info.get() or {}
-                if exec_err:
-                    _status = "invalid"
-                elif _info.get("turned"):  # Phase 4.8 ego turn(声明式 info,优先 blocked;review opus-1/opus-7)
-                    _status = "turned"
-                elif _after != _act_before:
-                    _status = "moved"
-                elif getattr(_env, "_terminated", False):
-                    _status = "already_done"
-                else:
-                    _status = "blocked"
+                _status = _classify_env_action(_env, tuple(_act_before), _info, exec_err)
                 if _status != "invalid":
                     memory_region.update(call.args.get("action"), _status, _env.relative_view())
+            elif _act_before is not None:
+                _after = _env._agent
+                _info = _last_act_info.get() or {}
+                _status = _classify_env_action(_env, tuple(_act_before), _info, exec_err)
+            if _act_before is not None:
+                _record_env_action(
+                    traj, actor="main", action=str(call.args.get("action", "")),
+                    before=tuple(_act_before), after=tuple(_env._agent), status=_status,
+                    reward=1.0 if _info.get("goal") else 0.0,
+                    terminated=bool(getattr(_env, "_terminated", False)), info=_info,
+                )
             # Phase 4.6 拓扑记忆:每步 act 后更新 trail(实际位置;去重 —— 原地/撞墙不重复)
             if _act_before is not None and topo_region is not None:
                 topo_region.update(_env._agent)
@@ -813,7 +1038,9 @@ async def run_agent(
             traj.steps.append(StepRecord(
                 index=step, thought=call.thought, tool=call.tool, args=call.args, done=False,
                 result_chars=len(result_str), result_preview=preview, error=exec_err,
-                main_cost_usd=step_main_cost, arm_cost_usd=0.0,
+                main_cost_usd=step_main_cost,
+                arm_cost_usd=traj.total_arm_cost_usd - _arm_cost_before,
+                status_injected=status_injected,
             ))
             emit_event(
                 "sandbox.step",
