@@ -12,6 +12,7 @@ from .strategy_region import StrategyRegion, EchoStrategy, build_strategy_region
 from .topo_region import TopologicalRegion
 from .path_region import PathTraceRegion
 from .navigation_region import GroundedNavigationRegion, NavigationRegion
+from .verification_region import VerificationOptionRegion
 
 __all__ = [
     "MemoryRegion",
@@ -23,4 +24,5 @@ __all__ = [
     "PathTraceRegion",
     "NavigationRegion",
     "GroundedNavigationRegion",
+    "VerificationOptionRegion",
 ]

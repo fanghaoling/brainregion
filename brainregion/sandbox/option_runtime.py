@@ -123,19 +123,46 @@ class CognitiveScheduler:
         region_available: bool,
         remaining_actions: int | None,
     ) -> ActivationDecision:
+        decision = self.after_effect(
+            effect_clock=action_clock,
+            last_actor=last_actor,
+            completed=solved,
+            region_available=region_available,
+            remaining_activations=remaining_actions,
+            trigger="after_main_action",
+        )
+        reason = {
+            "already_completed": "already_solved",
+            "no_activation_budget": "no_action_budget",
+            "no_new_effect": "no_new_environment_action",
+            "main_created_effect": "main_changed_environment",
+        }.get(decision.reason, decision.reason)
+        return ActivationDecision(decision.activate, trigger=decision.trigger, reason=reason)
+
+    def after_effect(
+        self,
+        *,
+        effect_clock: int,
+        last_actor: str | None,
+        completed: bool,
+        region_available: bool,
+        remaining_activations: int | None,
+        trigger: str = "after_main_effect",
+    ) -> ActivationDecision:
+        """Activate once for a new host-observed side effect by the main brain."""
         if not self.continuous:
             return ActivationDecision(False, reason="continuous_disabled")
         if not region_available:
             return ActivationDecision(False, reason="region_unavailable")
-        if solved:
-            return ActivationDecision(False, reason="already_solved")
-        if remaining_actions is not None and remaining_actions <= 0:
-            return ActivationDecision(False, reason="no_action_budget")
-        if action_clock == self._last_activation_clock:
-            return ActivationDecision(False, reason="no_new_environment_action")
+        if completed:
+            return ActivationDecision(False, reason="already_completed")
+        if remaining_activations is not None and remaining_activations <= 0:
+            return ActivationDecision(False, reason="no_activation_budget")
+        if effect_clock == self._last_activation_clock:
+            return ActivationDecision(False, reason="no_new_effect")
         if last_actor != "main":
             return ActivationDecision(False, reason="last_actor_not_main")
-        return ActivationDecision(True, trigger="after_main_action", reason="main_changed_environment")
+        return ActivationDecision(True, trigger=trigger, reason="main_created_effect")
 
     def mark_activated(self, *, action_clock: int) -> None:
         self._last_activation_clock = max(0, int(action_clock))

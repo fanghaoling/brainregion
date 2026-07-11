@@ -94,6 +94,21 @@ def test_scheduler_continuous_disabled():
     assert not decision.activate and decision.reason == "continuous_disabled"
 
 
+def test_scheduler_after_effect_uses_generic_trigger_and_clock():
+    scheduler = CognitiveScheduler(continuous=True)
+    first = scheduler.after_effect(
+        effect_clock=1, last_actor="main", completed=False,
+        region_available=True, remaining_activations=3,
+    )
+    assert first.activate and first.trigger == "after_main_effect"
+    scheduler.mark_activated(action_clock=1)
+    duplicate = scheduler.after_effect(
+        effect_clock=1, last_actor="main", completed=False,
+        region_available=True, remaining_activations=3,
+    )
+    assert not duplicate.activate and duplicate.reason == "no_new_effect"
+
+
 def test_activation_record_preserves_option_evidence():
     result = OptionResult(
         region="navigation", actor="navigation_region", access_mode="grounded",

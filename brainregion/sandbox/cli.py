@@ -75,7 +75,9 @@ def _resolve_orthogonal(
     orthogonal_str = getattr(args, "orthogonal_brain", None) or dd.get("sandbox_orthogonal_brain") or ""
     if not orthogonal_str:
         return None, None
-    registry = _resolve_endpoints(dd.get("endpoints") or {})
+    endpoint_ids = _endpoint_ids_for_refs(dd, [orthogonal_str])
+    endpoints_cfg = dd.get("endpoints") or {}
+    registry = _resolve_endpoints({eid: endpoints_cfg[eid] for eid in endpoint_ids})
     entry = _normalize_one(orthogonal_str, set(registry.keys()), dd.get("endpoints"))
     model, endpoint_id = entry["model"], entry.get("endpoint_id")
     if endpoint_id is not None and endpoint_id == main_endpoint_id:
@@ -112,10 +114,12 @@ def _resolve_tasks(args: argparse.Namespace) -> list:
 async def run(args: argparse.Namespace) -> dict[str, Any]:
     """`brain-region sandbox run`:单跑(fixture 模式 默认;``--worktree`` 真实仓库模式)。"""
     dd = _defaults_mod.apply()
-    backend, registry = _build_backend(dd)
     model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
     if not model_str:
         raise SystemExit("--main-brain 必填(或配置 sandbox_main_brain)")
+    backend, registry = _build_backend(
+        dd, endpoint_ids=_endpoint_ids_for_refs(dd, [model_str]),
+    )
     model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
     if getattr(args, "worktree", False):
         return await _run_worktree(args, dd, backend, model, endpoint_id)
@@ -153,6 +157,8 @@ async def _run_expert(
     if python_exe is not None:
         kwargs["python_exe"] = python_exe
     if bool(getattr(args, "brain_loop", False)):
+        if bool(getattr(args, "verification_region", False)):
+            raise SystemExit("--verification-region 暂不与 --brain-loop 组合；先在单遍 expert 中验证")
         kwargs.pop("brain_verify", None)
         kwargs.pop("brain_delegate", None)
         ortho_model, ortho_ep = _resolve_orthogonal(args, dd, endpoint_id)
@@ -163,6 +169,11 @@ async def _run_expert(
             backend, model, task, run_dir=run_dir,
             max_iterations=int(getattr(args, "max_iterations", 3)), **kwargs,
         )
+    if bool(getattr(args, "verification_region", False)):
+        from .regions import VerificationOptionRegion
+        kwargs["option_region"] = VerificationOptionRegion()
+        kwargs["option_continuous"] = True
+        kwargs["max_option_activations"] = max(1, int(kwargs["max_steps"]))
     return await run_agent(backend, model, task, run_dir=run_dir, **kwargs)
 
 
@@ -297,10 +308,12 @@ async def _run_worktree(args, dd, backend, model, endpoint_id) -> dict[str, Any]
 async def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     """`brain-region sandbox eval`:matched-pair A/B(none vs brainregion),bootstrap CI + gate。"""
     dd = _defaults_mod.apply()
-    backend, registry = _build_backend(dd)
     model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
     if not model_str:
         raise SystemExit("--main-brain 必填(或配置 sandbox_main_brain)")
+    backend, registry = _build_backend(
+        dd, endpoint_ids=_endpoint_ids_for_refs(dd, [model_str]),
+    )
     model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
     tasks = _resolve_tasks(args)
     if not tasks:
@@ -333,8 +346,10 @@ async def verify_brain(args: argparse.Namespace) -> dict[str, Any]:
     客观结果),故能在历史 run 上离线复盘。
     """
     dd = _defaults_mod.apply()
-    backend, registry = _build_backend(dd)
     model_str = args.main_brain or dd.get("sandbox_main_brain") or "deepseek-v4-flash"
+    backend, registry = _build_backend(
+        dd, endpoint_ids=_endpoint_ids_for_refs(dd, [model_str]),
+    )
     model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
 
     run = json.load(open(args.run, encoding="utf-8"))
@@ -380,10 +395,12 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
     (solved 是信号非闸:0/1 稀疏 → solved=False 常态,Phase A 不要求解出)。
     """
     dd = _defaults_mod.apply()
-    backend, registry = _build_backend(dd)
     model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
     if not model_str:
         raise SystemExit("--main-brain 必填(或配置 sandbox_main_brain)")
+    backend, registry = _build_backend(
+        dd, endpoint_ids=_endpoint_ids_for_refs(dd, [model_str]),
+    )
     model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
 
     # 构造 env + 边界校验(constructor 校验 size/visibility_radius/goal/walls;非法 → 干净退出)

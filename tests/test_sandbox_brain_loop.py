@@ -8,6 +8,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from brainregion.sandbox import brain_delegate as bd
 from brainregion.sandbox import cli as sandbox_cli
 from brainregion.sandbox import loop
@@ -368,7 +370,8 @@ def test_trajectory_iterations_serialization():
 def _fake_args(**over):
     base = dict(arm="none", max_steps=None, max_cost_usd=None, max_tokens=None,
                 effort=None, thinking="off", brain_verify=False, brain_delegate=False,
-                brain_loop=False, max_iterations=3, orthogonal_brain=None)
+                brain_loop=False, max_iterations=3, orthogonal_brain=None,
+                verification_region=False)
     base.update(over)
     return SimpleNamespace(**base)
 
@@ -389,6 +392,55 @@ def test_run_expert_default_calls_run_agent(monkeypatch):
     monkeypatch.setattr(sandbox_cli, "run_cognitive_loop", fake_loop)
     asyncio.run(sandbox_cli._run_expert(_fake_args(), None, "m", _task(), ".", {}, None))
     assert "agent" in called and "loop" not in called
+
+
+def test_run_expert_verification_region_threads_generic_option(monkeypatch):
+    called = {}
+
+    async def fake_agent(*a, **kw):
+        called.update(kw)
+        return Trajectory(task_id="t", arm="none")
+
+    monkeypatch.setattr(sandbox_cli, "run_agent", fake_agent)
+    asyncio.run(sandbox_cli._run_expert(
+        _fake_args(verification_region=True), None, "m", _task(), ".", {}, None,
+    ))
+    assert called["option_region"].name == "verification"
+    assert called["option_continuous"] is True
+    assert called["max_option_activations"] == called["max_steps"]
+
+
+def test_run_expert_rejects_verification_with_brain_loop():
+    with pytest.raises(SystemExit, match="暂不与 --brain-loop 组合"):
+        asyncio.run(sandbox_cli._run_expert(
+            _fake_args(verification_region=True, brain_loop=True),
+            None, "m", _task(), ".", {}, None,
+        ))
+
+
+def test_sandbox_run_builds_only_selected_endpoint(monkeypatch):
+    captured = {}
+    dd = {
+        "endpoints": {
+            "used": {"provider": "openai", "base_url": "https://used.invalid", "api_key": "x"},
+            "unused": {"provider": "anthropic", "base_url": "https://unused.invalid", "api_key_env": "MISSING"},
+        }
+    }
+
+    def fake_build(config, *, endpoint_ids=None):
+        captured["ids"] = endpoint_ids
+        return object(), {"used": {}}
+
+    async def fake_fixture(args, config, backend, model, endpoint_id):
+        return {"model": model, "endpoint_id": endpoint_id}
+
+    monkeypatch.setattr(sandbox_cli._defaults_mod, "apply", lambda: dd)
+    monkeypatch.setattr(sandbox_cli, "_build_backend", fake_build)
+    monkeypatch.setattr(sandbox_cli, "_run_fixture", fake_fixture)
+    args = _fake_args(main_brain="used/model-a", worktree=False)
+    result = asyncio.run(sandbox_cli.run(args))
+    assert captured["ids"] == {"used"}
+    assert result == {"model": "model-a", "endpoint_id": "used"}
 
 
 def test_run_expert_brain_loop_calls_cognitive_loop(monkeypatch):

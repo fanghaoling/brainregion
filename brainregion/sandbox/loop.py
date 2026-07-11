@@ -74,6 +74,7 @@ _current_path: ContextVar[Any] = ContextVar("_current_path", default=None)
 # Phase 4.8:dispatch act case 把 env.step 的**原 info dict** 透传给 run_agent dead-reckon 块
 # (不经 act result JSON 往返 → turned 字段不丢;review opus-7 消除"退回 blocked 启发式 → heading 失步"风险)。
 _last_act_info: ContextVar[dict | None] = ContextVar("_last_act_info", default=None)
+_last_patch_info: ContextVar[dict | None] = ContextVar("_last_patch_info", default=None)
 
 
 @contextmanager
@@ -246,6 +247,9 @@ class Trajectory:
     region_tool_calls: int = 0
     region_model_calls: int = 0
     env_action_trace: list[dict[str, Any]] = field(default_factory=list)
+    workspace_effects: int = 0
+    verification_runs: int = 0
+    last_verification_passed: bool | None = None
     gold_diff: str = ""
     brain_verify: dict[str, Any] | None = None
     delegate: dict[str, Any] | None = None
@@ -291,6 +295,9 @@ class Trajectory:
             "region_tool_calls": self.region_tool_calls,
             "region_model_calls": self.region_model_calls,
             "env_action_trace": self.env_action_trace,
+            "workspace_effects": self.workspace_effects,
+            "verification_runs": self.verification_runs,
+            "last_verification_passed": self.last_verification_passed,
             "gold_diff": self.gold_diff,
             "brain_verify": self.brain_verify,
             "delegate": self.delegate,
@@ -444,6 +451,55 @@ def _execute_env_option(
     )
 
 
+def _execute_verification_option(
+    traj: Trajectory,
+    *,
+    region: OptionRegion,
+    effect_observation: dict[str, Any],
+    task: SandboxTask | WorktreeTask,
+    python_exe: str,
+) -> OptionResult:
+    """Run one host-controlled allow-listed verification option."""
+    action = region.next_action(effect_observation)
+    if action is None:
+        return OptionResult(
+            region=region.name, actor=f"{region.name}_region", access_mode=region.access_mode,
+            executed_actions=0, stop_reason="no_pending_effect", solved=False,
+            final_observation={}, trace=[], region_state=region.snapshot(),
+        )
+    if action != "run_check":
+        raise ValueError(f"unsupported verification action: {action!r}")
+
+    argv = [python_exe, "-m", "pytest", *list(task.test_args or [])]
+    result = workspace_run_check(argv)
+    status = "passed" if bool(result.get("ok", False)) else "failed"
+    region.observe_transition(action=action, observation=result, status=status)
+    boundary = region.option_boundary(result, actions_executed=1)
+    traj.navigation_delegations += 1  # compatibility counter;generic alias = option_delegations
+    traj.verification_runs += 1
+    traj.last_verification_passed = status == "passed"
+    trace = [{
+        "actor": f"{region.name}_region",
+        "action": action,
+        "status": status,
+        "kind": result.get("kind"),
+        "exit_code": result.get("exit_code"),
+        "duration_ms": result.get("duration_ms"),
+        "timed_out": bool(result.get("timed_out", False)),
+    }]
+    return OptionResult(
+        region=region.name,
+        actor=f"{region.name}_region",
+        access_mode=region.access_mode,
+        executed_actions=1,
+        stop_reason=(f"decision_boundary:{boundary}" if boundary else "action_budget"),
+        solved=status == "passed",
+        final_observation=result,
+        trace=trace,
+        region_state=region.snapshot(),
+    )
+
+
 def parse_tool_call(content: str) -> tuple[ToolCall | None, str | None]:
     """解析 + 严格校验 model 输出。返回 (call, error);error 非 None 则**绝不执行**(review opus-13/gpt-8)。"""
     obj = extract_json_object(content)
@@ -512,12 +568,14 @@ def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
                 context_lines=_as_int(call.args, "context_lines", 0),
             )
         elif call.tool == "apply_text_patch":
+            _last_patch_info.set(None)
             out = apply_text_patch(
                 _req(call.args, "path"),
                 expected_sha256=_req(call.args, "expected_sha256"),
                 replacements=_req(call.args, "replacements"),
                 dry_run=bool(call.args.get("dry_run", True)),
             )
+            _last_patch_info.set(out)
         elif call.tool == "workspace_run_check":
             argv = _req(call.args, "argv")
             if not isinstance(argv, list) or not all(isinstance(a, str) for a in argv):
@@ -837,6 +895,7 @@ async def run_agent(
     navigation_autorun_actions: int = 0,  # Phase 4.9 region-first:主脑首轮前自动执行一次 option 并注入轨迹
     option_continuous: bool | None = None,  # 通用参数；None 时回退 navigation_continuous
     navigation_continuous: bool = False,  # Phase 4.10:主脑 act 后事件驱动再唤醒;不按每模型轮盲轮询
+    max_option_activations: int = 10,  # 自动 option 唤醒上限(工具显式调用不计入)
     status_injector: Any = None,        # Phase 4.1 metronome:async (step, messages)->(status_str|None, cost_usd);None=现行为
     status_period: int = 3,
     visual_ephemeral: bool = False,     # Phase 4.2:剥历史视觉观察出 transcript(只留最新 <visual>);act 动作结果持久
@@ -880,9 +939,18 @@ async def run_agent(
         int(navigation_autorun_actions) if option_autorun_actions is None else int(option_autorun_actions)
     )
     _option_continuous = bool(navigation_continuous) if option_continuous is None else bool(option_continuous)
+    _max_option_activations = max(0, int(max_option_activations))
+    _effect_clock = 0
+    _pending_effect: dict[str, Any] | None = None
 
     with scoped_workspace_root(run_dir):
         system = system_prompt if system_prompt is not None else _build_system_prompt(task, python_exe)
+        if system_prompt is None and getattr(_option_region, "name", None) == "verification":
+            system += (
+                "\n补丁真实落盘后，runtime 会自动运行任务限定的 pytest，并以 "
+                '<region_execution actor="verification_region"> 返回结果。不要重复运行同一测试；'
+                "测试失败则根据其中 stdout/stderr 继续修复，测试通过则完成。\n"
+            )
         user_content = f"开始。目标:{task.goal}"
         if directive:  # 外环 redelegate 注入:上一轮验证差距;cap 1000 限注入面(C2),frame 标记由模板加
             user_content += (
@@ -901,15 +969,7 @@ async def run_agent(
 
         scheduler = CognitiveScheduler(continuous=_option_continuous)
 
-        def _activate_option(trigger: str) -> OptionResult:
-            if _option_region is None:
-                raise RuntimeError("option region unavailable")
-            option = _execute_env_option(
-                traj, region=_option_region, env=_env,
-                requested_actions=_option_autorun_actions,
-                max_env_actions=_max_env_actions,
-                memory_region=memory_region, topo_region=topo_region, path_region=path_region,
-            )
+        def _publish_option(option: OptionResult, *, trigger: str) -> OptionResult:
             traj.automatic_region_activations += 1
             record = ActivationRecord.from_result(option, trigger=trigger).to_dict()
             traj.option_activations.append(record)
@@ -924,6 +984,26 @@ async def run_agent(
             })
             return option
 
+        def _activate_env_option(trigger: str) -> OptionResult:
+            if _option_region is None:
+                raise RuntimeError("option region unavailable")
+            option = _execute_env_option(
+                traj, region=_option_region, env=_env,
+                requested_actions=_option_autorun_actions,
+                max_env_actions=_max_env_actions,
+                memory_region=memory_region, topo_region=topo_region, path_region=path_region,
+            )
+            return _publish_option(option, trigger=trigger)
+
+        def _activate_verification_option(trigger: str, effect: dict[str, Any]) -> OptionResult:
+            if _option_region is None:
+                raise RuntimeError("verification region unavailable")
+            option = _execute_verification_option(
+                traj, region=_option_region, effect_observation=effect,
+                task=task, python_exe=python_exe,
+            )
+            return _publish_option(option, trigger=trigger)
+
         # Region-first:activate before the first main-model decision.
         initial_decision = scheduler.initial(
             region_available=_option_region is not None and _env is not None,
@@ -931,7 +1011,7 @@ async def run_agent(
         )
         if initial_decision.activate:
             try:
-                _activate_option(initial_decision.trigger)
+                _activate_env_option(initial_decision.trigger)
             except Exception as exc:  # noqa: BLE001 — automatic region failure must not crash main loop
                 logger.warning("navigation autorun failed;continuing with main model", exc_info=True)
                 _emit_option_activation({"trigger": initial_decision.trigger}, error=str(exc)[:300])
@@ -972,12 +1052,44 @@ async def run_agent(
             )
             if reactivation.activate:
                 try:
-                    _activate_option(reactivation.trigger)
+                    _activate_env_option(reactivation.trigger)
                 except Exception:  # noqa: BLE001 — scheduler sidecar failure must not crash main loop
                     logger.warning("continuous navigation activation failed", exc_info=True)
                     _emit_option_activation({"trigger": reactivation.trigger}, error="activation_failed")
                 finally:
                     scheduler.mark_activated(action_clock=traj.env_actions)
+
+            verification_available = (
+                _pending_effect is not None
+                and _option_region is not None
+                and _option_region.name == "verification"
+            )
+            verification_decision = scheduler.after_effect(
+                effect_clock=_effect_clock,
+                last_actor="main" if _pending_effect is not None else None,
+                completed=False,
+                region_available=verification_available,
+                remaining_activations=max(0, _max_option_activations - traj.automatic_region_activations),
+            )
+            if verification_decision.activate and _pending_effect is not None:
+                try:
+                    _activate_verification_option(verification_decision.trigger, _pending_effect)
+                except Exception as exc:  # noqa: BLE001 — verification failure is evidence,not loop failure
+                    logger.warning("verification option activation failed", exc_info=True)
+                    _emit_option_activation(
+                        {"trigger": verification_decision.trigger, "region": "verification"},
+                        error=str(exc)[:300],
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            '<region_execution actor="verification_region" error="true">'
+                            f"{exc}</region_execution>"
+                        ),
+                    })
+                finally:
+                    scheduler.mark_activated(action_clock=_effect_clock)
+                    _pending_effect = None
 
             # Phase 4.1 metronome:每 status_period 个环境动作注入脑区状态 user message。
             # 加性:status_injector None → 现行为(零变化)。injector 返 (status_str|None, cost);失败隔离不崩主 run。
@@ -1116,6 +1228,28 @@ async def run_agent(
                     result_str, exec_err = "", f"delegate_navigation 失败: {exc}"
             else:
                 result_str, exec_err = dispatch_tool(call)
+            patch_info = _last_patch_info.get() or {}
+            patch_applied = (
+                call.tool == "apply_text_patch"
+                and exec_err is None
+                and bool(patch_info.get("ok", False))
+                and not bool(patch_info.get("dry_run", True))
+                and bool(patch_info.get("changed", False))
+            )
+            if patch_applied:
+                _effect_clock += 1
+                traj.workspace_effects += 1
+                _pending_effect = {
+                    "effect_id": f"{_effect_clock}:{patch_info.get('new_sha256', '')}",
+                    "effect_clock": _effect_clock,
+                    "tool": "apply_text_patch",
+                    "patch": {
+                        "relative_path": patch_info.get("relative_path"),
+                        "old_sha256": patch_info.get("old_sha256"),
+                        "new_sha256": patch_info.get("new_sha256"),
+                        "replacements": len(patch_info.get("replacements") or []),
+                    },
+                }
             # act 后 dead-reckon:仅合法 act(moved/blocked/already_done)update;invalid 跳过 → pose 不失步
             if _act_before is not None and memory_region is not None:
                 _after = _env._agent
