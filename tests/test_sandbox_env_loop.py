@@ -533,5 +533,104 @@ def test_navigation_autorun_executes_before_main_and_injects_attributed_trace():
     assert traj.navigation_delegations == 1 and traj.automatic_region_activations == 1
     assert traj.region_tool_calls == 0  # automatic activation is not a main-model tool call
     injected = "\n".join(m["content"] for m in backend.last_messages if m["role"] == "user")
-    assert '<region_execution actor="navigation_region">' in injected
+    assert '<region_execution actor="navigation_region"' in injected
     assert "不是你亲自执行的动作" in injected
+
+
+def test_grounded_navigation_autorun_solves_dead_end_without_env_access():
+    """Grounded policy only sees text observations yet can backtrack out of a visible dead end."""
+    from brainregion.sandbox.regions import GroundedNavigationRegion
+
+    class TextOnlyRegion(GroundedNavigationRegion):
+        def next_action(self, observation):
+            assert isinstance(observation, str)
+            return super().next_action(observation)
+
+    env = GridWorld(
+        size=4, start=(0, 0), goal=(0, 2), walls=((2, 0), (1, 1)),
+        visibility_radius=1, strict_obs=True,
+    )
+    task = SandboxTask(id="env-nav-grounded", goal="找到 G")
+    backend = MockBackend([_J({"thought": "脑区已完成", "done": True, "answer": "到 G"})])
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            traj = asyncio.run(run_agent(
+                backend, "mock", task, run_dir=run_dir, arm="none",
+                max_steps=3, max_env_actions=8,
+                system_prompt=build_env_system_prompt(env, task.goal, navigation=True),
+                verify_fn=_make_env_verify(env),
+                navigation_region=TextOnlyRegion(), navigation_autorun_actions=8,
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+
+    assert env.solved is True
+    assert [x["action"] for x in traj.env_action_trace] == ["right", "left", "down", "down"]
+    assert all(x["actor"] == "navigation_region" for x in traj.env_action_trace)
+
+
+def test_grounded_navigation_yields_at_junction():
+    from brainregion.sandbox.regions import GroundedNavigationRegion
+
+    env = GridWorld(size=5, start=(0, 0), goal=(4, 4), visibility_radius=1, strict_obs=True)
+    task = SandboxTask(id="env-nav-junction", goal="找到 G")
+    backend = MockBackend([_J({"thought": "接管后续决策", "done": True, "answer": "暂停"})])
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            traj = asyncio.run(run_agent(
+                backend, "mock", task, run_dir=run_dir, arm="none",
+                max_steps=2, max_env_actions=8,
+                system_prompt=build_env_system_prompt(env, task.goal, navigation=True),
+                verify_fn=_make_env_verify(env),
+                navigation_region=GroundedNavigationRegion(), navigation_autorun_actions=8,
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+
+    assert traj.delegated_actions == 1
+    injected = "\n".join(m["content"] for m in backend.last_messages if m["role"] == "user")
+    assert '"stop_reason": "decision_boundary:junction"' in injected
+
+
+def test_grounded_navigation_does_not_store_hidden_cells():
+    from brainregion.sandbox.regions import GroundedNavigationRegion
+
+    env = GridWorld(size=5, start=(0, 0), goal=(4, 4), visibility_radius=1, strict_obs=True)
+    region = GroundedNavigationRegion()
+    region.next_action(env.observation())
+    assert (4, 4) not in region.known
+    assert set(region.known) == {(0, 0), (1, 0), (0, 1), (1, 1)}
+
+
+def test_continuous_navigation_reactivates_only_after_main_action():
+    from brainregion.sandbox.regions import GroundedNavigationRegion
+
+    env = GridWorld(size=5, start=(0, 0), goal=(4, 4), visibility_radius=1, strict_obs=True)
+    task = SandboxTask(id="env-nav-continuous", goal="找到 G")
+    backend = MockBackend([
+        _J({"thought": "在岔路选择向下", "tool": "act", "args": {"action": "down"}}),
+        _J({"thought": "观察第二次交权", "done": True, "answer": "暂停"}),
+    ])
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            traj = asyncio.run(run_agent(
+                backend, "mock", task, run_dir=run_dir, arm="none",
+                max_steps=3, max_env_actions=8,
+                system_prompt=build_env_system_prompt(env, task.goal, navigation=True),
+                verify_fn=_make_env_verify(env),
+                navigation_region=GroundedNavigationRegion(), navigation_autorun_actions=8,
+                navigation_continuous=True,
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+
+    assert traj.automatic_region_activations == 2
+    assert traj.delegated_actions == 2 and traj.env_actions == 3
+    assert [item["trigger"] for item in traj.navigation_options] == ["initial", "after_main_action"]
+    assert all(item["stop_reason"] == "decision_boundary:junction" for item in traj.navigation_options)
+    assert [item["actor"] for item in traj.env_action_trace] == [
+        "navigation_region", "main", "navigation_region",
+    ]

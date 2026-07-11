@@ -529,7 +529,7 @@ def _parse_arm_spec(spec: str):
     """``--arm mem=region,strat=real`` → EnvArm(feature-config;review 双强 feature-flag 表层)。
 
     可选 ``dummy=1``(Phase 4.4 matched-source dummy 记忆)/ ``registry=cap|full`` / ``eph=1`` /
-    ``metronome=1`` / ``nav=delegate``。
+    ``metronome=1`` / ``nav=oracle|grounded``。
     """
     from .env_eval import EnvArm
     parts: dict[str, str] = {}
@@ -554,7 +554,8 @@ def _parse_arm_spec(spec: str):
         visual_ephemeral=parts.get("eph", "").lower() in ("1", "true", "yes"),
         registry=registry,
         memory_dummy=parts.get("dummy", "").lower() in ("1", "true", "yes"),
-        navigation_delegate=parts.get("nav", "").lower() in ("delegate", "1", "true", "yes"),
+        navigation_delegate=parts.get("nav", "").lower() in ("delegate", "oracle", "1", "true", "yes"),
+        navigation_grounded=parts.get("nav", "").lower() == "grounded",
     )
 
 

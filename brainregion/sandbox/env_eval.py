@@ -35,6 +35,7 @@ from .isolation import cleanup_run_dir, make_run_dir
 from .loop import _current_env, run_agent, scoped_env, scoped_memory_mode, scoped_topo, scoped_path
 from .regions import (
     EchoStrategy,
+    GroundedNavigationRegion,
     MemoryRegion,
     NavigationRegion,
     PathTraceRegion,
@@ -94,6 +95,7 @@ class EnvArm:
     path: bool = False                 # Phase 4.7:路径轨迹记忆脑区(recall_path → 图+走过路径标 ·)
     path_ego: bool = False             # Phase 4.7b:egocentric 路径图(agent 居中相对偏移;path=True 时生效)
     navigation_delegate: bool = False  # Phase 4.9:导航脑区直接执行一段动作,主脑只收 actor-attributed trace
+    navigation_grounded: bool = False  # Phase 4.10:只读 observation/transition,不接收 env 对象
 
 
 # 预设 = 常用比较的糖(CLI 也可 --arm 显式给 feature-config)
@@ -147,7 +149,8 @@ ARMS_PATH: tuple[EnvArm, ...] = (            # Phase 4.7:路径轨迹记忆(图+
 ARMS_NAVIGATION: tuple[EnvArm, ...] = (      # Phase 4.9:同策略直控/建议/委托,隔离控制边界价值
     EnvArm("nav_direct", visual_ephemeral=True),
     EnvArm("nav_advice", topo=True, topo_proc=True, visual_ephemeral=True),
-    EnvArm("nav_delegate", navigation_delegate=True, visual_ephemeral=True),
+    EnvArm("nav_delegate_oracle", navigation_delegate=True, visual_ephemeral=True),
+    EnvArm("nav_delegate_grounded", navigation_grounded=True, visual_ephemeral=True),
 )
 ARM_PRESETS: dict[str, tuple[EnvArm, ...]] = {
     "memory-strategy": ARMS_MEMORY_STRATEGY,
@@ -434,13 +437,20 @@ async def _run_one_episode(
     """
     env = build_env_for_config(cfg)
     memory_region, strategy_region, memory_mode, topo_region, path_region = build_regions_for_arm(arm, env, log_len=log_len)
-    navigation_region = NavigationRegion(start=env.start) if arm.navigation_delegate else None
+    if arm.navigation_grounded:
+        navigation_region = GroundedNavigationRegion()
+    elif arm.navigation_delegate:
+        navigation_region = NavigationRegion(start=env.start)
+    else:
+        navigation_region = None
+    navigation_active = navigation_region is not None
     # goal_text 臂感知:push 臂不提 pull 工具;无记忆臂(noregion)不提 recall_map;real/echo 提 plan;topo/path 提各自工具。
     if arm.metronome:
         goal_text = "找到并到达藏在网格里的目标 G(observe 只看当前视野;每几步收到脑区背景状态作参考;先探索再过去)"
     else:
-        if arm.navigation_delegate:
-            tools_hint = "delegate_navigation 把局部探索直接交给导航执行脑区,再审阅带 actor 的动作轨迹"
+        if navigation_active:
+            access = "仅使用当前 observation" if arm.navigation_grounded else "oracle 环境状态对照"
+            tools_hint = f"delegate_navigation 把局部探索交给导航执行脑区({access}),再审阅带 actor 的轨迹"
         elif arm.topo:
             tools_hint = "recall_topo 拿拓扑动作状态(未探索出口/死胡同/回溯方向)"
         elif arm.path:
@@ -500,13 +510,14 @@ async def _run_one_episode(
                                 registry=arm.registry,
                                 topo=arm.topo, topo_proc=arm.topo_proc,   # Phase 4.6
                                 path=arm.path, path_ego=arm.path_ego,     # Phase 4.7/4.7b 路径轨迹(alloc/ego)
-                                navigation=arm.navigation_delegate,       # Phase 4.9 导航执行委托
+                                navigation=navigation_active,             # Phase 4.9/4.10 导航执行委托
                             ),
                             verify_fn=verify,
                             memory_region=memory_region, strategy_region=run_strategy_region,
                             topo_region=topo_region, path_region=path_region,
                             navigation_region=navigation_region,
-                            navigation_autorun_actions=(min(8, cfg.max_steps) if arm.navigation_delegate else 0),
+                            navigation_autorun_actions=(min(8, cfg.max_steps) if navigation_active else 0),
+                            navigation_continuous=navigation_active,
                             status_injector=injector, status_period=status_period,
                             visual_ephemeral=arm.visual_ephemeral,
                         )
@@ -529,6 +540,8 @@ async def _run_one_episode(
         "delegated_actions": traj.delegated_actions,
         "navigation_delegations": traj.navigation_delegations,
         "automatic_region_activations": traj.automatic_region_activations,
+        "navigation_access_mode": getattr(navigation_region, "access_mode", None),
+        "navigation_options": traj.navigation_options,
         "region_tool_calls": traj.region_tool_calls,
         "region_model_calls": traj.region_model_calls,
         "cost": round(traj.total_main_cost_usd + traj.total_arm_cost_usd, 6),
@@ -787,7 +800,7 @@ def write_csv(report: dict, path: str | Path) -> Path:
     p = Path(path)
     cols = ["config", "arm", "solved", "steps", "main_turns", "main_turn_cap",
             "env_actions", "env_action_budget", "successful_moves", "turn_actions", "blocked_actions",
-            "delegated_actions", "navigation_delegations", "automatic_region_activations",
+            "delegated_actions", "navigation_delegations", "automatic_region_activations", "navigation_access_mode",
             "region_tool_calls", "region_model_calls", "cost", "main_cost", "region_cost",
             "termination", "n_recall", "n_recall_degraded", "n_plan", "n_delegate_navigation",
             "revisit_rate", "coverage", "status_referenced",
@@ -802,7 +815,8 @@ def write_csv(report: dict, path: str | Path) -> Path:
                 r.get("env_actions"), r.get("env_action_budget"), r.get("successful_moves"),
                 r.get("turn_actions"), r.get("blocked_actions"),
                 r.get("delegated_actions"), r.get("navigation_delegations"),
-                r.get("automatic_region_activations"), r.get("region_tool_calls"), r.get("region_model_calls"),
+                r.get("automatic_region_activations"), r.get("navigation_access_mode"),
+                r.get("region_tool_calls"), r.get("region_model_calls"),
                 r["cost"], r.get("main_cost"), r.get("region_cost"), r["termination"],
                 r["n_recall"], r["n_recall_degraded"], r["n_plan"], r.get("n_delegate_navigation"),
                 r["revisit_rate"], r["coverage"],

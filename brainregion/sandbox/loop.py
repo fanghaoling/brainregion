@@ -224,6 +224,7 @@ class Trajectory:
     delegated_actions: int = 0
     navigation_delegations: int = 0
     automatic_region_activations: int = 0
+    navigation_options: list[dict[str, Any]] = field(default_factory=list)
     region_tool_calls: int = 0
     region_model_calls: int = 0
     env_action_trace: list[dict[str, Any]] = field(default_factory=list)
@@ -256,6 +257,7 @@ class Trajectory:
             "delegated_actions": self.delegated_actions,
             "navigation_delegations": self.navigation_delegations,
             "automatic_region_activations": self.automatic_region_activations,
+            "navigation_options": self.navigation_options,
             "region_tool_calls": self.region_tool_calls,
             "region_model_calls": self.region_model_calls,
             "env_action_trace": self.env_action_trace,
@@ -354,9 +356,17 @@ def _execute_navigation_option(
     trace_start = len(traj.env_action_trace)
     stop_reason = "env_action_budget" if budget == 0 else "action_budget"
     traj.navigation_delegations += 1
+    access_mode = str(getattr(region, "access_mode", "oracle"))
+    if access_mode not in {"oracle", "grounded"}:
+        raise ValueError(f"unsupported navigation access_mode: {access_mode!r}")
 
     for _ in range(budget):
-        action = region.next_action(env)
+        # The grounded policy receives text only. Keep this branch explicit so
+        # adding fields to an input DTO cannot accidentally leak the env later.
+        if access_mode == "grounded":
+            action = region.next_action(env.observation())
+        else:
+            action = region.next_action(env)
         if action is None:
             stop_reason = "no_known_route"
             break
@@ -374,7 +384,10 @@ def _execute_navigation_option(
             before=before, after=after, status=status,
             reward=reward, terminated=terminated, info=info,
         )
-        region.observe_position(after)
+        if access_mode == "grounded":
+            region.observe_transition(action=action, observation=obs, status=status)
+        else:
+            region.observe_position(after)
         if memory_region is not None and status not in {"invalid", "already_done"}:
             memory_region.update(action, status, env.relative_view())
         if topo_region is not None:
@@ -384,16 +397,37 @@ def _execute_navigation_option(
         if terminated:
             stop_reason = "goal_reached"
             break
+        if access_mode == "grounded":
+            boundary = region.option_boundary(obs, actions_executed=len(traj.env_action_trace) - trace_start)
+            if boundary:
+                stop_reason = f"decision_boundary:{boundary}"
+                break
 
     option_trace = traj.env_action_trace[trace_start:]
     return {
         "actor": "navigation_region",
+        "access_mode": access_mode,
         "executed_actions": len(option_trace),
         "stop_reason": stop_reason,
         "solved": bool(getattr(env, "solved", False)),
         "final_observation": env.observation(),
         "trace": option_trace,
         "region_state": region.snapshot(),
+    }
+
+
+def _navigation_option_summary(option: dict[str, Any], *, trigger: str) -> dict[str, Any]:
+    trace = option.get("trace") or []
+    state = option.get("region_state") or {}
+    return {
+        "trigger": trigger,
+        "access_mode": option.get("access_mode"),
+        "executed_actions": option.get("executed_actions", 0),
+        "actions": [item.get("action") for item in trace],
+        "stop_reason": option.get("stop_reason"),
+        "solved": bool(option.get("solved", False)),
+        "confidence": state.get("confidence"),
+        "last_decision": state.get("last_decision"),
     }
 
 
@@ -786,6 +820,7 @@ async def run_agent(
     path_region: Any = None,            # Phase 4.7 路径轨迹记忆脑区(代码,无 LLM):recall_path → 图+走过路径标 ·
     navigation_region: Any = None,      # Phase 4.9 导航执行脑区(代码,无 LLM):delegate_navigation → 执行一段动作
     navigation_autorun_actions: int = 0,  # Phase 4.9 region-first:主脑首轮前自动执行一次 option 并注入轨迹
+    navigation_continuous: bool = False,  # Phase 4.10:主脑 act 后事件驱动再唤醒;不按每模型轮盲轮询
     status_injector: Any = None,        # Phase 4.1 metronome:async (step, messages)->(status_str|None, cost_usd);None=现行为
     status_period: int = 3,
     visual_ephemeral: bool = False,     # Phase 4.2:剥历史视觉观察出 transcript(只留最新 <visual>);act 动作结果持久
@@ -841,25 +876,29 @@ async def run_agent(
             if inject:
                 messages.append({"role": "user", "content": inject})
 
-        # Region-first experiment:the runtime activates navigation before the main model's first decision.
-        # The main model receives an attributed execution trace, not a fabricated first-person memory.
+        def _activate_navigation(trigger: str) -> dict[str, Any]:
+            option = _execute_navigation_option(
+                traj, region=navigation_region, env=_env,
+                requested_actions=int(navigation_autorun_actions),
+                max_env_actions=_max_env_actions,
+                memory_region=memory_region, topo_region=topo_region, path_region=path_region,
+            )
+            traj.automatic_region_activations += 1
+            traj.navigation_options.append(_navigation_option_summary(option, trigger=trigger))
+            messages.append({
+                "role": "user",
+                "content": (
+                    f'<region_execution actor="navigation_region" trigger="{trigger}">\n'
+                    + _compact(option)
+                    + "\n</region_execution>\n该块是脑区执行事实,不是你亲自执行的动作。"
+                ),
+            })
+            return option
+
+        # Region-first:activate before the first main-model decision.
         if navigation_region is not None and _env is not None and navigation_autorun_actions > 0:
             try:
-                option = _execute_navigation_option(
-                    traj, region=navigation_region, env=_env,
-                    requested_actions=int(navigation_autorun_actions),
-                    max_env_actions=_max_env_actions,
-                    memory_region=memory_region, topo_region=topo_region, path_region=path_region,
-                )
-                traj.automatic_region_activations += 1
-                messages.append({
-                    "role": "user",
-                    "content": (
-                        '<region_execution actor="navigation_region">\n'
-                        + _compact(option)
-                        + "\n</region_execution>\n该块是脑区执行事实,不是你亲自执行的动作。"
-                    ),
-                })
+                _activate_navigation("initial")
             except Exception as exc:  # noqa: BLE001 — automatic region failure must not crash main loop
                 logger.warning("navigation autorun failed;continuing with main model", exc_info=True)
                 messages.append({
@@ -869,6 +908,7 @@ async def run_agent(
 
         consecutive_errors = 0
         _last_status_env_actions = -1
+        _last_auto_env_actions = traj.env_actions
         for step in range(max_steps):
             if _max_env_actions is not None and traj.env_actions >= _max_env_actions:
                 traj.termination_reason = (
@@ -879,6 +919,25 @@ async def run_agent(
             if spent >= max_cost_usd:  # per-run 预算预检(review consensus-2)
                 traj.termination_reason = "budget_exceeded"
                 break
+
+            # Event-driven reactivation:only after the main brain actually changed/attempted the environment.
+            # Model-only turns (observe/consult/parse retry) do not wake the region or consume action budget.
+            should_reactivate = (
+                navigation_continuous
+                and navigation_region is not None
+                and _env is not None
+                and navigation_autorun_actions > 0
+                and traj.env_actions != _last_auto_env_actions
+                and bool(traj.env_action_trace)
+                and traj.env_action_trace[-1].get("actor") == "main"
+                and not bool(getattr(_env, "solved", False))
+            )
+            if should_reactivate:
+                try:
+                    _activate_navigation("after_main_action")
+                except Exception:  # noqa: BLE001 — scheduler sidecar failure must not crash main loop
+                    logger.warning("continuous navigation activation failed", exc_info=True)
+                _last_auto_env_actions = traj.env_actions
 
             # Phase 4.1 metronome:每 status_period 个环境动作注入脑区状态 user message。
             # 加性:status_injector None → 现行为(零变化)。injector 返 (status_str|None, cost);失败隔离不崩主 run。
@@ -1003,6 +1062,7 @@ async def run_agent(
                         requested_actions=requested, max_env_actions=_max_env_actions,
                         memory_region=memory_region, topo_region=topo_region, path_region=path_region,
                     )
+                    traj.navigation_options.append(_navigation_option_summary(option, trigger="main_tool"))
                     result_str = _compact(option)
                     exec_err = None
                 except Exception as exc:  # noqa: BLE001 — region failure becomes tool feedback
@@ -1033,6 +1093,14 @@ async def run_agent(
             # Phase 4.7 路径轨迹记忆:每步 act 后更新 trail(同 topo;渲染图用)
             if _act_before is not None and path_region is not None:
                 path_region.update(_env._agent)
+            if _act_before is not None and navigation_region is not None and _status not in {"invalid", "already_done"}:
+                if getattr(navigation_region, "access_mode", "oracle") == "grounded":
+                    navigation_region.observe_transition(
+                        action=str(call.args.get("action", "")),
+                        observation=_env.observation(), status=_status,
+                    )
+                else:
+                    navigation_region.observe_position(_env._agent)
             consecutive_errors = 0  # 成功(或可执行)解析 → 重置(连续错误是针对 parse/模型失败)
             preview = (result_str or exec_err or "")[:300]
             traj.steps.append(StepRecord(

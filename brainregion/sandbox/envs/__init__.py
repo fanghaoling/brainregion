@@ -63,6 +63,7 @@ def build_env_system_prompt(env, goal: str, *, memory: bool = False, strategy: b
             f"**严格部分可观 + 导航执行脑区**:observe 只返回角色周围 {radius} 格的当前视野。"
             "你可以调 **delegate_navigation**，把一小段局部探索直接委托给导航脑区执行。"
             "runtime 也可能在你第一次决策前自动激活一次导航脑区，并以 `<region_execution>` 提供事实轨迹。"
+            "当你在岔路做出一个 act 后，runtime 可按该环境事件再次唤醒脑区继续执行走廊；不会因纯思考轮盲目唤醒。"
             "工具返回明确标注 `actor=navigation_region` 的逐动作轨迹、停止原因和最终观察；"
             "这些动作由脑区执行，不是你亲自执行。你负责检查结果并决定继续委托、亲自 act 或结束。\n"
         )

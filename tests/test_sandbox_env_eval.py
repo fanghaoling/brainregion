@@ -1288,10 +1288,13 @@ def test_navigation_arms_and_prompt_contract():
     from brainregion.sandbox.cli import _parse_arm_spec
     from brainregion.sandbox.env_eval import ARMS_NAVIGATION
 
-    assert [a.name for a in ARMS_NAVIGATION] == ["nav_direct", "nav_advice", "nav_delegate"]
+    assert [a.name for a in ARMS_NAVIGATION] == [
+        "nav_direct", "nav_advice", "nav_delegate_oracle", "nav_delegate_grounded",
+    ]
     assert ARMS_NAVIGATION[0].topo is False and ARMS_NAVIGATION[0].navigation_delegate is False
     assert ARMS_NAVIGATION[1].topo is True and ARMS_NAVIGATION[1].topo_proc is True
     assert ARMS_NAVIGATION[2].navigation_delegate is True
+    assert ARMS_NAVIGATION[3].navigation_grounded is True
     assert ARM_PRESETS["navigation"] == ARMS_NAVIGATION
 
     env = GridWorld(size=5, start=(0, 0), goal=(4, 4), visibility_radius=1, strict_obs=True)
@@ -1302,9 +1305,11 @@ def test_navigation_arms_and_prompt_contract():
 
     explicit = _parse_arm_spec("name=custom-nav,nav=delegate,eph=1")
     assert explicit.name == "custom-nav" and explicit.navigation_delegate is True
+    grounded = _parse_arm_spec("name=grounded,nav=grounded,eph=1")
+    assert grounded.navigation_grounded is True and grounded.navigation_delegate is False
 
 
-def test_navigation_delegate_arm_autoruns_before_main():
+def test_navigation_delegate_arms_autorun_before_main():
     from brainregion.sandbox.env_eval import ARMS_NAVIGATION
 
     configs = [EnvConfig(size=5, seed=1, visibility_radius=1, max_steps=6, max_main_turns=12)]
@@ -1312,8 +1317,14 @@ def test_navigation_delegate_arm_autoruns_before_main():
         _GiveUpBackend(), "mock", configs, ARMS_NAVIGATION,
         repeats=1, max_cost_usd=1.0, log_progress=False,
     ))
-    delegated = next(r for r in report["runs"] if r["arm"] == "nav_delegate")
-    assert delegated["automatic_region_activations"] == 1
-    assert delegated["navigation_delegations"] == 1
-    assert delegated["delegated_actions"] > 0
-    assert report["per_arm"]["nav_delegate"]["mean_automatic_region_activations"] == 1
+    oracle = next(r for r in report["runs"] if r["arm"] == "nav_delegate_oracle")
+    grounded = next(r for r in report["runs"] if r["arm"] == "nav_delegate_grounded")
+    for delegated in (oracle, grounded):
+        assert delegated["automatic_region_activations"] == 1
+        assert delegated["navigation_delegations"] == 1
+        assert delegated["delegated_actions"] > 0
+    assert oracle["navigation_access_mode"] == "oracle"
+    assert grounded["navigation_access_mode"] == "grounded"
+    assert grounded["navigation_options"]
+    assert grounded["navigation_options"][0]["trigger"] == "initial"
+    assert report["per_arm"]["nav_delegate_grounded"]["mean_automatic_region_activations"] == 1
