@@ -64,17 +64,22 @@ def _J(d: dict) -> str:
 
 
 class MockBackend:
-    def __init__(self, script, cost=0.001):
+    def __init__(self, script, cost=0.001, usage=None, cost_source=None):
         self.script = script
         self.i = 0
         self.cost = cost
+        self.usage = dict(usage or {})
+        self.cost_source = cost_source
         self.calls = 0
 
     async def complete_messages(self, messages, **kw):
         content = self.script[min(self.i, len(self.script) - 1)]
         self.i += 1
         self.calls += 1
-        return ModelResponse(model=kw.get("model", "mock"), content=content, usage={}, cost_usd=self.cost)
+        return ModelResponse(
+            model=kw.get("model", "mock"), content=content, usage=dict(self.usage),
+            cost_usd=self.cost, cost_source=self.cost_source,
+        )
 
 
 class _GiveUpBackend:
@@ -237,7 +242,8 @@ def test_region_model_cost_and_calls_are_separate_from_main():
         _J({"thought": "查记忆", "tool": "recall_map", "args": {}}),
         _MEMORY_JSON,
         _J({"thought": "结束", "done": True, "answer": "记录完成"}),
-    ], cost=0.001)
+    ], cost=0.001, usage={"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+       cost_source="builtin")
 
     traj = _run(backend, env, memory_region=mem)
 
@@ -248,6 +254,14 @@ def test_region_model_cost_and_calls_are_separate_from_main():
     recall_step = next(s for s in traj.steps if s.tool == "recall_map")
     assert abs(recall_step.main_cost_usd - 0.001) < 1e-12
     assert abs(recall_step.arm_cost_usd - 0.001) < 1e-12
+    assert traj.total_main_usage["total_tokens"] == 24
+    assert traj.total_arm_usage["total_tokens"] == 12
+    assert traj.main_cost_sources == ["builtin"]
+    assert traj.arm_cost_sources == ["builtin"]
+    assert recall_step.main_usage["total_tokens"] == 12
+    assert recall_step.arm_usage["total_tokens"] == 12
+    assert recall_step.main_cost_source == "builtin"
+    assert recall_step.arm_cost_sources == ["builtin"]
 
 
 # ---------- 过程指标 ----------
@@ -371,6 +385,9 @@ def test_run_env_eval_plumbing_structure_and_csv():
     assert "mean_main_turns" in report["per_arm"]["memory_only"]
     assert "mean_env_actions" in report["per_arm"]["memory_only"]
     assert "mean_region_model_calls" in report["per_arm"]["memory_only"]
+    assert "mean_input_tokens" in report["per_arm"]["memory_only"]
+    assert "mean_main_input_tokens" in report["per_arm"]["memory_only"]
+    assert "mean_region_input_tokens" in report["per_arm"]["memory_only"]
     assert {"main_turns", "env_actions", "main_cost", "region_cost"} <= report["runs"][0].keys()
     assert report["cost_capped"] is False
     # 生成配置记录(gpt-5 可复现)

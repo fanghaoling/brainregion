@@ -37,6 +37,8 @@ class DelegateDecision:
     confidence: float | None = None
     parse_ok: bool = False
     cost_usd: float = 0.0
+    usage: dict[str, Any] | None = None
+    cost_source: str | None = None
     raw: str = ""
 
     def to_dict(self) -> dict[str, Any]:
@@ -48,6 +50,8 @@ class DelegateDecision:
             "confidence": self.confidence,
             "parse_ok": self.parse_ok,
             "cost_usd": self.cost_usd,
+            "usage": dict(self.usage or {}),
+            "cost_source": self.cost_source,
         }
 
 
@@ -175,6 +179,8 @@ async def delegate_step(
         confidence=obj.get("confidence"),
         parse_ok=bool(obj),
         cost_usd=float(getattr(resp, "cost_usd", 0.0) or 0.0),
+        usage=dict(getattr(resp, "usage", {}) or {}),
+        cost_source=getattr(resp, "cost_source", None),
         raw=(resp.content or "")[:200],
     )
 
@@ -255,6 +261,8 @@ class Resolution:
     gap_consensus: bool = False  # 正交 check == 原 trace check(归一化):两 reviewer 找同一差距
     orthogonal_verdict: str | None = None  # 正交 forced-trace 判定(SOLVED/FAILED/None)
     cost_usd: float = 0.0
+    usage: dict[str, Any] | None = None
+    cost_source: str | None = None
     error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
@@ -265,6 +273,8 @@ class Resolution:
             "gap_consensus": self.gap_consensus,
             "orthogonal_verdict": self.orthogonal_verdict,
             "cost_usd": self.cost_usd,
+            "usage": dict(self.usage or {}),
+            "cost_source": self.cost_source,
             "error": self.error,
         }
 
@@ -348,4 +358,6 @@ async def resolve_escalate_from_trajectory(
                           error=f"orthogonal_check failed: {exc}").to_dict()
     res = resolve_escalate(orthogonal_verdict=tr.verdict, orthogonal_check=tr.check, trace_check=trace_check)
     res.cost_usd = float(getattr(tr, "cost_usd", 0.0) or 0.0)
+    res.usage = dict(getattr(tr, "usage", {}) or {})
+    res.cost_source = getattr(tr, "cost_source", None)
     return res.to_dict()

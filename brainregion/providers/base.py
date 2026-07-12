@@ -21,7 +21,8 @@ class ModelResponse:
         model: 模型字符串（litellm 约定）。
         content: 模型输出文本（失败时为空）。
         usage: token 用量 {prompt_tokens, completion_tokens, total_tokens}。
-        cost_usd: litellm 算好的 USD 成本（豆包可能 None）。
+        cost_usd: provider 返回或本地价格表估算的 USD 成本。
+        cost_source: 成本来源（provider/config/builtin/missing_price）。
         error: 失败原因（None=成功）。backend 内部已隔离，不向上抛。
     """
 
@@ -29,6 +30,7 @@ class ModelResponse:
     content: str = ""
     usage: dict = field(default_factory=dict)
     cost_usd: float | None = None
+    cost_source: str | None = None
     error: str | None = None
 
     @property

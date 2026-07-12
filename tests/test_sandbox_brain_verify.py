@@ -205,6 +205,19 @@ def test_forced_trace_tracks_cost_into_dict():
     assert composite_verify(tr, True).to_dict()["cost_usd"] == 0.012
 
 
+def test_brain_verify_dict_preserves_sidecar_usage_and_cost_source():
+    tr = TraceResult(
+        verdict="SOLVED",
+        usage={"prompt_tokens": 12, "completion_tokens": 3},
+        cost_source="builtin",
+    )
+
+    out = composite_verify(tr, True).to_dict()
+
+    assert out["usage"] == {"prompt_tokens": 12, "completion_tokens": 3}
+    assert out["cost_source"] == "builtin"
+
+
 def test_forced_trace_coerces_nonstr_check_and_trace():
     # code-review fix:LLM emit check/trace=null(或非 str)→ 强制成 str(防下游 .split()/[:200] 崩)
     backend = _Backend(content='{"verdict":"FAILED","trace":null,"check":null}')

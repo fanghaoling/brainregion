@@ -20,7 +20,7 @@ from typing import Any, Callable
 
 from brainregion.core.stages.parse import extract_json_object
 from brainregion.core.wake.gate import wake_gate
-from brainregion.runtime import emit_event
+from brainregion.runtime import emit_event, merge_usage, normalize_usage
 from brainregion.workspace import (
     apply_text_patch,
     inspect_file,
@@ -170,6 +170,38 @@ class ToolCall:
     answer: str
 
 
+_USAGE_KEYS = ("input_tokens", "output_tokens", "total_tokens", "cached_tokens", "reasoning_tokens")
+
+
+def _usage_delta(current: dict[str, Any], previous: dict[str, Any]) -> dict[str, int]:
+    current_normalized = normalize_usage(current)
+    previous_normalized = normalize_usage(previous)
+    return {key: max(0, current_normalized[key] - previous_normalized[key]) for key in _USAGE_KEYS}
+
+
+def _record_usage(
+    traj: Any,
+    usage: dict[str, Any] | None,
+    *,
+    arm: bool,
+    cost_source: str | None = None,
+) -> dict[str, int]:
+    normalized = normalize_usage(usage)
+    attr = "total_arm_usage" if arm else "total_main_usage"
+    setattr(traj, attr, merge_usage(getattr(traj, attr, {}), normalized))
+    if cost_source:
+        sources_attr = "arm_cost_sources" if arm else "main_cost_sources"
+        sources = getattr(traj, sources_attr, [])
+        if cost_source not in sources:
+            sources.append(cost_source)
+        setattr(traj, sources_attr, sources)
+        if arm:
+            step_sources = getattr(traj, "_current_step_arm_cost_sources", None)
+            if isinstance(step_sources, list) and cost_source not in step_sources:
+                step_sources.append(cost_source)
+    return normalized
+
+
 @dataclass
 class StepRecord:
     index: int
@@ -183,6 +215,10 @@ class StepRecord:
     main_cost_usd: float
     arm_cost_usd: float
     status_injected: bool = False
+    main_usage: dict[str, int] = field(default_factory=dict)
+    arm_usage: dict[str, int] = field(default_factory=dict)
+    main_cost_source: str | None = None
+    arm_cost_sources: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -234,6 +270,10 @@ class Trajectory:
     termination_reason: str = ""
     total_main_cost_usd: float = 0.0
     total_arm_cost_usd: float = 0.0
+    total_main_usage: dict[str, int] = field(default_factory=dict)
+    total_arm_usage: dict[str, int] = field(default_factory=dict)
+    main_cost_sources: list[str] = field(default_factory=list)
+    arm_cost_sources: list[str] = field(default_factory=list)
     wake_calls: int = 0
     consult_calls: int = 0
     env_actions: int = 0
@@ -279,6 +319,11 @@ class Trajectory:
             "accept_reason": self.accept_reason,
             "total_main_cost_usd": round(self.total_main_cost_usd, 6),
             "total_arm_cost_usd": round(self.total_arm_cost_usd, 6),
+            "main_usage": normalize_usage(self.total_main_usage),
+            "arm_usage": normalize_usage(self.total_arm_usage),
+            "total_usage": merge_usage(self.total_main_usage, self.total_arm_usage),
+            "main_cost_sources": list(self.main_cost_sources),
+            "arm_cost_sources": list(self.arm_cost_sources),
             "wake_calls": self.wake_calls,
             "consult_calls": self.consult_calls,
             "main_turns": self.n_steps,
@@ -317,6 +362,10 @@ class Trajectory:
                     "error": s.error,
                     "main_cost_usd": round(s.main_cost_usd, 6),
                     "arm_cost_usd": round(s.arm_cost_usd, 6),
+                    "main_usage": normalize_usage(s.main_usage),
+                    "arm_usage": normalize_usage(s.arm_usage),
+                    "main_cost_source": s.main_cost_source,
+                    "arm_cost_sources": list(s.arm_cost_sources),
                     "status_injected": s.status_injected,
                 }
                 for s in self.steps
@@ -743,6 +792,9 @@ async def _recall_via_region(
         traj.total_arm_cost_usd = float(getattr(traj, "total_arm_cost_usd", 0.0) or 0.0) + float(
             res.get("cost_usd", 0.0) or 0.0
         )
+        _record_usage(
+            traj, res.get("usage"), arm=True, cost_source=res.get("cost_source"),
+        )
         out = {
             "rough_position": list(memory_region.pose),
             "rough_map": res.get("rough_map", ""),
@@ -791,6 +843,9 @@ async def _plan_via_strategy(
         )
         traj.total_arm_cost_usd = float(getattr(traj, "total_arm_cost_usd", 0.0) or 0.0) + float(
             res.get("cost_usd", 0.0) or 0.0
+        )
+        _record_usage(
+            traj, res.get("usage"), arm=True, cost_source=res.get("cost_source"),
         )
         out = {
             "intent": res.get("intent", ""),
@@ -1127,6 +1182,10 @@ async def run_agent(
                 endpoint_id=endpoint_id, thinking=thinking, effort=effort,
             )
             step_main_cost = float(resp.cost_usd or 0.0)
+            step_main_cost_source = getattr(resp, "cost_source", None)
+            step_main_usage = _record_usage(
+                traj, getattr(resp, "usage", None), arm=False, cost_source=step_main_cost_source,
+            )
             traj.total_main_cost_usd += step_main_cost
 
             if not resp.ok or not resp.content:
@@ -1135,6 +1194,7 @@ async def run_agent(
                     index=step, thought="", tool=None, args={}, done=False,
                     result_chars=0, result_preview="", error=resp.error or "empty model output",
                     main_cost_usd=step_main_cost, arm_cost_usd=0.0, status_injected=status_injected,
+                    main_usage=step_main_usage, main_cost_source=step_main_cost_source,
                 ))
                 emit_event("sandbox.step", payload={"task_id": task.id, "arm": arm, "step": step, "model_error": resp.error})
                 if consecutive_errors >= consecutive_error_limit:
@@ -1151,6 +1211,7 @@ async def run_agent(
                     index=step, thought="", tool=None, args={}, done=False,
                     result_chars=0, result_preview="", error=parse_err,
                     main_cost_usd=step_main_cost, arm_cost_usd=0.0, status_injected=status_injected,
+                    main_usage=step_main_usage, main_cost_source=step_main_cost_source,
                 ))
                 emit_event("sandbox.step", payload={"task_id": task.id, "arm": arm, "step": step, "parse_error": parse_err})
                 if consecutive_errors >= consecutive_error_limit:
@@ -1165,6 +1226,7 @@ async def run_agent(
                     index=step, thought=call.thought, tool=None, args={}, done=True,
                     result_chars=0, result_preview=call.answer[:300], error=None,
                     main_cost_usd=step_main_cost, arm_cost_usd=0.0, status_injected=status_injected,
+                    main_usage=step_main_usage, main_cost_source=step_main_cost_source,
                 ))
                 traj.done = True
                 traj.termination_reason = "done"
@@ -1176,6 +1238,8 @@ async def run_agent(
             if call.tool in {"recall_map", "plan", "recall_topo", "recall_path", "delegate_navigation"}:
                 traj.region_tool_calls += 1
             _arm_cost_before = traj.total_arm_cost_usd
+            _arm_usage_before = dict(traj.total_arm_usage)
+            traj._current_step_arm_cost_sources = []
             if call.tool == "recall_map" and memory_region is not None and _env is not None:
                 result_str, exec_err = await _recall_via_region(
                     memory_region, backend, model, env=_env,
@@ -1291,6 +1355,10 @@ async def run_agent(
                 main_cost_usd=step_main_cost,
                 arm_cost_usd=traj.total_arm_cost_usd - _arm_cost_before,
                 status_injected=status_injected,
+                main_usage=step_main_usage,
+                arm_usage=_usage_delta(traj.total_arm_usage, _arm_usage_before),
+                main_cost_source=step_main_cost_source,
+                arm_cost_sources=list(traj._current_step_arm_cost_sources),
             ))
             emit_event(
                 "sandbox.step",
@@ -1334,6 +1402,10 @@ async def run_agent(
         except Exception as exc:
             traj.brain_verify = {"error": f"brain_verify failed: {exc}", "trace_verdict": None}
         traj.total_main_cost_usd += float((traj.brain_verify or {}).get("cost_usd", 0.0) or 0.0)
+        _record_usage(
+            traj, (traj.brain_verify or {}).get("usage"), arm=False,
+            cost_source=(traj.brain_verify or {}).get("cost_source"),
+        )
     if brain_delegate:
         from .brain_delegate import delegate_from_trajectory
         try:  # 同样失败隔离:delegate 抛异常只记 error,绝不崩主 run
@@ -1345,6 +1417,10 @@ async def run_agent(
         except Exception as exc:
             traj.delegate = {"error": f"brain_delegate failed: {exc}", "action": None}
         traj.total_main_cost_usd += float((traj.delegate or {}).get("cost_usd", 0.0) or 0.0)
+        _record_usage(
+            traj, (traj.delegate or {}).get("usage"), arm=False,
+            cost_source=(traj.delegate or {}).get("cost_source"),
+        )
     return traj
 
 
@@ -1453,6 +1529,11 @@ async def run_cognitive_loop(
                 resolution = {"action": "accept", "accept_reason": "weak_test"}
             ortho_cost = float(resolution.get("cost_usd", 0.0) or 0.0)
             cumulative += ortho_cost
+            traj.total_arm_cost_usd += ortho_cost
+            _record_usage(
+                traj, resolution.get("usage"), arm=True,
+                cost_source=resolution.get("cost_source"),
+            )
             ortho_verdict = resolution.get("orthogonal_verdict")
             gap_consensus = resolution.get("gap_consensus")
             if resolution.get("action") == "redelegate" and (resolution.get("directive") or "").strip():

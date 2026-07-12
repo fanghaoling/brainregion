@@ -5,6 +5,7 @@ import pytest
 from brainregion.runtime.pricing import (
     canonical_model_name,
     estimate_cost_usd,
+    merge_usage,
     model_usage_payload,
     normalize_usage,
     price_for_model,
@@ -32,6 +33,22 @@ def test_normalize_usage_keeps_token_categories():
         "total_tokens": 125,
         "cached_tokens": 40,
         "reasoning_tokens": 7,
+    }
+
+
+def test_merge_usage_sums_normalized_categories():
+    merged = merge_usage(
+        {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 125,
+         "prompt_tokens_details": {"cached_tokens": 30}},
+        {"input_tokens": 50, "output_tokens": 10, "reasoning_tokens": 4},
+    )
+
+    assert merged == {
+        "input_tokens": 150,
+        "output_tokens": 30,
+        "total_tokens": 185,
+        "cached_tokens": 30,
+        "reasoning_tokens": 4,
     }
 
 

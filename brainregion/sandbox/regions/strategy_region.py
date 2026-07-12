@@ -111,7 +111,9 @@ class StrategyRegion:
             "intent": parsed["intent"],
             "rationale": parsed["rationale"],
             "expected_outcome": parsed["expected_outcome"],
+            "usage": dict(getattr(resp, "usage", {}) or {}),
             "cost_usd": float(resp.cost_usd or 0.0),
+            "cost_source": getattr(resp, "cost_source", None),
             "ok": True,
         }
 

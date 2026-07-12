@@ -152,7 +152,13 @@ class MemoryRegion:
             raise RuntimeError("memory region output unparseable / no rough_map field")
         # 事务性:全成才替换。dummy 用固定 content-free 串(同 LLM 调用成本,内容退化)。
         self.rough_map = _DUMMY_ROUGH_MAP if self.dummy else parsed
-        return {"rough_map": self.rough_map, "cost_usd": float(resp.cost_usd or 0.0), "ok": True}
+        return {
+            "rough_map": self.rough_map,
+            "usage": dict(getattr(resp, "usage", {}) or {}),
+            "cost_usd": float(resp.cost_usd or 0.0),
+            "cost_source": getattr(resp, "cost_source", None),
+            "ok": True,
+        }
 
 
 __all__ = ["MemoryRegion", "build_memory_region_system_prompt"]

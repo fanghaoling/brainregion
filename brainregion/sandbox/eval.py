@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from brainregion.eval import stats as eval_stats
+from brainregion.runtime import merge_usage, normalize_usage
 
 from . import SandboxTask
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
@@ -53,6 +54,14 @@ def _steps_delta(rows: list[dict]) -> float | None:
     return t - c
 
 
+def _input_tokens_delta(rows: list[dict]) -> float | None:
+    if not rows:
+        return None
+    c = sum(r["_control_"]["input_tokens"] for r in rows) / len(rows)
+    t = sum(r["_treatment_"]["input_tokens"] for r in rows) / len(rows)
+    return t - c
+
+
 def evaluate_gate(deltas: dict[str, dict], n: int, formal_min_n: int = FORMAL_MIN_N) -> dict[str, Any]:
     """GO/NO_GO/INCONCLUSIVE on solve_rate_delta(主);cost/steps 仅 diagnostic。"""
     sr = deltas["solve_rate_delta"]
@@ -80,7 +89,7 @@ def _per_arm_summary(trajectories: list[Trajectory]) -> dict[str, dict[str, floa
     summary = {}
     for arm, trajs in by_arm.items():
         n = len(trajs)
-        summary[arm] = {
+        arm_summary = {
             "n": n,
             "solve_rate": sum(1 for t in trajs if t.tests_green) / n if n else 0.0,
             "mean_steps": sum(t.n_steps for t in trajs) / n if n else 0.0,
@@ -88,6 +97,17 @@ def _per_arm_summary(trajectories: list[Trajectory]) -> dict[str, dict[str, floa
             "mean_main_cost_usd": sum(t.total_main_cost_usd for t in trajs) / n if n else 0.0,
             "mean_arm_cost_usd": sum(t.total_arm_cost_usd for t in trajs) / n if n else 0.0,
         }
+        for key in ("input_tokens", "output_tokens", "total_tokens", "cached_tokens", "reasoning_tokens"):
+            arm_summary[f"mean_main_{key}"] = (
+                sum(normalize_usage(t.total_main_usage)[key] for t in trajs) / n if n else 0.0
+            )
+            arm_summary[f"mean_arm_{key}"] = (
+                sum(normalize_usage(t.total_arm_usage)[key] for t in trajs) / n if n else 0.0
+            )
+            arm_summary[f"mean_total_{key}"] = (
+                sum(merge_usage(t.total_main_usage, t.total_arm_usage)[key] for t in trajs) / n if n else 0.0
+            )
+        summary[arm] = arm_summary
     return summary
 
 
@@ -135,6 +155,7 @@ async def run_sandbox_eval(
                 "solved": traj.tests_green,
                 "cost": traj.total_main_cost_usd + traj.total_arm_cost_usd,
                 "steps": traj.n_steps,
+                "input_tokens": merge_usage(traj.total_main_usage, traj.total_arm_usage)["input_tokens"],
             }
         rows.append({"task_id": task.id, "_control_": arm_results[control], "_treatment_": arm_results[treatment]})
 
@@ -143,6 +164,7 @@ async def run_sandbox_eval(
         "solve_rate_delta": _bootstrap(rows, _solve_rate_delta, run_id, "solve_rate_delta"),
         "cost_delta": _bootstrap(rows, _cost_delta, run_id, "cost_delta"),
         "steps_delta": _bootstrap(rows, _steps_delta, run_id, "steps_delta"),
+        "input_tokens_delta": _bootstrap(rows, _input_tokens_delta, run_id, "input_tokens_delta"),
     }
     gate = evaluate_gate(deltas, n)
     return {

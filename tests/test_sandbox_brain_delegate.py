@@ -158,6 +158,19 @@ def test_delegate_step_tracks_cost_into_dict():
     assert d.to_dict()["cost_usd"] == 0.008
 
 
+def test_delegate_dict_preserves_sidecar_usage_and_cost_source():
+    decision = DelegateDecision(
+        action="redelegate",
+        usage={"prompt_tokens": 8, "completion_tokens": 2},
+        cost_source="provider",
+    )
+
+    out = decision.to_dict()
+
+    assert out["usage"] == {"prompt_tokens": 8, "completion_tokens": 2}
+    assert out["cost_source"] == "provider"
+
+
 # ---------------- to_dict ----------------
 def test_delegate_decision_to_dict():
     d = DelegateDecision(action="redelegate", next_subgoal="add fsync", target="same expert",

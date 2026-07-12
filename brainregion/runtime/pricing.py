@@ -100,6 +100,22 @@ def normalize_usage(usage: dict[str, Any] | None) -> dict[str, int]:
     }
 
 
+def merge_usage(*usages: dict[str, Any] | None) -> dict[str, int]:
+    """Normalize and sum provider usage payloads into stable token categories."""
+    total = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "total_tokens": 0,
+        "cached_tokens": 0,
+        "reasoning_tokens": 0,
+    }
+    for usage in usages:
+        normalized = normalize_usage(usage)
+        for key in total:
+            total[key] += normalized[key]
+    return total
+
+
 def estimate_cost_usd(model: str, usage: dict[str, Any] | None, *, config: dict[str, Any] | None = None) -> tuple[float | None, str]:
     normalized = normalize_usage(usage)
     price = price_for_model(model, config=config)

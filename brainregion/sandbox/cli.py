@@ -18,6 +18,7 @@ from typing import Any
 
 from brainregion import defaults as _defaults_mod
 from brainregion.providers.litellm import LiteLLMBackend
+from brainregion.runtime import merge_usage, normalize_usage
 from brainregion.server import _normalize_one, _resolve_endpoints
 
 from .eval import render_summary, run_sandbox_eval, write_report
@@ -525,6 +526,11 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         "total_reward": env.total_reward, "n_steps": traj.n_steps,
         "termination": traj.termination_reason, "tests_green": traj.tests_green,
         "cost_usd": round(traj.total_main_cost_usd + traj.total_arm_cost_usd, 6),
+        "main_usage": normalize_usage(traj.total_main_usage),
+        "region_usage": normalize_usage(traj.total_arm_usage),
+        "total_usage": merge_usage(traj.total_main_usage, traj.total_arm_usage),
+        "main_cost_sources": list(traj.main_cost_sources),
+        "region_cost_sources": list(traj.arm_cost_sources),
         "replay": str(replay_path),
     }
     print(json.dumps(result, ensure_ascii=False, indent=2))

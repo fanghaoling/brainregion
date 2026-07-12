@@ -54,6 +54,8 @@ class TraceResult:
     parse_ok: bool = False
     error: str | None = None
     cost_usd: float = 0.0
+    usage: dict[str, Any] = field(default_factory=dict)
+    cost_source: str | None = None
     raw: str = ""
 
 
@@ -93,6 +95,8 @@ class BrainVerifyResult:
             "parse_ok": self.trace.parse_ok,
             "error": self.trace.error,
             "cost_usd": self.trace.cost_usd,
+            "usage": dict(self.trace.usage),
+            "cost_source": self.trace.cost_source,
             "notes": self.notes,
         }
 
@@ -189,6 +193,8 @@ async def forced_trace(
         parse_ok=verdict is not None,
         error=getattr(resp, "error", None),
         cost_usd=float(getattr(resp, "cost_usd", 0.0) or 0.0),
+        usage=dict(getattr(resp, "usage", {}) or {}),
+        cost_source=getattr(resp, "cost_source", None),
         raw=(resp.content or "")[:200],
     )
 

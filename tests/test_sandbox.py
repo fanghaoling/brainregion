@@ -115,15 +115,20 @@ def test_deepseek_thinking_kwargs():
 class MockBackend:
     """按脚本返 tool-call;不调模型。"""
 
-    def __init__(self, script, cost=0.001):
+    def __init__(self, script, cost=0.001, usage=None, cost_source=None):
         self.script = script
         self.i = 0
         self.cost = cost
+        self.usage = dict(usage or {})
+        self.cost_source = cost_source
 
     async def complete_messages(self, messages, **kw):
         content = self.script[min(self.i, len(self.script) - 1)]
         self.i += 1
-        return ModelResponse(model=kw.get("model", "mock"), content=content, usage={}, cost_usd=self.cost)
+        return ModelResponse(
+            model=kw.get("model", "mock"), content=content, usage=dict(self.usage),
+            cost_usd=self.cost, cost_source=self.cost_source,
+        )
 
 
 def _J(d):
@@ -257,6 +262,40 @@ def test_loop_solves_happy_path():
         assert traj.done and traj.n_steps == 4
         assert traj.termination_reason == "done"
         assert traj.steps[1].tool == "apply_text_patch"
+    finally:
+        cleanup_run_dir(run_dir)
+
+
+def test_loop_records_per_step_and_total_model_usage():
+    task, run_dir = _materialized("off_by_one")
+    usage = {
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "total_tokens": 120,
+        "prompt_tokens_details": {"cached_tokens": 30},
+        "completion_tokens_details": {"reasoning_tokens": 5},
+    }
+    try:
+        traj = asyncio.run(run_agent(
+            MockBackend(
+                [_J({"thought": "done", "done": True, "answer": "stop"})],
+                cost=0.002, usage=usage, cost_source="builtin",
+            ),
+            "mock", task, run_dir=run_dir, arm="none",
+        ))
+        out = traj.to_dict()
+        assert out["main_usage"] == {
+            "input_tokens": 100,
+            "output_tokens": 20,
+            "total_tokens": 120,
+            "cached_tokens": 30,
+            "reasoning_tokens": 5,
+        }
+        assert out["arm_usage"]["total_tokens"] == 0
+        assert out["total_usage"] == out["main_usage"]
+        assert out["main_cost_sources"] == ["builtin"]
+        assert out["steps"][0]["main_usage"] == out["main_usage"]
+        assert out["steps"][0]["main_cost_source"] == "builtin"
     finally:
         cleanup_run_dir(run_dir)
 
@@ -416,5 +455,8 @@ def test_run_sandbox_eval_end_to_end_mock():
     assert set(report["per_arm"]) == {"none", "brainregion"}
     assert report["per_arm"]["none"]["solve_rate"] == 1.0
     assert report["per_arm"]["brainregion"]["solve_rate"] == 1.0
+    assert "mean_total_input_tokens" in report["per_arm"]["none"]
+    assert "input_tokens_delta" in report["deltas"]
+    assert "input_tokens" in report["rows"][0]["_control_"]
     assert "decision" in report["gate"]
     assert len(report["trajectories"]) == 2

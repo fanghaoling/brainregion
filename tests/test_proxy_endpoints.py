@@ -463,6 +463,7 @@ def test_backend_emits_model_usage_events(monkeypatch):
     resp = asyncio.run(backend.complete(model="claude-opus-4-8", system="s", user="u", endpoint_id="r"))
 
     assert resp.cost_usd == 0.0042
+    assert resp.cost_source == "provider"
     assert [event[0] for event in emitted] == ["model.call_started", "model.call_finished"]
     payload = emitted[1][1]["payload"]
     assert payload["provider"] == "anthropic"
@@ -524,6 +525,7 @@ def test_backend_returns_estimated_cost_when_provider_reports_zero(monkeypatch):
 
     expected = (1_000 * (1.0 / 7.2) + 500 * (2.0 / 7.2)) / 1_000_000
     assert resp.cost_usd == expected
+    assert resp.cost_source == "builtin"
     payload = emitted[1][1]["payload"]
     assert payload["cost_usd"] == expected
     assert payload["cost_source"] == "builtin"

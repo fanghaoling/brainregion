@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from brainregion.eval import stats as eval_stats
+from brainregion.runtime import merge_usage, normalize_usage
 
 from .eval import evaluate_gate
 from .envs import GridWorld, build_env_system_prompt
@@ -526,6 +527,9 @@ async def _run_one_episode(
 
     positions = _positions_from_traj(traj, env)
     n_recall = sum(1 for s in traj.steps if s.tool == "recall_map")
+    main_usage = normalize_usage(traj.total_main_usage)
+    region_usage = normalize_usage(traj.total_arm_usage)
+    total_usage = merge_usage(main_usage, region_usage)
     return {
         "config": cfg.label, "arm": arm.name,
         "solved": bool(traj.tests_green),
@@ -544,6 +548,15 @@ async def _run_one_episode(
         "navigation_options": traj.navigation_options,
         "region_tool_calls": traj.region_tool_calls,
         "region_model_calls": traj.region_model_calls,
+        "main_usage": main_usage,
+        "region_usage": region_usage,
+        "total_usage": total_usage,
+        "main_input_tokens": main_usage["input_tokens"],
+        "region_input_tokens": region_usage["input_tokens"],
+        "input_tokens": total_usage["input_tokens"],
+        "output_tokens": total_usage["output_tokens"],
+        "cached_tokens": total_usage["cached_tokens"],
+        "reasoning_tokens": total_usage["reasoning_tokens"],
         "cost": round(traj.total_main_cost_usd + traj.total_arm_cost_usd, 6),
         "main_cost": round(traj.total_main_cost_usd, 6),
         "region_cost": round(traj.total_arm_cost_usd, 6),
@@ -588,6 +601,12 @@ def _agg_arm_runs(arm_runs: list[dict]) -> dict:
         "mean_automatic_region_activations": _mean("automatic_region_activations"),
         "mean_region_tool_calls": _mean("region_tool_calls"),
         "mean_region_model_calls": _mean("region_model_calls"),
+        "mean_main_input_tokens": _mean("main_input_tokens"),
+        "mean_region_input_tokens": _mean("region_input_tokens"),
+        "mean_input_tokens": _mean("input_tokens"),
+        "mean_output_tokens": _mean("output_tokens"),
+        "mean_cached_tokens": _mean("cached_tokens"),
+        "mean_reasoning_tokens": _mean("reasoning_tokens"),
         "mean_main_cost": _mean("main_cost"),
         "mean_region_cost": _mean("region_cost"),
         "mean_revisit_rate": _mean("revisit_rate"), "mean_coverage": _mean("coverage"),
