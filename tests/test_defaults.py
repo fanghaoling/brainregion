@@ -43,6 +43,25 @@ def test_brain_region_config_takes_precedence_over_legacy_explicit_path(tmp_path
     assert got["panel"]["source"] == "global_config"
 
 
+def test_brain_region_config_accepts_utf8_bom(tmp_path, monkeypatch):
+    brain_region_config = tmp_path / "brain_region.json"
+    brain_region_config.write_text(
+        json.dumps(
+            {
+                "panel": ["modelbridge_anthropic/claude-sonnet-4-6"],
+                "endpoints": {"modelbridge_anthropic": {"provider": "anthropic"}},
+            }
+        ),
+        encoding="utf-8-sig",
+    )
+    monkeypatch.setenv("BRAIN_REGION_CONFIG", str(brain_region_config))
+
+    got = defaults.get_all()
+
+    assert got["panel"]["value"] == ["modelbridge_anthropic/claude-sonnet-4-6"]
+    assert "modelbridge_anthropic" in got["endpoints"]["value"]
+
+
 def test_project_config_overrides_and_merges_global_config(tmp_path, monkeypatch):
     global_config = tmp_path / "global.json"
     _write_json(

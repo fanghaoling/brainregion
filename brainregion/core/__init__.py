@@ -23,6 +23,7 @@ from .region_reporting import (
     RegionCoordinationBoard,
     RegionReport,
 )
+from .region_expert import RegionExpertEngine, RegionExpertResult
 from .document import DocumentType, ReviewDocument
 from .engine import ReviewEngine
 from .pipeline import Pipeline, PipelineContext, Stage
@@ -46,6 +47,8 @@ __all__ = [
     "RegionContextReceipt",
     "RegionCoordinationBoard",
     "RegionReport",
+    "RegionExpertEngine",
+    "RegionExpertResult",
     "WorkspaceView",
     "estimate_context_tokens",
     "load_activation_context",

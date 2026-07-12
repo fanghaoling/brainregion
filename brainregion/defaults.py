@@ -120,7 +120,7 @@ def _load_json_config(path: Path) -> dict[str, Any]:
     if not p.exists():
         return {}
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
+        data = json.loads(p.read_text(encoding="utf-8-sig"))
     except Exception as exc:  # noqa: BLE001
         logger.warning("Ignoring invalid BrainRegion config %s: %s", p, exc)
         return {}

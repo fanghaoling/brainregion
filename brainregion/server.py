@@ -49,6 +49,7 @@ from .core.consult import ConsultEngine, ConsultRequest  # noqa: E402
 from .core.consultants import CONSULTANTS_DIR, list_consultants as _list_consultant_files  # noqa: E402
 from .core.engine import ReviewEngine  # noqa: E402
 from .core.planner import PlanRequest, PlannerEngine  # noqa: E402
+from .core.region_expert import RegionExpertEngine as _RegionExpertEngine  # noqa: E402
 from .core.region_reporting import (  # noqa: E402
     RegionContextReceipt as _RegionContextReceipt,
     RegionCoordinationBoard as _RegionCoordinationBoard,
@@ -66,6 +67,7 @@ from .core.reviewers.loader import list_reviewers as _list_reviewer_files  # noq
 from .core.workflow import suggest_workflow as _suggest_workflow  # noqa: E402
 from .core.wake import wake_gate as _wake_gate  # noqa: E402
 from .core.stages import CORE_REVIEWERS_DIR, build_default_pipeline  # noqa: E402
+from .core.stages.review import select_jobs_within_budget as _select_jobs_within_budget  # noqa: E402
 from .core import ReviewDocument  # noqa: E402
 from .knowledge import YamlKnowledgeProvider  # noqa: E402
 from .core.context import ContextQuery as _ContextQuery  # noqa: E402
@@ -874,6 +876,13 @@ def _build_planner_engine(dd: dict) -> PlannerEngine:
     registry = _resolve_endpoints(dd.get("endpoints") or {})
     backend = LiteLLMBackend(timeout=float(dd.get("timeout", 90)), endpoint_registry=registry)
     return PlannerEngine(backend=backend)
+
+
+def _build_region_expert_engine(dd: dict, endpoint_registry: dict) -> _RegionExpertEngine:
+    backend = LiteLLMBackend(
+        timeout=float(dd.get("timeout", 90)), endpoint_registry=endpoint_registry
+    )
+    return _RegionExpertEngine(backend=backend)
 
 
 def _resolve_consultants(consultants: list[str] | None, mode: str | None, defaults: dict) -> tuple[list[str], str | None]:
@@ -1863,6 +1872,94 @@ def workspace_context(
         "operation must be one of: read, inspect, advance, clear, "
         "publish_report, status, inbox"
     )
+
+
+@mcp.tool()
+async def run_region_expert(
+    task_id: str,
+    region: str,
+    task: str,
+    model: str,
+    max_context_tokens: int = 2000,
+    max_blocks: int = 12,
+    max_tokens: int = 1200,
+    temperature: float = 0.1,
+    effort: str | None = None,
+    max_cost_usd: float | None = None,
+) -> dict:
+    """Run one model as a focused region expert over its private workspace view.
+
+    The model reference uses the same endpoint/model routing as consult and review.
+    Only a validated RegionReport and escalation decision return to the caller;
+    private ContextBlocks and raw model output never return.
+    """
+    dd = _defaults_mod.apply(effort=effort)
+    endpoints_cfg = dd.get("endpoints") or {}
+    entry = _normalize_one(model, set(endpoints_cfg), endpoints_cfg)
+    endpoint_id = entry.get("endpoint_id")
+    selected_endpoints = (
+        {endpoint_id: endpoints_cfg[endpoint_id]} if endpoint_id is not None else {}
+    )
+    endpoint_registry = _resolve_endpoints(selected_endpoints)
+    budget = {
+        "max_usd": max_cost_usd,
+        "estimated_usd": None,
+        "exhausted": False,
+    }
+    if max_cost_usd is not None:
+        if isinstance(max_cost_usd, bool) or float(max_cost_usd) < 0:
+            raise ValueError("max_cost_usd must be a non-negative number")
+        estimate_job = {
+            "model": entry["model"],
+            "system": "region expert structured report",
+            "user": str(task or "") + ("x" * max(0, int(max_context_tokens)) * 4),
+            "max_tokens": max_tokens,
+        }
+        selected, estimated, exhausted = _select_jobs_within_budget(
+            [estimate_job], float(max_cost_usd)
+        )
+        budget.update({"estimated_usd": estimated, "exhausted": exhausted})
+        if not selected:
+            return {
+                "ok": False,
+                "task_id": task_id,
+                "region": region,
+                "model": entry["model"],
+                "endpoint_id": entry.get("endpoint_id"),
+                "published_report": None,
+                "context": {"blocks_used": 0, "estimated_tokens": 0, "private_context_returned": False},
+                "usage": {},
+                "cost_usd": None,
+                "cost_source": None,
+                "parse_ok": False,
+                "error": "budget_exceeded: expert model call skipped",
+                "model_called": False,
+                "budget": budget,
+                "routing": {"requested_model": model, "resolved_model": entry["model"]},
+            }
+    engine = _build_region_expert_engine(dd, endpoint_registry)
+    result = await engine.run(
+        workspace=_cognitive_workspace,
+        coordination=_region_coordination_board,
+        task_id=task_id,
+        region=region,
+        task=task,
+        model=entry["model"],
+        endpoint_id=entry.get("endpoint_id"),
+        max_context_tokens=max_context_tokens,
+        max_blocks=max_blocks,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        effort=dd.get("effort"),
+    )
+    output = result.to_dict()
+    output["budget"] = budget
+    output["routing"] = {
+        "requested_model": model,
+        "resolved_model": entry["model"],
+        "endpoint_id": entry.get("endpoint_id"),
+    }
+    return output
 
 
 @mcp.tool()

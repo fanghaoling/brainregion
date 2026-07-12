@@ -292,6 +292,28 @@ architecture/user/cross-region scope, high risk, irreversible actions, repeated 
 `notify_main`. `status` exposes compact region state, while `inbox` contains only `notify_main` reports. Neither view
 contains private `ContextBlock` contents or model chain of thought.
 
+### Expert Region Execution
+
+`run_region_expert` reads only the selected region's private workspace view, invokes one configured model, validates
+its structured `RegionReport`, and publishes it through the deterministic escalation policy:
+
+    run_region_expert(
+        task_id="parser-debug",
+        region="debugging",
+        task="Determine the next grounded parser debugging action.",
+        model="modelbridge_anthropic/claude-sonnet-4-6",
+        max_context_tokens=2000,
+        max_cost_usd=0.05,
+    )
+
+The expert prompt fences workspace blocks as untrusted data and never requests chain of thought. Runtime validation
+rejects evidence references not present in the private view, decision-changing memory without an evidence reference,
+and long verbatim copies of private context. The caller receives only the validated report, escalation decision,
+usage/cost telemetry, routing metadata, and context counts; raw model output and private blocks are omitted.
+
+If the region has no private context, the runtime publishes `request_context` without calling a model. A conservative
+single-job preflight skips the call when `max_cost_usd` cannot cover the configured model and output cap.
+
 ## Workflow Suggestions
 
 `suggest_workflow` builds on `route_regions` and returns explicit next tool-call suggestions for the main assistant or
