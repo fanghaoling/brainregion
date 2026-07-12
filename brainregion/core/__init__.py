@@ -16,6 +16,7 @@ from .context_loader import (
     estimate_context_tokens,
     load_activation_context,
 )
+from .cognitive_workspace import CognitiveWorkspace, WorkspaceDelivery, WorkspaceView
 from .document import DocumentType, ReviewDocument
 from .engine import ReviewEngine
 from .pipeline import Pipeline, PipelineContext, Stage
@@ -33,6 +34,9 @@ __all__ = [
     "plan_activation",
     "ActivatedContext",
     "ContextLoadRecord",
+    "CognitiveWorkspace",
+    "WorkspaceDelivery",
+    "WorkspaceView",
     "estimate_context_tokens",
     "load_activation_context",
     "DocumentType",

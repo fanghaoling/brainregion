@@ -43,7 +43,7 @@ def _truncate_to_tokens(text: str, max_tokens: int) -> str:
     return text[:lo].rstrip()
 
 
-def _fit_blocks(
+def fit_context_blocks(
     blocks: list[ContextBlock],
     *,
     max_tokens: int,
@@ -87,7 +87,7 @@ def _fit_blocks(
     return fitted, used, truncated
 
 
-def _block_to_dict(block: ContextBlock) -> dict[str, Any]:
+def context_block_to_dict(block: ContextBlock) -> dict[str, Any]:
     return {
         "source": block.source,
         "title": block.title,
@@ -137,7 +137,7 @@ class ActivatedContext:
     def to_dict(self) -> dict[str, Any]:
         return {
             "activation": self.activation.to_dict(),
-            "context_blocks": [_block_to_dict(block) for block in self.blocks],
+            "context_blocks": [context_block_to_dict(block) for block in self.blocks],
             "loads": [load.to_dict() for load in self.loads],
             "trace": dict(self.trace),
         }
@@ -214,7 +214,7 @@ def load_activation_context(
             continue
 
         providers_called.append(result.provider)
-        fitted, used, truncated = _fit_blocks(
+        fitted, used, truncated = fit_context_blocks(
             result.blocks,
             max_tokens=request.max_tokens,
             max_blocks=remaining_blocks,
@@ -260,6 +260,8 @@ __all__ = [
     "ActivatedContext",
     "ContextLoadRecord",
     "ContextLoadStatus",
+    "context_block_to_dict",
+    "fit_context_blocks",
     "estimate_context_tokens",
     "load_activation_context",
 ]

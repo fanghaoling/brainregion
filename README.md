@@ -236,6 +236,31 @@ Provider failures are isolated, and both block count and estimated tokens are bo
 visible in the activation trace but are not executed by this call. Retrieval does not call a model, write memory, or
 retain the returned context in the runtime.
 
+### Cognitive Workspace Delivery
+
+`stage_region_context` loads activated provider context into a process-local task workspace and returns only a
+delivery receipt. Region-private block contents are not included in the staging result:
+
+    stage_region_context(
+        task_id="parser-debug",
+        query="Repeated parser failures after several repair attempts",
+        events=["repeated_attempt_failed"],
+        audience="region",
+        target_region="debugging",
+        ttl_steps=3,
+    )
+
+`workspace_context` provides four lifecycle operations through one MCP tool:
+
+- `read`: main consumers see `main + shared`; region consumers see `their region + shared`.
+- `inspect`: returns delivery metadata and evidence references without context contents.
+- `advance`: decrements explicit task-step TTL and unloads expired entries.
+- `clear`: unloads every workspace entry for one task.
+
+The workspace stores evidence and structured task context, not model chain of thought. It is an architectural routing
+boundary rather than an authorization boundary; process restart also clears it. Read operations apply a fresh block
+and estimated-token budget before returning context.
+
 ## Workflow Suggestions
 
 `suggest_workflow` builds on `route_regions` and returns explicit next tool-call suggestions for the main assistant or

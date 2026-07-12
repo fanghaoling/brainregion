@@ -43,6 +43,7 @@ from . import output, prior as prior_mod, reviews_db  # noqa: E402
 from .adapters.generic import GenericAdapter  # noqa: E402
 from .adapters.unity import UnityAdapter  # noqa: E402
 from .core.activation import ActivationSignal as _ActivationSignal  # noqa: E402
+from .core.cognitive_workspace import CognitiveWorkspace as _CognitiveWorkspace  # noqa: E402
 from .core.context_loader import load_activation_context as _load_activation_context  # noqa: E402
 from .core.consult import ConsultEngine, ConsultRequest  # noqa: E402
 from .core.consultants import CONSULTANTS_DIR, list_consultants as _list_consultant_files  # noqa: E402
@@ -1587,6 +1588,7 @@ def _normalize_experience_region(region: str | None) -> str:
 # ── Phase 4:Skill/Region Manifest + Registry(三级结构地基;list_skills = discovery surface)──
 # lazy bootstrap(首次访问建):ProviderRegistry 注册 MemoryProvider → load skill YAML(校验 provider ref)
 # → SkillRegistry。declares skills 但**不接 production routing**(status=experimental;与硬编码 map 共存)。
+_cognitive_workspace = _CognitiveWorkspace()
 _skill_registry_singleton: _SkillRegistry | None = None
 
 
@@ -1724,6 +1726,114 @@ def load_region_context(
         top_k=top_k,
         max_blocks=max_blocks,
     ).to_dict()
+
+
+@mcp.tool()
+def stage_region_context(
+    task_id: str,
+    query: str,
+    audience: str = "region",
+    target_region: str = "",
+    ttl_steps: int = 3,
+    task_intents: list[str] | None = None,
+    events: list[str] | None = None,
+    target_apps: list[str] | None = None,
+    running_apps: list[str] | None = None,
+    available_tools: list[str] | None = None,
+    available_capabilities: list[str] | None = None,
+    cooldowns: dict[str, int] | None = None,
+    attributes: dict | None = None,
+    regions: list[str] | None = None,
+    scope_regions: list[str] | None = None,
+    top_k: int = 5,
+    max_blocks: int = 12,
+    max_regions: int = 3,
+    max_context_tokens: int = 4000,
+) -> dict:
+    """Load activated provider context into a task workspace without returning its contents.
+
+    This is an architectural delivery boundary, not an authorization boundary.
+    Region-private blocks remain hidden from main views, while the receipt exposes
+    only routing metadata, evidence references, budgets, and TTL.
+    """
+    signal = _ActivationSignal.from_dict({
+        "task_intents": task_intents or [],
+        "events": events or [],
+        "target_apps": target_apps or [],
+        "running_apps": running_apps or [],
+        "available_tools": available_tools or [],
+        "available_capabilities": available_capabilities or [],
+        "cooldowns": cooldowns or {},
+        "attributes": attributes or {},
+    })
+    registry = _skill_registry()
+    activation = registry.plan_activation(
+        signal,
+        regions=regions,
+        max_regions=max_regions,
+        max_context_tokens=max_context_tokens,
+    )
+    _ensure_default_providers()
+    activated = _load_activation_context(
+        activation,
+        query_text=query,
+        skill_registry=registry,
+        resolvers=_setup_skill_resolvers(provider_registry=_default_provider_registry),
+        scope_regions=frozenset(scope_regions) if scope_regions is not None else None,
+        top_k=top_k,
+        max_blocks=max_blocks,
+    )
+    delivery = _cognitive_workspace.stage(
+        activated,
+        task_id=task_id,
+        audience=audience,
+        target_region=target_region,
+        ttl_steps=ttl_steps,
+    )
+    return {
+        "task_id": task_id,
+        "activation": activation.to_dict(),
+        "loads": [load.to_dict() for load in activated.loads],
+        "delivery": delivery.to_dict(),
+        "trace": {
+            **activated.trace,
+            "strategy": "activation_context_stage_v1",
+            "context_blocks_returned": 0,
+        },
+    }
+
+
+@mcp.tool()
+def workspace_context(
+    task_id: str,
+    operation: str = "read",
+    consumer: str = "main",
+    region: str = "",
+    steps: int = 1,
+    max_context_tokens: int = 2000,
+    max_blocks: int = 12,
+) -> dict:
+    """Read or manage task-scoped cognitive workspace context.
+
+    operation is read, inspect, advance, or clear. Read applies audience
+    filtering and a fresh context budget. Inspect never returns block content.
+    """
+    operation = str(operation or "").strip().casefold()
+    if operation == "read":
+        return _cognitive_workspace.read(
+            task_id,
+            consumer=consumer,
+            region=region,
+            max_context_tokens=max_context_tokens,
+            max_blocks=max_blocks,
+        ).to_dict()
+    if operation == "inspect":
+        return _cognitive_workspace.inspect(task_id)
+    if operation == "advance":
+        return _cognitive_workspace.advance(task_id, steps=steps)
+    if operation == "clear":
+        return _cognitive_workspace.clear(task_id)
+    raise ValueError("operation must be one of: read, inspect, advance, clear")
 
 
 @mcp.tool()
