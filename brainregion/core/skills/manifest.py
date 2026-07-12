@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
+from brainregion.core.activation import ActivationContract
+
 SkillKind = Literal["provider", "consultant", "tool", "role"]
 SkillStatus = Literal["experimental", "beta", "stable"]
 
@@ -34,6 +36,13 @@ class SkillManifest:
     ref: str = ""                                     # body 引用(provider_name/consultant_id/tool_name);to_public_dict 屏蔽
     status: SkillStatus = "experimental"              # lifecycle(experimental=manifest-only 未接 production routing)
     metadata: dict[str, Any] = field(default_factory=dict)   # 开放扩展(防 breaking change)
+
+    def activation_contract(self) -> ActivationContract | None:
+        """Parse optional typed activation metadata; None keeps legacy manifests inert."""
+        raw = self.metadata.get("activation")
+        if raw is None:
+            return None
+        return ActivationContract.from_dict(skill_id=self.id, region=self.region, data=raw)
 
     def to_public_dict(self) -> dict[str, Any]:
         """sanitized:屏蔽 ``ref``(body 内部引用)。MCP 输出 + manifests_for_router 共用此 serializer。"""

@@ -74,7 +74,7 @@ def _manifest_from_dict(
     extra = set(data.keys()) - _KNOWN_FIELDS
     if extra:
         _err(f"unknown field(s): {sorted(extra)}")
-    return SkillManifest(
+    manifest = SkillManifest(
         id=sid,
         name=str(data.get("name") or sid).strip(),
         region=region,
@@ -86,6 +86,8 @@ def _manifest_from_dict(
         status=status,                                               # type: ignore[arg-type]
         metadata=dict(data.get("metadata") or {}),
     )
+    manifest.activation_contract()  # optional contract validation is fail-fast at load time
+    return manifest
 
 
 def load_skill(

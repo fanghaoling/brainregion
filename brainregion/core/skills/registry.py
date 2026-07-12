@@ -5,6 +5,13 @@ startup 从 YAML 建(``load_skills``)+ programmatic ``register``(镜像 eval ``r
 """
 from __future__ import annotations
 
+from brainregion.core.activation import (
+    ActivationContract,
+    ActivationPlan,
+    ActivationSignal,
+    plan_activation,
+)
+
 from .manifest import SkillManifest
 
 
@@ -37,6 +44,34 @@ class SkillRegistry:
         wanted = set(regions) if regions is not None else None
         ms = [m for m in self._by_id.values() if wanted is None or m.region in wanted]
         return [m.to_public_dict() for m in ms]
+
+    def activation_contracts(self, regions: list[str] | None = None) -> list[ActivationContract]:
+        """Return typed contracts from this registry; manifests without one stay asleep."""
+        wanted = set(regions) if regions is not None else None
+        out = []
+        for manifest in self._by_id.values():
+            if wanted is not None and manifest.region not in wanted:
+                continue
+            contract = manifest.activation_contract()
+            if contract is not None:
+                out.append(contract)
+        return out
+
+    def plan_activation(
+        self,
+        signal: ActivationSignal,
+        *,
+        regions: list[str] | None = None,
+        max_regions: int = 3,
+        max_context_tokens: int = 4000,
+    ) -> ActivationPlan:
+        """Plan explicit activation over this registry without introducing another registry."""
+        return plan_activation(
+            self.activation_contracts(regions),
+            signal,
+            max_regions=max_regions,
+            max_context_tokens=max_context_tokens,
+        )
 
     def __len__(self) -> int:
         return len(self._by_id)

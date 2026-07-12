@@ -9,4 +9,22 @@ tags: [bug, crash, error, exception, stacktrace, race, deadlock, nullref, fix, d
 version: {}
 ref: ""
 status: experimental
-metadata: {}
+metadata:
+  activation:
+    capabilities: [diagnose_bug, analyze_failure]
+    wake_when:
+      task_intents: [debug, diagnose_failure, fix_bug]
+      events: [test_failed, exception_raised, repeated_attempt_failed]
+    do_not_wake_when:
+      task_intents: [planning_only, explain_without_debugging]
+    context_selectors:
+      - failing_tests
+      - recent_errors
+      - attempted_fixes
+      - relevant_symbols
+    max_context_tokens: 1800
+    activation_mode: advisory
+    cost_tier: medium
+    min_signal_groups: 1
+    confidence_threshold: 0.3
+    cooldown_steps: 1

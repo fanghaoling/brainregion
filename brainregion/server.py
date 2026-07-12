@@ -42,6 +42,7 @@ from . import defaults as _defaults_mod  # noqa: E402
 from . import output, prior as prior_mod, reviews_db  # noqa: E402
 from .adapters.generic import GenericAdapter  # noqa: E402
 from .adapters.unity import UnityAdapter  # noqa: E402
+from .core.activation import ActivationSignal as _ActivationSignal  # noqa: E402
 from .core.consult import ConsultEngine, ConsultRequest  # noqa: E402
 from .core.consultants import CONSULTANTS_DIR, list_consultants as _list_consultant_files  # noqa: E402
 from .core.engine import ReviewEngine  # noqa: E402
@@ -1628,6 +1629,45 @@ def list_skills(region: str | None = None) -> dict:
     reg = _skill_registry()
     manifests = reg.by_region(region) if region else reg.all_manifests()
     return {"skills": [m.to_public_dict() for m in manifests], "count": len(manifests)}
+
+
+@mcp.tool()
+def plan_region_activation(
+    task_intents: list[str] | None = None,
+    events: list[str] | None = None,
+    target_apps: list[str] | None = None,
+    running_apps: list[str] | None = None,
+    available_tools: list[str] | None = None,
+    available_capabilities: list[str] | None = None,
+    cooldowns: dict[str, int] | None = None,
+    attributes: dict | None = None,
+    regions: list[str] | None = None,
+    max_regions: int = 3,
+    max_context_tokens: int = 4000,
+) -> dict:
+    """Plan structured Skill/Region wakes and bounded context requests.
+
+    This hard gate is read-only and deterministic. It does not call models,
+    retrieve memory, or execute tools. Ambiguous candidates return defer for
+    a future cheap semantic gate; missing prerequisites and deny conditions
+    always remain blocked.
+    """
+    signal = _ActivationSignal.from_dict({
+        "task_intents": task_intents or [],
+        "events": events or [],
+        "target_apps": target_apps or [],
+        "running_apps": running_apps or [],
+        "available_tools": available_tools or [],
+        "available_capabilities": available_capabilities or [],
+        "cooldowns": cooldowns or {},
+        "attributes": attributes or {},
+    })
+    return _skill_registry().plan_activation(
+        signal,
+        regions=regions,
+        max_regions=max_regions,
+        max_context_tokens=max_context_tokens,
+    ).to_dict()
 
 
 @mcp.tool()

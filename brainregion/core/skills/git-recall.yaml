@@ -10,4 +10,22 @@ tags: [git, history, commits, changes, diff, vcs, recent]
 version: {}
 ref: git
 status: experimental
-metadata: {}
+metadata:
+  activation:
+    capabilities: [recall_history, trace_regression]
+    wake_when:
+      task_intents: [trace_history, inspect_recent_change, diagnose_regression]
+      events: [regression_suspected, recent_change_questioned]
+      required_tools: [git]
+    do_not_wake_when:
+      task_intents: [ignore_history]
+    context_selectors:
+      - matching_commits
+      - changed_files
+      - decision_history
+    max_context_tokens: 1200
+    activation_mode: context
+    cost_tier: free
+    min_signal_groups: 1
+    confidence_threshold: 0.3
+    cooldown_steps: 2
