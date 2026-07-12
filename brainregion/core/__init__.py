@@ -10,6 +10,12 @@ from .activation import (
     evaluate_activation,
     plan_activation,
 )
+from .context_loader import (
+    ActivatedContext,
+    ContextLoadRecord,
+    estimate_context_tokens,
+    load_activation_context,
+)
 from .document import DocumentType, ReviewDocument
 from .engine import ReviewEngine
 from .pipeline import Pipeline, PipelineContext, Stage
@@ -25,6 +31,10 @@ __all__ = [
     "RegionWakeDecision",
     "evaluate_activation",
     "plan_activation",
+    "ActivatedContext",
+    "ContextLoadRecord",
+    "estimate_context_tokens",
+    "load_activation_context",
     "DocumentType",
     "ReviewDocument",
     "ReviewEngine",

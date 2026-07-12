@@ -35,7 +35,7 @@ without changing the core pipeline.
 - Inspect model routing with `list_model_routes` so bare model names and endpoint-backed models are not confused.
 - Attach model profile metadata such as `cheap`, `fast`, `flagship`, `sleep`, or `awake` for preflight visibility.
 - Recommend a model panel with `suggest_panel` from profile tags and cost/speed/quality scores without calling models.
-- Plan auditable Skill/Region wakes with plan_region_activation, including hard prerequisites, deny conditions, and bounded context requests.
+- Plan auditable Skill/Region wakes with `plan_region_activation`, including hard prerequisites, deny conditions, and bounded context requests.
 - Merge defaults from builtin values, global config, project config, environment variables, and explicit call arguments.
 
 ## Architecture
@@ -221,6 +221,20 @@ budgets. Manifests without a contract remain inert.
 The result records every Skill as wake, skip, or defer. A wake includes a bounded context_request; a skip includes
 the failed prerequisite or deny reason. Defer is reserved for a future cheap semantic gate. The hard gate itself never
 calls a model, retrieves memory, or executes a tool.
+
+`load_region_context` consumes the same hard-gate plan and materializes only activated provider Skills into
+short-lived `ContextBlock` values:
+
+    load_region_context(
+        query="Why did the parser keep failing after several repair attempts?",
+        events=["repeated_attempt_failed"],
+        scope_regions=["debugging"],
+        max_context_tokens=2000,
+    )
+
+Provider failures are isolated, and both block count and estimated tokens are bounded. Advisory/action Skills remain
+visible in the activation trace but are not executed by this call. Retrieval does not call a model, write memory, or
+retain the returned context in the runtime.
 
 ## Workflow Suggestions
 

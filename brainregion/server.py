@@ -43,6 +43,7 @@ from . import output, prior as prior_mod, reviews_db  # noqa: E402
 from .adapters.generic import GenericAdapter  # noqa: E402
 from .adapters.unity import UnityAdapter  # noqa: E402
 from .core.activation import ActivationSignal as _ActivationSignal  # noqa: E402
+from .core.context_loader import load_activation_context as _load_activation_context  # noqa: E402
 from .core.consult import ConsultEngine, ConsultRequest  # noqa: E402
 from .core.consultants import CONSULTANTS_DIR, list_consultants as _list_consultant_files  # noqa: E402
 from .core.engine import ReviewEngine  # noqa: E402
@@ -53,6 +54,7 @@ from .core.skills import (  # noqa: E402
     SKILLS_DIR as _SKILLS_DIR,
     SkillRegistry as _SkillRegistry,
     load_skills as _load_skills,
+    setup_resolvers as _setup_skill_resolvers,
 )
 from .core.report import CanonicalFinding, Finding, ReviewReport  # noqa: E402
 from .core.reviewers.loader import list_reviewers as _list_reviewer_files  # noqa: E402
@@ -1667,6 +1669,60 @@ def plan_region_activation(
         regions=regions,
         max_regions=max_regions,
         max_context_tokens=max_context_tokens,
+    ).to_dict()
+
+
+@mcp.tool()
+def load_region_context(
+    query: str,
+    task_intents: list[str] | None = None,
+    events: list[str] | None = None,
+    target_apps: list[str] | None = None,
+    running_apps: list[str] | None = None,
+    available_tools: list[str] | None = None,
+    available_capabilities: list[str] | None = None,
+    cooldowns: dict[str, int] | None = None,
+    attributes: dict | None = None,
+    regions: list[str] | None = None,
+    scope_regions: list[str] | None = None,
+    top_k: int = 5,
+    max_blocks: int = 12,
+    max_regions: int = 3,
+    max_context_tokens: int = 4000,
+) -> dict:
+    """Wake eligible provider Skills and load bounded, short-lived context.
+
+    The operation retrieves existing ContextBlocks but never calls a model,
+    writes memory, executes action Skills, or retains context in the runtime.
+    Advisory/action activations remain visible in the returned plan and are
+    skipped by this provider-only lifecycle step.
+    """
+    signal = _ActivationSignal.from_dict({
+        "task_intents": task_intents or [],
+        "events": events or [],
+        "target_apps": target_apps or [],
+        "running_apps": running_apps or [],
+        "available_tools": available_tools or [],
+        "available_capabilities": available_capabilities or [],
+        "cooldowns": cooldowns or {},
+        "attributes": attributes or {},
+    })
+    registry = _skill_registry()
+    activation = registry.plan_activation(
+        signal,
+        regions=regions,
+        max_regions=max_regions,
+        max_context_tokens=max_context_tokens,
+    )
+    _ensure_default_providers()
+    return _load_activation_context(
+        activation,
+        query_text=query,
+        skill_registry=registry,
+        resolvers=_setup_skill_resolvers(provider_registry=_default_provider_registry),
+        scope_regions=frozenset(scope_regions) if scope_regions is not None else None,
+        top_k=top_k,
+        max_blocks=max_blocks,
     ).to_dict()
 
 

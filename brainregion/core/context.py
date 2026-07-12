@@ -47,6 +47,7 @@ class ContextQuery:
     region: str | None = None
     regions: frozenset[str] | None = None  # Phase 7:多 region scope(consult woken 集);默认 None 向后兼容
     top_k: int = 5
+    selectors: tuple[str, ...] = ()  # 激活契约声明的最小上下文类型；不支持的 provider 可安全忽略
 
 
 @dataclass

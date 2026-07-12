@@ -175,7 +175,9 @@ def test_skill_registry_discovers_contracts_without_second_registry():
         registry.register(manifest)
 
     contracts = registry.activation_contracts()
-    assert {contract.skill_id for contract in contracts} == {"debugger", "git-recall"}
+    assert {contract.skill_id for contract in contracts} == {
+        "debugger", "git-recall", "memory-recall"
+    }
 
     plan = registry.plan_activation(
         ActivationSignal.from_dict({"events": ["test_failed"]}),

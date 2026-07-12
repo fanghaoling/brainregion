@@ -10,4 +10,23 @@ tags: [memory, experience, recall, history, decisions]
 version: {}
 ref: memory
 status: experimental
-metadata: {}
+metadata:
+  activation:
+    capabilities: [recall_project_understanding, recall_decisions]
+    wake_when:
+      task_intents: [recall_project_context, trace_decision, use_project_memory]
+      events: [repeated_attempt_failed, regression_suspected, context_missing, decision_revisited]
+    do_not_wake_when:
+      task_intents: [ignore_memory, stateless_request]
+    context_selectors:
+      - project_understanding
+      - decisions
+      - constraints
+      - failure_lessons
+      - evidence_anchors
+    max_context_tokens: 1600
+    activation_mode: context
+    cost_tier: free
+    min_signal_groups: 1
+    confidence_threshold: 0.3
+    cooldown_steps: 1
