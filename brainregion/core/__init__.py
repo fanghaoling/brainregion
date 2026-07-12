@@ -17,6 +17,12 @@ from .context_loader import (
     load_activation_context,
 )
 from .cognitive_workspace import CognitiveWorkspace, WorkspaceDelivery, WorkspaceView
+from .region_reporting import (
+    EscalationPolicy,
+    RegionContextReceipt,
+    RegionCoordinationBoard,
+    RegionReport,
+)
 from .document import DocumentType, ReviewDocument
 from .engine import ReviewEngine
 from .pipeline import Pipeline, PipelineContext, Stage
@@ -36,6 +42,10 @@ __all__ = [
     "ContextLoadRecord",
     "CognitiveWorkspace",
     "WorkspaceDelivery",
+    "EscalationPolicy",
+    "RegionContextReceipt",
+    "RegionCoordinationBoard",
+    "RegionReport",
     "WorkspaceView",
     "estimate_context_tokens",
     "load_activation_context",

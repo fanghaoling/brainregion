@@ -49,6 +49,10 @@ from .core.consult import ConsultEngine, ConsultRequest  # noqa: E402
 from .core.consultants import CONSULTANTS_DIR, list_consultants as _list_consultant_files  # noqa: E402
 from .core.engine import ReviewEngine  # noqa: E402
 from .core.planner import PlanRequest, PlannerEngine  # noqa: E402
+from .core.region_reporting import (  # noqa: E402
+    RegionContextReceipt as _RegionContextReceipt,
+    RegionCoordinationBoard as _RegionCoordinationBoard,
+)
 from .core.regions import REGIONS_DIR, load_regions as _load_regions  # noqa: E402
 from .core.regions import route_regions as _route_regions  # noqa: E402
 from .core.skills import (  # noqa: E402
@@ -1585,10 +1589,13 @@ def _normalize_experience_region(region: str | None) -> str:
     raise ValueError(f"unknown experience region: {text!r}; available: {choices}")
 
 
+# 进程内短生命周期认知状态：重启清空，不写 Experience Memory。
+_cognitive_workspace = _CognitiveWorkspace()
+_region_coordination_board = _RegionCoordinationBoard()
+
 # ── Phase 4:Skill/Region Manifest + Registry(三级结构地基;list_skills = discovery surface)──
 # lazy bootstrap(首次访问建):ProviderRegistry 注册 MemoryProvider → load skill YAML(校验 provider ref)
 # → SkillRegistry。declares skills 但**不接 production routing**(status=experimental;与硬编码 map 共存)。
-_cognitive_workspace = _CognitiveWorkspace()
 _skill_registry_singleton: _SkillRegistry | None = None
 
 
@@ -1790,7 +1797,17 @@ def stage_region_context(
         target_region=target_region,
         ttl_steps=ttl_steps,
     )
+    recipient = target_region if str(audience).strip().casefold() == "region" else audience
+    evidence_refs = tuple((delivery.entry or {}).get("evidence_refs", ()))
+    context_receipt = _RegionContextReceipt.from_activated(
+        activated,
+        task_id=task_id,
+        region=recipient,
+        evidence_refs=evidence_refs,
+    )
+    _region_coordination_board.record_receipt(context_receipt)
     return {
+        "context_receipt": context_receipt.to_dict(),
         "task_id": task_id,
         "activation": activation.to_dict(),
         "loads": [load.to_dict() for load in activated.loads],
@@ -1808,6 +1825,7 @@ def workspace_context(
     task_id: str,
     operation: str = "read",
     consumer: str = "main",
+    report: dict | None = None,
     region: str = "",
     steps: int = 1,
     max_context_tokens: int = 2000,
@@ -1815,8 +1833,8 @@ def workspace_context(
 ) -> dict:
     """Read or manage task-scoped cognitive workspace context.
 
-    operation is read, inspect, advance, or clear. Read applies audience
-    filtering and a fresh context budget. Inspect never returns block content.
+    operation is read, inspect, advance, clear, publish_report, status, or inbox.
+    Read applies audience filtering; status/inbox never include private ContextBlocks.
     """
     operation = str(operation or "").strip().casefold()
     if operation == "read":
@@ -1832,8 +1850,19 @@ def workspace_context(
     if operation == "advance":
         return _cognitive_workspace.advance(task_id, steps=steps)
     if operation == "clear":
-        return _cognitive_workspace.clear(task_id)
-    raise ValueError("operation must be one of: read, inspect, advance, clear")
+        context_result = _cognitive_workspace.clear(task_id)
+        coordination_result = _region_coordination_board.clear(task_id)
+        return {**context_result, **coordination_result}
+    if operation == "publish_report":
+        return _region_coordination_board.publish(task_id, report or {})
+    if operation == "status":
+        return _region_coordination_board.status(task_id)
+    if operation == "inbox":
+        return _region_coordination_board.inbox(task_id)
+    raise ValueError(
+        "operation must be one of: read, inspect, advance, clear, "
+        "publish_report, status, inbox"
+    )
 
 
 @mcp.tool()

@@ -261,6 +261,37 @@ The workspace stores evidence and structured task context, not model chain of th
 boundary rather than an authorization boundary; process restart also clears it. Read operations apply a fresh block
 and estimated-token budget before returning context.
 
+### Region Status and Escalation
+
+A successful stage now records a `RegionContextReceipt` containing observable retrieval state: provider outcomes,
+block/token counts, evidence references, removed stale candidates, conflicts, and selector coverage. Coverage remains
+`unverified` until a provider explicitly confirms selectors; retrieval success is not treated as proof that a model
+understands the task.
+
+Experts publish structured reports through the existing workspace tool:
+
+    workspace_context(
+        task_id="parser-debug",
+        operation="publish_report",
+        report={
+            "region": "debugging",
+            "state": "needs_decision",
+            "summary": "Historical constraints change the parser design.",
+            "evidence_refs": ["memory:id:exp-parser"],
+            "context_state": "ready",
+            "decision_scope": "architecture",
+            "risk": "medium",
+            "memory_impact": "decision_changing",
+            "reversible": True,
+        },
+    )
+
+The escalation policy is deterministic. Routine, reversible work returns `continue`; insufficient context returns
+`request_context`; blocked/decision states, decision-changing or contradictory memory, conflicted/stale context,
+architecture/user/cross-region scope, high risk, irreversible actions, repeated failure, or user choice return
+`notify_main`. `status` exposes compact region state, while `inbox` contains only `notify_main` reports. Neither view
+contains private `ContextBlock` contents or model chain of thought.
+
 ## Workflow Suggestions
 
 `suggest_workflow` builds on `route_regions` and returns explicit next tool-call suggestions for the main assistant or
