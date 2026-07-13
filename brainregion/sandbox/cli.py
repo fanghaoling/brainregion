@@ -26,6 +26,7 @@ from .delegation_eval import (
     render_fixture_delegation_summary,
     run_fixture_delegation_eval,
 )
+from .delegation_trigger import DelegationTriggerPolicy
 from .eval import render_summary, run_sandbox_eval, write_report
 from .envs import GridWorld, build_env_system_prompt, write_replay_html
 from .fixtures import SANDBOX_FIXTURES, get_fixture, list_fixture_ids
@@ -379,7 +380,7 @@ def _parse_delegation_experts(
 
 
 async def run_delegation_eval(args: argparse.Namespace) -> dict[str, Any]:
-    """Run fixture-backed main/single/multi expert delegation experiments."""
+    """Run fixture-backed eager and triggered expert delegation experiments."""
     dd = _defaults_mod.apply()
     model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
     if not model_str:
@@ -414,6 +415,10 @@ async def run_delegation_eval(args: argparse.Namespace) -> dict[str, Any]:
         expert_max_context_tokens=int(args.expert_max_context_tokens),
         expert_max_tokens=int(args.expert_max_tokens),
         expert_temperature=float(args.expert_temperature),
+        trigger_policy=DelegationTriggerPolicy(
+            min_steps_without_effect=int(args.trigger_after_steps),
+            min_remaining_steps=int(args.trigger_min_remaining_steps),
+        ),
         keep_on_fail=bool(args.keep),
         bootstrap_samples=args.bootstrap_samples,
     )

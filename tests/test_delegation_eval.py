@@ -10,6 +10,7 @@ from brainregion.eval.delegation import (
     ARM_MAIN_ONLY,
     ARM_MULTI_EXPERT,
     ARM_SINGLE_EXPERT,
+    ARM_TRIGGERED_SINGLE_EXPERT,
     DelegationEvalTask,
     ExpertEvalResult,
     MainEvalResult,
@@ -120,6 +121,74 @@ def test_runner_executes_zero_one_many_experts_and_tracks_split_costs():
     assert report["bootstrap_unit"] == "task"
     assert report["contains_reasoning"] is False
     assert report["contains_private_context"] is False
+
+
+def test_triggered_arm_calls_one_expert_only_when_main_activates_it():
+    expert_calls = []
+
+    async def expert_runner(_task, _run, assignment):
+        expert_calls.append(assignment.assignment_id)
+        return ExpertEvalResult(
+            assignment_id=assignment.assignment_id,
+            report=_report("bounded diagnosis"),
+            usage={"input_tokens": 10, "output_tokens": 5},
+            cost_usd=0.01,
+        )
+
+    async def main_runner(_task, _run, _reports):
+        raise AssertionError("triggered arm must use triggered_main_runner")
+
+    async def triggered_main_runner(_task, _run, activate_experts):
+        first = await activate_experts()
+        second = await activate_experts()
+        assert first.to_dict() == second.to_dict()
+        return MainEvalResult(
+            solved=True,
+            protocol_completed=True,
+            adopted_assignment_ids=("debug",),
+        )
+
+    report = asyncio.run(
+        run_delegation_eval(
+            [_task(0)],
+            main_runner=main_runner,
+            expert_runner=expert_runner,
+            triggered_main_runner=triggered_main_runner,
+            arms=[ARM_TRIGGERED_SINGLE_EXPERT],
+        )
+    )
+
+    assert expert_calls == ["debug"]
+    assert report["records"][0]["expert_activations"] == 1
+    assert report["per_arm"][ARM_TRIGGERED_SINGLE_EXPERT]["expert_activation_rate"] == 1.0
+    assert report["per_arm"][ARM_TRIGGERED_SINGLE_EXPERT]["report_adoption_rate"] == 1.0
+
+
+def test_triggered_arm_has_zero_expert_cost_when_gate_never_activates():
+    async def expert_runner(_task, _run, _assignment):
+        raise AssertionError("expert must remain asleep")
+
+    async def main_runner(_task, _run, _reports):
+        raise AssertionError("triggered arm must use triggered_main_runner")
+
+    async def triggered_main_runner(_task, _run, _activate_experts):
+        return MainEvalResult(solved=True, protocol_completed=True)
+
+    report = asyncio.run(
+        run_delegation_eval(
+            [_task(0)],
+            main_runner=main_runner,
+            expert_runner=expert_runner,
+            triggered_main_runner=triggered_main_runner,
+            arms=[ARM_TRIGGERED_SINGLE_EXPERT],
+        )
+    )
+
+    record = report["records"][0]
+    assert record["expert_activations"] == 0
+    assert record["expert_total_tokens"] == 0
+    assert record["expert_cost_usd"] == 0.0
+    assert report["per_arm"][ARM_TRIGGERED_SINGLE_EXPERT]["expert_activation_rate"] == 0.0
 
 
 def test_expert_failure_is_isolated_and_invalid_report_is_not_sent_to_main():
@@ -337,6 +406,15 @@ def test_contracts_fail_fast_for_invalid_tasks_arms_and_main_results():
         )
     with pytest.raises(ValueError, match="unknown delegation arm"):
         build_delegation_plan(_task(0), arms=["debate"])
+    with pytest.raises(ValueError, match="triggered_main_runner"):
+        asyncio.run(
+            run_delegation_eval(
+                [_task(0)],
+                main_runner=lambda *_args: None,
+                expert_runner=lambda *_args: None,
+                arms=[ARM_TRIGGERED_SINGLE_EXPERT],
+            )
+        )
     with pytest.raises(ValueError, match="between 0 and 1"):
         MainEvalResult(solved=True, score=2.0)
 
@@ -351,6 +429,7 @@ def test_contracts_fail_fast_for_invalid_tasks_arms_and_main_results():
         {"main_error": "false"},
         {"protocol_completed": "false"},
         {"infrastructure_error": "false"},
+        {"expert_activations": "1"},
         {"steps": 1.5},
         {"raw_context": "must not be accepted"},
     ],

@@ -22,7 +22,9 @@ from .stats import bootstrap_statistic, seed_for
 ARM_MAIN_ONLY = "main_only"
 ARM_SINGLE_EXPERT = "single_expert"
 ARM_MULTI_EXPERT = "multi_expert"
-DELEGATION_ARMS = (ARM_MAIN_ONLY, ARM_SINGLE_EXPERT, ARM_MULTI_EXPERT)
+ARM_TRIGGERED_SINGLE_EXPERT = "triggered_single_expert"
+DEFAULT_DELEGATION_ARMS = (ARM_MAIN_ONLY, ARM_SINGLE_EXPERT, ARM_MULTI_EXPERT)
+DELEGATION_ARMS = (*DEFAULT_DELEGATION_ARMS, ARM_TRIGGERED_SINGLE_EXPERT)
 FORMAL_MIN_TASKS = 30
 _RECORD_FIELDS = frozenset(
     {
@@ -46,7 +48,9 @@ _RECORD_FIELDS = frozenset(
         "main_error",
     }
 )
-_OPTIONAL_RECORD_FIELDS = frozenset({"protocol_completed", "infrastructure_error"})
+_OPTIONAL_RECORD_FIELDS = frozenset(
+    {"protocol_completed", "infrastructure_error", "expert_activations"}
+)
 
 
 def _required_text(value: Any, name: str, *, max_length: int = 4000) -> str:
@@ -81,7 +85,7 @@ def _nonnegative_int(value: Any, name: str) -> int:
 
 
 def _arms(arms: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
-    selected = tuple(arms or DELEGATION_ARMS)
+    selected = tuple(arms or DEFAULT_DELEGATION_ARMS)
     if not selected:
         raise ValueError("delegation arms cannot be empty")
     unknown = [arm for arm in selected if arm not in DELEGATION_ARMS]
@@ -169,6 +173,7 @@ class ExpertEvalResult:
     report: dict[str, Any] | None = None
     usage: dict[str, Any] = field(default_factory=dict)
     cost_usd: float = 0.0
+    cost_source: str | None = None
     model: str = ""
     error: str = ""
 
@@ -178,8 +183,33 @@ class ExpertEvalResult:
             "report": dict(self.report) if self.report else None,
             "usage": normalize_usage(self.usage),
             "cost_usd": _nonnegative_float(self.cost_usd, "expert cost_usd"),
+            "cost_source": _bounded_text(self.cost_source, "expert cost_source", max_length=100) or None,
             "model": self.model,
             "error": _bounded_text(self.error, "expert error", max_length=500),
+            "contains_private_context": False,
+        }
+
+
+@dataclass(frozen=True)
+class ExpertActivation:
+    """Public, aggregate result returned by an on-demand expert activation."""
+
+    reports: tuple[dict[str, Any], ...]
+    assignment_ids: tuple[str, ...]
+    usage: dict[str, Any] = field(default_factory=dict)
+    cost_usd: float = 0.0
+    cost_sources: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        _nonnegative_float(self.cost_usd, "expert activation cost_usd")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "reports": [dict(report) for report in self.reports],
+            "assignment_ids": list(self.assignment_ids),
+            "usage": normalize_usage(self.usage),
+            "cost_usd": float(self.cost_usd),
+            "cost_sources": list(self.cost_sources),
             "contains_private_context": False,
         }
 
@@ -263,6 +293,7 @@ class DelegationCase:
             "infrastructure_error": self.main_result.infrastructure_error,
             "reports_produced": len(successful_assignments),
             "reports_adopted": len(adopted),
+            "expert_activations": len(self.expert_results),
             "expert_failures": sum(1 for result in self.expert_results if result.error),
             "main_input_tokens": main_usage["input_tokens"],
             "main_total_tokens": main_usage["total_tokens"],
@@ -287,8 +318,13 @@ class DelegationCase:
 
 
 ExpertRunner = Callable[[DelegationEvalTask, DelegationRun, ExpertAssignment], Awaitable[ExpertEvalResult]]
+ExpertActivator = Callable[[], Awaitable[ExpertActivation]]
 MainRunner = Callable[
     [DelegationEvalTask, DelegationRun, tuple[dict[str, Any], ...]],
+    Awaitable[MainEvalResult],
+]
+TriggeredMainRunner = Callable[
+    [DelegationEvalTask, DelegationRun, ExpertActivator],
     Awaitable[MainEvalResult],
 ]
 
@@ -298,7 +334,7 @@ def _selected_assignments(task: DelegationEvalTask, arm: str) -> tuple[ExpertAss
         return ()
     if not task.assignments:
         raise ValueError(f"task {task.task_id!r} has no expert assignments for arm {arm}")
-    if arm == ARM_SINGLE_EXPERT:
+    if arm in {ARM_SINGLE_EXPERT, ARM_TRIGGERED_SINGLE_EXPERT}:
         return task.assignments[:1]
     return task.assignments
 
@@ -361,11 +397,25 @@ def _validated_expert_result(
     return replace(result, assignment_id=assignment.assignment_id, report=report)
 
 
+def _activation_from_results(results: list[ExpertEvalResult]) -> ExpertActivation:
+    reports = tuple(
+        dict(result.report) for result in results if result.report is not None and not result.error
+    )
+    return ExpertActivation(
+        reports=reports,
+        assignment_ids=tuple(result.assignment_id for result in results),
+        usage=merge_usage(*(result.usage for result in results)),
+        cost_usd=sum(float(result.cost_usd) for result in results),
+        cost_sources=tuple(dict.fromkeys(result.cost_source for result in results if result.cost_source)),
+    )
+
+
 async def run_delegation_eval(
     tasks: list[DelegationEvalTask],
     *,
     main_runner: MainRunner,
     expert_runner: ExpertRunner,
+    triggered_main_runner: TriggeredMainRunner | None = None,
     repeats: int = 1,
     arms: list[str] | tuple[str, ...] | None = None,
     run_id: str = "",
@@ -376,6 +426,8 @@ async def run_delegation_eval(
     if len({task.task_id for task in tasks}) != len(tasks):
         raise ValueError("delegation eval task ids must be unique")
     selected_arms = _arms(arms)
+    if ARM_TRIGGERED_SINGLE_EXPERT in selected_arms and triggered_main_runner is None:
+        raise ValueError("triggered_single_expert requires triggered_main_runner")
     if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats <= 0:
         raise ValueError("repeats must be a positive integer")
     run_id = run_id or f"delegation-{int(time.time() * 1000)}"
@@ -392,21 +444,30 @@ async def run_delegation_eval(
                     assignment_ids=tuple(item.assignment_id for item in assignments),
                 )
                 expert_results: list[ExpertEvalResult] = []
-                for assignment in assignments:
-                    try:
-                        raw_result = await expert_runner(task, run, assignment)
-                        result = _validated_expert_result(task, assignment, raw_result)
-                    except Exception as exc:  # noqa: BLE001 - isolate one expert
-                        result = ExpertEvalResult(
-                            assignment_id=assignment.assignment_id,
-                            error=f"expert_runner_error: {exc}"[:500],
-                        )
-                    expert_results.append(result)
-                reports = tuple(
-                    dict(result.report) for result in expert_results if result.report is not None and not result.error
-                )
+
+                async def activate_experts() -> ExpertActivation:
+                    if expert_results:
+                        return _activation_from_results(expert_results)
+                    for assignment in assignments:
+                        try:
+                            raw_result = await expert_runner(task, run, assignment)
+                            result = _validated_expert_result(task, assignment, raw_result)
+                        except Exception as exc:  # noqa: BLE001 - isolate one expert
+                            result = ExpertEvalResult(
+                                assignment_id=assignment.assignment_id,
+                                error=f"expert_runner_error: {exc}"[:500],
+                            )
+                        expert_results.append(result)
+                    return _activation_from_results(expert_results)
+
                 try:
-                    main_result = await main_runner(task, run, reports)
+                    if arm == ARM_TRIGGERED_SINGLE_EXPERT:
+                        if triggered_main_runner is None:
+                            raise RuntimeError("triggered main runner is unavailable")
+                        main_result = await triggered_main_runner(task, run, activate_experts)
+                    else:
+                        activation = await activate_experts()
+                        main_result = await main_runner(task, run, activation.reports)
                     if not isinstance(main_result, MainEvalResult):
                         raise TypeError("main runner must return MainEvalResult")
                 except Exception as exc:  # noqa: BLE001 - keep matched matrix complete
@@ -444,6 +505,7 @@ _METRICS = (
     "steps",
     "repeated_attempts",
     "protocol_completed",
+    "expert_activations",
     "reports_produced",
     "reports_adopted",
     "expert_failures",
@@ -488,6 +550,12 @@ def _per_arm(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
             "mean_steps": _mean(valid_records, "steps"),
             "mean_repeated_attempts": _mean(valid_records, "repeated_attempts"),
             "protocol_completion_rate": _mean(valid_records, "protocol_completed"),
+            "expert_activation_rate": (
+                sum(int(record["expert_activations"] > 0) for record in valid_records) / len(valid_records)
+                if valid_records
+                else None
+            ),
+            "mean_expert_activations": _mean(valid_records, "expert_activations"),
             "mean_main_input_tokens": _mean(valid_records, "main_input_tokens"),
             "mean_main_total_tokens": _mean(valid_records, "main_total_tokens"),
             "mean_expert_total_tokens": _mean(valid_records, "expert_total_tokens"),
@@ -588,8 +656,15 @@ def summarize_delegation_records(
                 raise ValueError("delegation record score must be between 0 and 1")
         reports_produced = _nonnegative_int(record.get("reports_produced"), "reports_produced")
         reports_adopted = _nonnegative_int(record.get("reports_adopted"), "reports_adopted")
+        expert_failures = _nonnegative_int(record.get("expert_failures"), "expert_failures")
+        expert_activations = _nonnegative_int(
+            record.get("expert_activations", reports_produced + expert_failures),
+            "expert_activations",
+        )
         if reports_adopted > reports_produced:
             raise ValueError("reports_adopted cannot exceed reports_produced")
+        if reports_produced + expert_failures > expert_activations:
+            raise ValueError("expert_activations cannot be lower than produced reports plus failures")
         if not isinstance(record.get("main_error", False), bool):
             raise ValueError("delegation record main_error must be a boolean")
         protocol_completed = record.get("protocol_completed")
@@ -612,7 +687,8 @@ def summarize_delegation_records(
             "infrastructure_error": infrastructure_error,
             "reports_produced": reports_produced,
             "reports_adopted": reports_adopted,
-            "expert_failures": _nonnegative_int(record.get("expert_failures"), "expert_failures"),
+            "expert_activations": expert_activations,
+            "expert_failures": expert_failures,
             "main_input_tokens": _nonnegative_int(record.get("main_input_tokens"), "main_input_tokens"),
             "main_total_tokens": _nonnegative_int(record.get("main_total_tokens"), "main_total_tokens"),
             "expert_total_tokens": _nonnegative_int(record.get("expert_total_tokens"), "expert_total_tokens"),
@@ -638,6 +714,7 @@ def summarize_delegation_records(
             for key in (
                 "reports_produced",
                 "reports_adopted",
+                "expert_activations",
                 "expert_failures",
                 "expert_total_tokens",
                 "expert_cost_usd",
@@ -694,11 +771,14 @@ __all__ = [
     "ARM_MAIN_ONLY",
     "ARM_MULTI_EXPERT",
     "ARM_SINGLE_EXPERT",
+    "ARM_TRIGGERED_SINGLE_EXPERT",
+    "DEFAULT_DELEGATION_ARMS",
     "DELEGATION_ARMS",
     "DelegationCase",
     "DelegationEvalTask",
     "DelegationRun",
     "ExpertEvalResult",
+    "ExpertActivation",
     "MainEvalResult",
     "build_delegation_plan",
     "run_delegation_eval",

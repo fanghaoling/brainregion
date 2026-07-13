@@ -381,6 +381,8 @@ aggregation; experts remain independent and do not automatically read one anothe
 - `main_only`: the main runner receives no expert reports.
 - `single_expert`: only the first deterministic assignment runs.
 - `multi_expert`: every assignment runs independently; experts never receive peer reports.
+- `triggered_single_expert`: the main runner starts alone and may activate the first assignment after observable
+  progress signals indicate a stall. This arm is opt-in and does not change the default three-arm matrix.
 
 The plan tool never calls a model. A host adapter can execute the plan with `run_delegation_eval`, providing async expert
 and main runners. Both adapters receive a `DelegationRun` carrying the matched repeat and arm, so they can reuse the same
@@ -396,7 +398,7 @@ task from comparisons between other complete arm pairs.
 
 ### Executable Delegation Pilot
 
-The fixture sandbox can execute the three delegation arms with real models and objective pytest acceptance:
+The fixture sandbox can execute eager and triggered delegation arms with real models and objective pytest acceptance:
 
 ```powershell
 brain-region sandbox delegation-eval `
@@ -406,6 +408,25 @@ brain-region sandbox delegation-eval `
   --expert review=modelbridge_openai/gpt-5.5 `
   --repeats 2
 ```
+
+To compare always-on advice with on-demand activation, explicitly add the triggered arm:
+
+```powershell
+brain-region sandbox delegation-eval `
+  --tasks tenant_cache_scope,settings_precedence,event_bus_snapshot,retry_error_scope `
+  --main-brain modelbridge_anthropic/claude-sonnet-5 `
+  --expert debugging=modelbridge_anthropic/claude-opus-4-8 `
+  --arms main_only,single_expert,triggered_single_expert `
+  --max-steps 4 `
+  --trigger-after-steps 2 `
+  --trigger-min-remaining-steps 2
+```
+
+The first deterministic trigger uses only bounded operational facts: completed tool turns, steps since the last real
+workspace effect, repeated tools or target paths, verification status, remaining turns, and remaining budget. It does
+not inspect model thoughts or trust self-reported confidence. The expert call occurs only after the gate activates; a
+run that keeps progressing records zero expert calls, tokens, and cost. Reports expose `expert_activation_rate` and a
+content-free trigger trace alongside solve, completion, adoption, token, and cost metrics.
 
 Each expert receives an isolated, read-only snapshot of the same fixture source and tests. Experts return validated
 RegionReports only; they do not edit the main workspace or read peer reports. For the same task and repeat, an expert
@@ -422,7 +443,7 @@ Multi-file calibration fixtures are opt-in and never expand the default sandbox 
 `tenant_cache_scope`, `settings_precedence`, `event_bus_snapshot`, and `retry_error_scope` through `--tasks`. Reports
 separate objective `solve_rate` from `protocol_completion_rate`: a model may turn pytest green yet still exhaust its
 step budget without emitting a valid completion response. Calibrate the main model on `main_only` first, then run the
-three-arm matrix only for tasks whose baseline is neither a floor nor a ceiling.
+selected matrix only for tasks whose baseline is neither a floor nor a ceiling.
 
 Provider, quota, network, and runner failures are marked as infrastructure errors and excluded from valid solve-rate
 and matched-pair denominators. Explicit report adoption is observable only when the main model emits a valid completion

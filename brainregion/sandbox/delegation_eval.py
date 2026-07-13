@@ -22,13 +22,16 @@ from brainregion.core.region_reporting import RegionCoordinationBoard
 from brainregion.eval.delegation import (
     DelegationEvalTask,
     DelegationRun,
+    ExpertActivation,
+    ExpertActivator,
     ExpertEvalResult,
     MainEvalResult,
     run_delegation_eval,
 )
 
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
-from .loop import run_agent
+from .delegation_trigger import DelegationTriggerPolicy
+from .loop import AdvisoryInjection, AdvisoryTriggerState, run_agent
 from .task import SandboxTask
 
 _MAX_EXPERTS = 8
@@ -200,11 +203,12 @@ async def run_fixture_delegation_eval(
     expert_max_context_tokens: int = 6000,
     expert_max_tokens: int = 1200,
     expert_temperature: float = 0.1,
+    trigger_policy: DelegationTriggerPolicy | None = None,
     keep_on_fail: bool = False,
     run_id: str = "",
     bootstrap_samples: int | None = None,
 ) -> dict[str, Any]:
-    """Execute matched main/single/multi arms on fresh fixture sandboxes."""
+    """Execute matched eager and on-demand delegation arms on fresh fixture sandboxes."""
     eval_tasks = build_fixture_delegation_tasks(tasks, experts)
     fixture_by_id = {task.id: task for task in tasks}
     expert_by_id = {expert.assignment_id: expert for expert in experts}
@@ -216,6 +220,7 @@ async def run_fixture_delegation_eval(
     actual_main_model_calls = 0
     actual_expert_cost_usd = 0.0
     actual_main_cost_usd = 0.0
+    trigger_policy = trigger_policy or DelegationTriggerPolicy()
 
     async def expert_runner(
         eval_task: DelegationEvalTask,
@@ -271,16 +276,19 @@ async def run_fixture_delegation_eval(
             report=report if isinstance(report, dict) else None,
             usage=dict(result.usage or {}),
             cost_usd=cost_usd,
+            cost_source=result.cost_source,
             model=spec.model,
             error=error,
         )
         expert_cache[cache_key] = converted
         return converted
 
-    async def main_runner(
+    async def _run_main(
         eval_task: DelegationEvalTask,
         run: DelegationRun,
         reports: tuple[dict[str, Any], ...],
+        *,
+        advisory_injector: Any = None,
     ) -> MainEvalResult:
         nonlocal actual_main_model_calls, actual_main_runs, actual_main_cost_usd
         fixture = fixture_by_id[eval_task.task_id]
@@ -304,6 +312,7 @@ async def run_fixture_delegation_eval(
                 thinking=thinking,
                 effort=effort,
                 advisory_context=render_expert_reports(reports) if reports else "",
+                advisory_injector=advisory_injector,
             )
             actual_main_runs += 1
             actual_main_model_calls += trajectory.n_steps
@@ -323,6 +332,7 @@ async def run_fixture_delegation_eval(
                 "workspace_effects": trajectory.workspace_effects,
                 "verification_runs": trajectory.verification_runs,
                 "last_verification_passed": trajectory.last_verification_passed,
+                "advisory_injections": list(trajectory.advisory_injections),
                 "contains_reasoning": False,
                 "contains_tool_results": False,
             }
@@ -361,10 +371,65 @@ async def run_fixture_delegation_eval(
             else:
                 cleanup_run_dir(run_dir)
 
+    async def main_runner(
+        eval_task: DelegationEvalTask,
+        run: DelegationRun,
+        reports: tuple[dict[str, Any], ...],
+    ) -> MainEvalResult:
+        return await _run_main(eval_task, run, reports)
+
+    async def triggered_main_runner(
+        eval_task: DelegationEvalTask,
+        run: DelegationRun,
+        activate_experts: ExpertActivator,
+    ) -> MainEvalResult:
+        triggered = False
+        trigger_record: dict[str, Any] = {"activated": False, "contains_reasoning": False}
+
+        async def inject_on_struggle(state: AdvisoryTriggerState) -> AdvisoryInjection | None:
+            nonlocal triggered, trigger_record
+            if triggered:
+                return None
+            decision = trigger_policy.evaluate(state)
+            if not decision.activate:
+                return None
+            triggered = True
+            activation: ExpertActivation = await activate_experts()
+            trigger_record = {
+                "activated": True,
+                "step": state.next_step,
+                "reason": decision.reason,
+                "signals": list(decision.signals),
+                "assignment_ids": list(activation.assignment_ids),
+                "reports_available": len(activation.reports),
+                "contains_reasoning": False,
+            }
+            return AdvisoryInjection(
+                content=render_expert_reports(activation.reports),
+                assignment_ids=activation.assignment_ids,
+                reason=decision.reason,
+                signals=decision.signals,
+                usage=activation.usage,
+                cost_usd=activation.cost_usd,
+                cost_source=activation.cost_sources[0] if len(activation.cost_sources) == 1 else None,
+            )
+
+        result = await _run_main(
+            eval_task,
+            run,
+            (),
+            advisory_injector=inject_on_struggle,
+        )
+        diagnostics = main_diagnostics.get((eval_task.task_id, run.repeat, run.arm))
+        if diagnostics is not None:
+            diagnostics["delegation_trigger"] = trigger_record
+        return result
+
     report = await run_delegation_eval(
         eval_tasks,
         main_runner=main_runner,
         expert_runner=expert_runner,
+        triggered_main_runner=triggered_main_runner,
         repeats=repeats,
         arms=arms,
         run_id=run_id,
@@ -375,6 +440,7 @@ async def run_fixture_delegation_eval(
         "main_model": main_model,
         "main_endpoint_id": main_endpoint_id,
         "experts": [expert.public_dict() for expert in experts],
+        "trigger_policy": trigger_policy.to_dict(),
         "actual_main_runs": actual_main_runs,
         "actual_main_model_calls": actual_main_model_calls,
         "actual_expert_model_calls": actual_expert_model_calls,
@@ -397,6 +463,7 @@ async def run_fixture_delegation_eval(
                 "workspace_effects": 0,
                 "verification_runs": 0,
                 "last_verification_passed": None,
+                "advisory_injections": [],
                 "contains_reasoning": False,
                 "contains_tool_results": False,
             },
@@ -418,6 +485,7 @@ def render_fixture_delegation_summary(report: dict[str, Any]) -> str:
             f"completed={summary.get('protocol_completion_rate')} "
             f"steps={float(summary.get('mean_steps') or 0):.1f} "
             f"cost=${float(summary.get('mean_total_cost_usd') or 0):.4f} "
+            f"expert_activation={summary.get('expert_activation_rate')} "
             f"adoption={summary.get('report_adoption_rate')} "
             f"adoption_observed={summary.get('adoption_observation_rate')}"
         )

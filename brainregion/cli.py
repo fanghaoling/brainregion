@@ -248,7 +248,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_sb_delegation = p_sb_sub.add_parser(
         "delegation-eval",
-        help="Matched main-only/single/multi expert evaluation on executable fixtures",
+        help="Matched eager and triggered expert evaluation on executable fixtures",
     )
     p_sb_delegation.add_argument("--tasks", required=True, help="Comma-separated fixture ids")
     p_sb_delegation.add_argument("--main-brain", default=None, help="Main executor model reference")
@@ -268,6 +268,18 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_delegation.add_argument("--expert-max-context-tokens", type=int, default=6000)
     p_sb_delegation.add_argument("--expert-max-tokens", type=int, default=1200)
     p_sb_delegation.add_argument("--expert-temperature", type=float, default=0.1)
+    p_sb_delegation.add_argument(
+        "--trigger-after-steps",
+        type=int,
+        default=2,
+        help="Trigger after this many completed steps without a workspace effect",
+    )
+    p_sb_delegation.add_argument(
+        "--trigger-min-remaining-steps",
+        type=int,
+        default=2,
+        help="Do not trigger unless this many main-model turns remain",
+    )
     p_sb_delegation.add_argument("--bootstrap-samples", type=int, default=None)
     p_sb_delegation.add_argument("--thinking", default="off", choices=["off", "on"])
     p_sb_delegation.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])

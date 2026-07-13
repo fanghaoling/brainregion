@@ -114,6 +114,61 @@ class _DelegationBackend:
         return _response(kwargs["model"], content, cost=0.001, tokens=20)
 
 
+class _TriggeredDelegationBackend(_DelegationBackend):
+    async def complete_messages(self, messages, **kwargs):
+        self.main_calls += 1
+        assistant_turns = sum(message["role"] == "assistant" for message in messages)
+        if assistant_turns == 0:
+            self.main_initial_users.append(messages[1]["content"])
+        has_reports = any(
+            message["role"] == "user" and "<expert_reports>" in message["content"]
+            for message in messages
+        )
+        if not has_reports:
+            if assistant_turns % 2 == 0:
+                content = {
+                    "thought": "Locate the relevant range implementation.",
+                    "tool": "search_text",
+                    "args": {"query": "sum_range", "include_globs": ["*.py"]},
+                }
+            else:
+                content = {
+                    "thought": "Read the candidate implementation.",
+                    "tool": "read_text",
+                    "args": {"path": "ranges.py"},
+                }
+        elif assistant_turns == 2:
+            content = {
+                "thought": "Use the expert diagnosis to apply the bounded fix.",
+                "tool": "apply_text_patch",
+                "args": {
+                    "path": "ranges.py",
+                    "expected_sha256": self.source_sha,
+                    "replacements": [
+                        {
+                            "old_text": "range(start, end)",
+                            "new_text": "range(start, end + 1)",
+                        }
+                    ],
+                    "dry_run": False,
+                },
+            }
+        elif assistant_turns == 3:
+            content = {
+                "thought": "Verify the fixture.",
+                "tool": "workspace_run_check",
+                "args": {"argv": [sys.executable, "-m", "pytest", "-q"]},
+            }
+        else:
+            content = {
+                "thought": "The objective tests pass.",
+                "done": True,
+                "answer": "Applied and verified the expert-guided fix.",
+                "adopted_assignment_ids": ["debugging"],
+            }
+        return _response(kwargs["model"], content, cost=0.001, tokens=20)
+
+
 def _experts() -> list[SandboxExpertSpec]:
     return [
         SandboxExpertSpec(
@@ -204,6 +259,54 @@ def test_done_call_adoption_contract_is_strict_and_deduplicated():
         call, error = parse_tool_call(json.dumps({"done": True, "adopted_assignment_ids": invalid_ids}))
         assert call is None
         assert error is not None and "must be an array" in error
+
+
+def test_triggered_fixture_arm_wakes_after_observed_stall_and_then_injects_report():
+    task = get_fixture("off_by_one")
+    source_sha = _materialized_sha(task, "ranges.py")
+    backend = _TriggeredDelegationBackend(source_sha)
+
+    report = asyncio.run(
+        run_fixture_delegation_eval(
+            backend,
+            "main-model",
+            [task],
+            _experts(),
+            arms=["main_only", "triggered_single_expert"],
+            max_steps=5,
+            max_cost_usd=1.0,
+            bootstrap_samples=20,
+        )
+    )
+
+    assert report["per_arm"]["main_only"]["solve_rate"] == 0.0
+    triggered = report["per_arm"]["triggered_single_expert"]
+    assert triggered["solve_rate"] == 1.0
+    assert triggered["expert_activation_rate"] == 1.0
+    assert triggered["report_adoption_rate"] == 1.0
+    assert len(backend.expert_calls) == 1
+    assert all("<expert_reports>" not in user for user in backend.main_initial_users)
+
+    case = next(case for case in report["cases"] if case["arm"] == "triggered_single_expert")
+    diagnostics = case["main_result"]["sandbox_diagnostics"]
+    assert diagnostics["delegation_trigger"] == {
+        "activated": True,
+        "step": 2,
+        "reason": "no_workspace_effect",
+        "signals": ["no_workspace_effect"],
+        "assignment_ids": ["debugging"],
+        "reports_available": 1,
+        "contains_reasoning": False,
+    }
+    assert diagnostics["advisory_injections"][0]["step"] == 2
+    assert diagnostics["advisory_injections"][0]["contains_advice"] is False
+    assert diagnostics["tool_sequence"] == [
+        "search_text",
+        "read_text",
+        "apply_text_patch",
+        "workspace_run_check",
+        "done",
+    ]
 
 
 def test_fixture_delegation_rejects_duplicate_experts_before_model_calls():
