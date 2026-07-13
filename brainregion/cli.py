@@ -246,6 +246,34 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_eval.add_argument("--keep", action="store_true", help="失败时保留 run_dir")
     p_sb_eval.add_argument("--out", default=None, help="报告 JSON 输出目录(默认 .brain-region/sandbox/)")
 
+    p_sb_delegation = p_sb_sub.add_parser(
+        "delegation-eval",
+        help="Matched main-only/single/multi expert evaluation on executable fixtures",
+    )
+    p_sb_delegation.add_argument("--tasks", required=True, help="Comma-separated fixture ids")
+    p_sb_delegation.add_argument("--main-brain", default=None, help="Main executor model reference")
+    p_sb_delegation.add_argument(
+        "--expert",
+        action="append",
+        required=True,
+        help="Independent REGION=MODEL or ASSIGNMENT:REGION=MODEL; repeat for multiple experts",
+    )
+    p_sb_delegation.add_argument(
+        "--arms", default="main_only,single_expert,multi_expert", help="Comma-separated delegation arms"
+    )
+    p_sb_delegation.add_argument("--repeats", type=int, default=1)
+    p_sb_delegation.add_argument("--max-steps", type=int, default=None)
+    p_sb_delegation.add_argument("--max-cost-usd", type=float, default=None, help="Per-main-run cost limit")
+    p_sb_delegation.add_argument("--max-tokens", type=int, default=None)
+    p_sb_delegation.add_argument("--expert-max-context-tokens", type=int, default=6000)
+    p_sb_delegation.add_argument("--expert-max-tokens", type=int, default=1200)
+    p_sb_delegation.add_argument("--expert-temperature", type=float, default=0.1)
+    p_sb_delegation.add_argument("--bootstrap-samples", type=int, default=None)
+    p_sb_delegation.add_argument("--thinking", default="off", choices=["off", "on"])
+    p_sb_delegation.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])
+    p_sb_delegation.add_argument("--keep", action="store_true", help="Keep failed arm directories")
+    p_sb_delegation.add_argument("--out", default=None, help="Report directory")
+
     p_sb_vb = p_sb_sub.add_parser(
         "verify-brain",
         help="主脑 grounding-first 验证(§15.8):对 run.json 里的专家补丁跑 forced-trace,"
@@ -877,6 +905,8 @@ def main() -> None:
             asyncio.run(sandbox_cli.run(args))
         elif args.sandbox_command == "eval":
             asyncio.run(sandbox_cli.run_eval(args))
+        elif args.sandbox_command == "delegation-eval":
+            asyncio.run(sandbox_cli.run_delegation_eval(args))
         elif args.sandbox_command == "verify-brain":
             asyncio.run(sandbox_cli.verify_brain(args))
         elif args.sandbox_command == "env":

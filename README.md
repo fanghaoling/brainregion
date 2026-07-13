@@ -394,6 +394,30 @@ repeated attempts, report adoption, solve rate, score, and pairwise deltas. Fewe
 explicitly labeled `pilot_*`; missing one arm does not remove a
 task from comparisons between other complete arm pairs.
 
+### Executable Delegation Pilot
+
+The fixture sandbox can execute the three delegation arms with real models and objective pytest acceptance:
+
+```powershell
+brain-region sandbox delegation-eval `
+  --tasks off_by_one `
+  --main-brain modelbridge_openai/gpt-5.4-mini `
+  --expert debugging=modelbridge_anthropic/claude-opus-4-8 `
+  --expert review=modelbridge_openai/gpt-5.5 `
+  --repeats 2
+```
+
+Each expert receives an isolated, read-only snapshot of the same fixture source and tests. Experts return validated
+RegionReports only; they do not edit the main workspace or read peer reports. For the same task and repeat, an expert
+result is reused between `single_expert` and `multi_expert`, keeping its advice identical and avoiding duplicate billing.
+Every main arm still runs in a fresh directory and must pass the configured pytest checks.
+
+The main model treats reports as untrusted advisory data and explicitly returns `adopted_assignment_ids` on completion.
+Reports include counterfactual per-arm cost as well as `execution.actual_*` run, model-call, and cost totals after expert reuse. Full
+model thoughts and sandbox trajectories are deliberately excluded; use `--keep` to retain failed arm directories for
+local inspection. The first adapter intentionally supports bounded fixtures only. Real-repository worktree delegation
+requires a separate context acquisition and isolation layer.
+
 ## Workflow Suggestions
 
 `suggest_workflow` builds on `route_regions` and returns explicit next tool-call suggestions for the main assistant or

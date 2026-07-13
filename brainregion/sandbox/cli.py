@@ -21,6 +21,11 @@ from brainregion.providers.litellm import LiteLLMBackend
 from brainregion.runtime import merge_usage, normalize_usage
 from brainregion.server import _normalize_one, _resolve_endpoints
 
+from .delegation_eval import (
+    SandboxExpertSpec,
+    render_fixture_delegation_summary,
+    run_fixture_delegation_eval,
+)
 from .eval import render_summary, run_sandbox_eval, write_report
 from .envs import GridWorld, build_env_system_prompt, write_replay_html
 from .fixtures import SANDBOX_FIXTURES, get_fixture, list_fixture_ids
@@ -336,6 +341,85 @@ async def run_eval(args: argparse.Namespace) -> dict[str, Any]:
     path = write_report(report, getattr(args, "out", None))
     print(render_summary(report))
     print(f"\n报告: {path}")
+    return {"report": report, "path": str(path)}
+
+
+def _parse_delegation_experts(
+    raw_specs: list[str], registry: dict[str, Any], dd: dict[str, Any]
+) -> list[SandboxExpertSpec]:
+    if not raw_specs:
+        raise SystemExit("at least one --expert REGION=MODEL is required")
+    experts: list[SandboxExpertSpec] = []
+    for raw in raw_specs:
+        if "=" not in raw:
+            raise SystemExit(f"invalid --expert {raw!r}; expected REGION=MODEL")
+        identity, model_ref = (part.strip() for part in raw.split("=", 1))
+        if ":" in identity:
+            assignment_id, region = (part.strip() for part in identity.split(":", 1))
+        else:
+            assignment_id = region = identity
+        if not assignment_id or not region or not model_ref:
+            raise SystemExit(
+                f"invalid --expert {raw!r}; expected REGION=MODEL or ASSIGNMENT:REGION=MODEL"
+            )
+        entry = _normalize_one(model_ref, set(registry), dd.get("endpoints"))
+        experts.append(
+            SandboxExpertSpec(
+                assignment_id=assignment_id.casefold(),
+                region=region,
+                question=(
+                    f"Analyze the failure from the {region} perspective. Identify the root cause, "
+                    "a concrete minimal fix, and verification risks."
+                ),
+                model=entry["model"],
+                endpoint_id=entry.get("endpoint_id"),
+            )
+        )
+    return experts
+
+
+async def run_delegation_eval(args: argparse.Namespace) -> dict[str, Any]:
+    """Run fixture-backed main/single/multi expert delegation experiments."""
+    dd = _defaults_mod.apply()
+    model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
+    if not model_str:
+        raise SystemExit("--main-brain is required (or configure sandbox_main_brain)")
+    raw_experts = list(args.expert or [])
+    expert_refs = [raw.split("=", 1)[1].strip() for raw in raw_experts if "=" in raw]
+    refs = [model_str, *expert_refs]
+    backend, registry = _build_backend(
+        dd,
+        endpoint_ids=_endpoint_ids_for_refs(dd, refs),
+    )
+    main_model, main_endpoint_id = _resolve_main_brain(model_str, registry, dd)
+    experts = _parse_delegation_experts(raw_experts, registry, dd)
+    tasks = _resolve_tasks(args)
+    selected_arms = [arm.strip() for arm in str(args.arms or "").split(",") if arm.strip()] or None
+    report = await run_fixture_delegation_eval(
+        backend,
+        main_model,
+        tasks,
+        experts,
+        main_endpoint_id=main_endpoint_id,
+        repeats=int(args.repeats),
+        arms=selected_arms,
+        max_steps=int(args.max_steps or dd.get("sandbox_max_steps", 10)),
+        max_cost_usd=float(args.max_cost_usd or dd.get("sandbox_max_cost_usd", 0.5)),
+        temperature=float(dd.get("sandbox_temperature", 0.0)),
+        max_tokens=int(args.max_tokens or 2048),
+        transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
+        consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
+        thinking=_thinking_arg(args),
+        effort=args.effort,
+        expert_max_context_tokens=int(args.expert_max_context_tokens),
+        expert_max_tokens=int(args.expert_max_tokens),
+        expert_temperature=float(args.expert_temperature),
+        keep_on_fail=bool(args.keep),
+        bootstrap_samples=args.bootstrap_samples,
+    )
+    path = write_report(report, args.out)
+    print(render_fixture_delegation_summary(report))
+    print(f"\nReport: {path}")
     return {"report": report, "path": str(path)}
 
 
