@@ -72,6 +72,7 @@ class WorkspaceEntry:
     task_id: str
     audience: ContextAudience
     target_region: str
+    assignment_id: str
     blocks: tuple[ContextBlock, ...]
     source_skills: tuple[str, ...]
     source_regions: tuple[str, ...]
@@ -86,6 +87,7 @@ class WorkspaceEntry:
             "task_id": self.task_id,
             "audience": self.audience,
             "target_region": self.target_region,
+            "assignment_id": self.assignment_id,
             "source_skills": list(self.source_skills),
             "source_regions": list(self.source_regions),
             "evidence_refs": list(self.evidence_refs),
@@ -110,6 +112,7 @@ class WorkspaceView:
     task_id: str
     consumer: WorkspaceConsumer
     region: str
+    assignment_id: str
     entry_ids: tuple[str, ...]
     blocks: tuple[ContextBlock, ...]
     trace: dict[str, Any]
@@ -119,6 +122,7 @@ class WorkspaceView:
             "task_id": self.task_id,
             "consumer": self.consumer,
             "region": self.region,
+            "assignment_id": self.assignment_id,
             "entry_ids": list(self.entry_ids),
             "context_blocks": [context_block_to_dict(block) for block in self.blocks],
             "trace": dict(self.trace),
@@ -140,6 +144,7 @@ class CognitiveWorkspace:
         task_id: str,
         audience: ContextAudience,
         target_region: str = "",
+        assignment_id: str = "",
         ttl_steps: int = 3,
     ) -> WorkspaceDelivery:
         """Store activated blocks and return only a public delivery receipt."""
@@ -152,6 +157,11 @@ class CognitiveWorkspace:
             raise ValueError("target_region is required for region audience")
         if audience != "region" and target_region:
             raise ValueError("target_region is only valid for region audience")
+        assignment_id = str(assignment_id or "").strip()
+        if assignment_id and audience != "region":
+            raise ValueError("assignment_id is only valid for region audience")
+        if len(assignment_id) > 200:
+            raise ValueError("assignment_id cannot exceed 200 characters")
         ttl_steps = _positive_int(ttl_steps, "ttl_steps")
 
         blocks = tuple(_clone_block(block) for block in activated.blocks)
@@ -167,6 +177,7 @@ class CognitiveWorkspace:
             task_id=task_id,
             audience=audience,  # type: ignore[arg-type]
             target_region=target_region,
+            assignment_id=assignment_id,
             blocks=blocks,
             source_skills=source_skills,
             source_regions=source_regions,
@@ -187,6 +198,7 @@ class CognitiveWorkspace:
         *,
         consumer: WorkspaceConsumer,
         region: str = "",
+        assignment_id: str = "",
         max_context_tokens: int = 2000,
         max_blocks: int = 12,
     ) -> WorkspaceView:
@@ -200,6 +212,11 @@ class CognitiveWorkspace:
             raise ValueError("region is required for region consumer")
         if consumer == "main" and region:
             raise ValueError("region is only valid for region consumer")
+        assignment_id = str(assignment_id or "").strip()
+        if consumer == "main" and assignment_id:
+            raise ValueError("assignment_id is only valid for region consumer")
+        if len(assignment_id) > 200:
+            raise ValueError("assignment_id cannot exceed 200 characters")
         if isinstance(max_context_tokens, bool) or not isinstance(max_context_tokens, int) or max_context_tokens < 0:
             raise ValueError("max_context_tokens must be a non-negative integer")
         if isinstance(max_blocks, bool) or not isinstance(max_blocks, int) or max_blocks < 0:
@@ -212,7 +229,12 @@ class CognitiveWorkspace:
             for entry in entries
             if entry.audience == "shared"
             or (consumer == "main" and entry.audience == "main")
-            or (consumer == "region" and entry.audience == "region" and entry.target_region == region)
+            or (
+                consumer == "region"
+                and entry.audience == "region"
+                and entry.target_region == region
+                and entry.assignment_id == assignment_id
+            )
         ]
         candidates = [block for entry in visible for block in entry.blocks]
         blocks, estimated_tokens, truncated = fit_context_blocks(
@@ -224,6 +246,7 @@ class CognitiveWorkspace:
             task_id=task_id,
             consumer=consumer,  # type: ignore[arg-type]
             region=region,
+            assignment_id=assignment_id,
             entry_ids=tuple(entry.entry_id for entry in visible),
             blocks=tuple(blocks),
             trace={
@@ -270,11 +293,23 @@ class CognitiveWorkspace:
             "expired_entries": expired,
         }
 
-    def clear(self, task_id: str) -> dict[str, Any]:
-        """Explicitly unload all process-local context for one task."""
+    def clear(self, task_id: str, *, assignment_id: str = "") -> dict[str, Any]:
+        """Unload one assignment or all process-local context for a task."""
         task_id = _identifier(task_id, "task_id")
+        assignment_id = str(assignment_id or "").strip()
+        if len(assignment_id) > 200:
+            raise ValueError("assignment_id cannot exceed 200 characters")
         with self._lock:
-            removed = len(self._entries.pop(task_id, ()))
+            if assignment_id:
+                entries = self._entries.get(task_id, [])
+                active = [entry for entry in entries if entry.assignment_id != assignment_id]
+                removed = len(entries) - len(active)
+                if active:
+                    self._entries[task_id] = active
+                else:
+                    self._entries.pop(task_id, None)
+            else:
+                removed = len(self._entries.pop(task_id, ()))
         return {"task_id": task_id, "removed_entries": removed}
 
 

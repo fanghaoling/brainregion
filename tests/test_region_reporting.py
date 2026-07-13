@@ -220,6 +220,98 @@ def test_coordination_board_context_request_stays_out_of_main_inbox():
     assert board.status("task-context")["region_statuses"][0]["decision"]["action"] == ("request_context")
 
 
+def test_same_region_assignments_keep_receipts_and_reports_independent():
+    board = RegionCoordinationBoard()
+    for assignment_id in ("parser", "network"):
+        board.record_receipt(
+            RegionContextReceipt.from_activated(
+                _activated(),
+                task_id="root",
+                region="debugging",
+                assignment_id=assignment_id,
+            )
+        )
+        data = _report(
+            summary=f"{assignment_id} conclusion",
+            assignment_id=assignment_id,
+            covered_scope=f"{assignment_id} scope",
+            unresolved_questions=[f"{assignment_id} question"],
+            recommended_followups=[f"verify {assignment_id}"],
+        ).to_dict()
+        data.pop("report_id")
+        data.pop("task_id")
+        board.publish("root", data)
+
+    status = board.status("root")
+    parser = board.reports("root", assignment_id="parser")
+    all_reports = board.reports("root")
+
+    assert len(status["context_receipts"]) == 2
+    assert {item["assignment_id"] for item in status["region_statuses"]} == {
+        "parser",
+        "network",
+    }
+    assert parser["count"] == 1
+    assert parser["reports"][0]["report"]["covered_scope"] == "parser scope"
+    assert all_reports["count"] == 2
+    assert all_reports["contains_private_context"] is False
+
+
+def test_report_accepts_multi_expert_coordination_fields_but_not_reasoning():
+    report = _report(
+        assignment_id="architecture",
+        covered_scope="ownership boundary",
+        conflicts_with=["debugging"],
+        unresolved_questions=["Who owns retries?"],
+        recommended_followups=["compare both reports"],
+    ).to_dict()
+
+    assert report["assignment_id"] == "architecture"
+    assert report["conflicts_with"] == ["debugging"]
+    assert report["recommended_followups"] == ["compare both reports"]
+    with pytest.raises(ValueError, match="unknown field"):
+        RegionReport.from_dict(
+            "root",
+            {
+                "region": "debugging",
+                "summary": "x",
+                "chain_of_thought": "must not be stored",
+            },
+        )
+
+
+def test_assignment_clear_removes_only_its_receipts_and_reports():
+    board = RegionCoordinationBoard()
+    for assignment_id in ("a", "b"):
+        board.record_receipt(
+            RegionContextReceipt.from_activated(
+                _activated(),
+                task_id="root",
+                region="debugging",
+                assignment_id=assignment_id,
+            )
+        )
+        data = _report(
+            assignment_id=assignment_id,
+            summary=f"{assignment_id} summary",
+        ).to_dict()
+        data.pop("report_id")
+        data.pop("task_id")
+        board.publish("root", data)
+
+    cleared = board.clear("root", assignment_id="a")
+
+    assert cleared == {
+        "task_id": "root",
+        "assignment_id": "a",
+        "removed_receipts": 1,
+        "removed_reports": 1,
+    }
+    assert board.reports("root", assignment_id="a")["count"] == 0
+    assert board.reports("root", assignment_id="b")["count"] == 1
+    assert len(board.status("root")["context_receipts"]) == 1
+
+
 def test_report_validation_and_board_capacity_are_fail_fast():
     with pytest.raises(ValueError, match="unknown field"):
         RegionReport.from_dict(

@@ -33,6 +33,12 @@ from .region_reporting import (
 from .region_expert import RegionExpertEngine, RegionExpertResult
 from .document import DocumentType, ReviewDocument
 from .engine import ReviewEngine
+from .task_coordination import (
+    ExpertAssignment,
+    MemoryRequest,
+    TaskCoordinationBoard,
+    TaskSpec,
+)
 from .pipeline import Pipeline, PipelineContext, Stage
 from .planner import PlanReport, PlanRequest, PlannerEngine
 from .regions import RegionDefinition, route_regions
@@ -61,6 +67,10 @@ __all__ = [
     "RegionReport",
     "RegionExpertEngine",
     "RegionExpertResult",
+    "ExpertAssignment",
+    "MemoryRequest",
+    "TaskCoordinationBoard",
+    "TaskSpec",
     "WorkspaceView",
     "estimate_context_tokens",
     "load_activation_context",

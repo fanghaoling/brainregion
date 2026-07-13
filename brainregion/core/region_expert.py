@@ -32,6 +32,10 @@ _REPORT_FIELDS = frozenset(
         "repeated_failure",
         "requires_user_choice",
         "needs_more_context",
+        "covered_scope",
+        "unresolved_questions",
+        "conflicts_with",
+        "recommended_followups",
     }
 )
 _EVIDENCE_KEYS = ("id", "sha", "path", "file", "issue_id", "source")
@@ -45,7 +49,8 @@ recommended_action, uncertainty, evidence_refs(array),
 decision_scope(routine|task|architecture|user|cross_region),
 risk(low|medium|high), memory_impact(none|supporting|decision_changing|contradictory),
 reversible(boolean), repeated_failure(boolean), requires_user_choice(boolean),
-needs_more_context(boolean).
+needs_more_context(boolean), covered_scope(string), unresolved_questions(array),
+conflicts_with(array of assignment ids), recommended_followups(array).
 Only use evidence_refs from the explicit allowed list. Summary should state the
 expert conclusion, not reproduce memory text. If evidence is insufficient, set
 needs_more_context=true instead of guessing."""
@@ -63,10 +68,19 @@ def _evidence_refs(blocks: tuple[ContextBlock, ...]) -> tuple[str, ...]:
     return tuple(refs)
 
 
-def _context_state(board: RegionCoordinationBoard, task_id: str, region: str, has_blocks: bool) -> str:
+def _context_state(
+    board: RegionCoordinationBoard,
+    task_id: str,
+    region: str,
+    assignment_id: str,
+    has_blocks: bool,
+) -> str:
     status = board.status(task_id)
     for receipt in status.get("context_receipts", []):
-        if receipt.get("region") == region:
+        if (
+            receipt.get("region") == region
+            and receipt.get("assignment_id", "") == assignment_id
+        ):
             return str(receipt.get("state") or "insufficient")
     return "ready" if has_blocks else "insufficient"
 
@@ -101,9 +115,23 @@ def _private_fragments(blocks: tuple[ContextBlock, ...], *, min_length: int = 32
 
 
 def _report_leaks_private_content(report_data: dict[str, Any], blocks: tuple[ContextBlock, ...]) -> bool:
-    public_text = "\n".join(
-        str(report_data.get(field) or "") for field in ("summary", "implication", "recommended_action", "uncertainty")
-    )
+    public_values: list[str] = []
+    for field in (
+        "summary",
+        "implication",
+        "recommended_action",
+        "uncertainty",
+        "covered_scope",
+        "unresolved_questions",
+        "conflicts_with",
+        "recommended_followups",
+    ):
+        value = report_data.get(field)
+        if isinstance(value, (list, tuple)):
+            public_values.extend(str(item) for item in value)
+        else:
+            public_values.append(str(value or ""))
+    public_text = "\n".join(public_values)
     normalized_public = " ".join(public_text.split())
     return any(fragment in normalized_public for fragment in _private_fragments(blocks))
 
@@ -170,6 +198,7 @@ class RegionExpertEngine:
         region: str,
         task: str,
         model: str,
+        assignment_id: str = "",
         endpoint_id: str | None = None,
         max_context_tokens: int = 2000,
         max_blocks: int = 12,
@@ -183,19 +212,26 @@ class RegionExpertEngine:
             raise ValueError("task cannot be empty")
         if not region:
             raise ValueError("region cannot be empty")
+        assignment_id = str(assignment_id or "").strip()
+        if len(assignment_id) > 200:
+            raise ValueError("assignment_id cannot exceed 200 characters")
         view = workspace.read(
             task_id,
             consumer="region",
             region=region,
+            assignment_id=assignment_id,
             max_context_tokens=max_context_tokens,
             max_blocks=max_blocks,
         )
-        context_state = _context_state(coordination, task_id, region, bool(view.blocks))
+        context_state = _context_state(
+            coordination, task_id, region, assignment_id, bool(view.blocks)
+        )
         if not view.blocks:
             published = coordination.publish(
                 task_id,
                 {
                     "region": region,
+                    "assignment_id": assignment_id,
                     "state": "working",
                     "summary": "The expert region has no private context for this task.",
                     "recommended_action": "Load or retrieve the missing region context.",
@@ -275,6 +311,7 @@ class RegionExpertEngine:
                 error="parse_error: expected a JSON RegionReport",
             )
         report_data["region"] = region
+        report_data["assignment_id"] = assignment_id
         report_data["context_state"] = context_state
         evidence_refs = report_data.get("evidence_refs") or []
         if not isinstance(evidence_refs, list):

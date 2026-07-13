@@ -93,6 +93,7 @@ class RegionContextReceipt:
     stale_candidates_removed: int
     conflicts: int
     warnings: tuple[str, ...]
+    assignment_id: str = ""
 
     @classmethod
     def from_activated(
@@ -102,9 +103,13 @@ class RegionContextReceipt:
         task_id: str,
         region: str,
         evidence_refs: tuple[str, ...] = (),
+        assignment_id: str = "",
     ) -> "RegionContextReceipt":
         task_id = _required_text(task_id, "task_id", max_length=200)
         region = _required_text(region, "region", max_length=200).casefold()
+        assignment_id = _optional_text(
+            assignment_id, "assignment_id", max_length=200
+        )
         context_loads = tuple(load for load in activated.loads if load.reason != "activation_mode_not_context")
         requested = tuple(dict.fromkeys(selector for load in context_loads for selector in load.selectors))
         confirmed_values: list[str] = []
@@ -176,12 +181,14 @@ class RegionContextReceipt:
             stale_candidates_removed=stale_removed,
             conflicts=conflicts,
             warnings=tuple(warnings),
+            assignment_id=assignment_id,
         )
 
     def to_dict(self) -> dict[str, Any]:
         return {
             "task_id": self.task_id,
             "region": self.region,
+            "assignment_id": self.assignment_id,
             "state": self.state,
             "requested_selectors": list(self.requested_selectors),
             "confirmed_selectors": list(self.confirmed_selectors),
@@ -215,6 +222,11 @@ class RegionReport:
     repeated_failure: bool
     requires_user_choice: bool
     needs_more_context: bool
+    assignment_id: str = ""
+    covered_scope: str = ""
+    unresolved_questions: tuple[str, ...] = ()
+    conflicts_with: tuple[str, ...] = ()
+    recommended_followups: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, task_id: str, data: dict[str, Any]) -> "RegionReport":
@@ -236,6 +248,11 @@ class RegionReport:
             "repeated_failure",
             "requires_user_choice",
             "needs_more_context",
+            "assignment_id",
+            "covered_scope",
+            "unresolved_questions",
+            "conflicts_with",
+            "recommended_followups",
         }
         unknown = set(data) - known
         if unknown:
@@ -266,6 +283,17 @@ class RegionReport:
             repeated_failure=data.get("repeated_failure", False),
             requires_user_choice=data.get("requires_user_choice", False),
             needs_more_context=data.get("needs_more_context", False),
+            assignment_id=_optional_text(
+                data.get("assignment_id"), "assignment_id", max_length=200
+            ),
+            covered_scope=_optional_text(data.get("covered_scope"), "covered_scope"),
+            unresolved_questions=_string_tuple(
+                data.get("unresolved_questions"), "unresolved_questions"
+            ),
+            conflicts_with=_string_tuple(data.get("conflicts_with"), "conflicts_with"),
+            recommended_followups=_string_tuple(
+                data.get("recommended_followups"), "recommended_followups"
+            ),
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -273,6 +301,7 @@ class RegionReport:
             "report_id": self.report_id,
             "task_id": self.task_id,
             "region": self.region,
+            "assignment_id": self.assignment_id,
             "state": self.state,
             "summary": self.summary,
             "implication": self.implication,
@@ -287,6 +316,10 @@ class RegionReport:
             "repeated_failure": self.repeated_failure,
             "requires_user_choice": self.requires_user_choice,
             "needs_more_context": self.needs_more_context,
+            "covered_scope": self.covered_scope,
+            "unresolved_questions": list(self.unresolved_questions),
+            "conflicts_with": list(self.conflicts_with),
+            "recommended_followups": list(self.recommended_followups),
         }
 
 
@@ -349,13 +382,15 @@ class RegionCoordinationBoard:
         if isinstance(max_reports, bool) or not isinstance(max_reports, int) or max_reports <= 0:
             raise ValueError("max_reports must be a positive integer")
         self._max_reports = max_reports
-        self._receipts: dict[str, dict[str, RegionContextReceipt]] = {}
+        self._receipts: dict[str, dict[tuple[str, str], RegionContextReceipt]] = {}
         self._reports: dict[str, list[PublishedRegionReport]] = {}
         self._lock = RLock()
 
     def record_receipt(self, receipt: RegionContextReceipt) -> dict[str, Any]:
         with self._lock:
-            self._receipts.setdefault(receipt.task_id, {})[receipt.region] = receipt
+            self._receipts.setdefault(receipt.task_id, {})[
+                (receipt.region, receipt.assignment_id)
+            ] = receipt
         return receipt.to_dict()
 
     def publish(self, task_id: str, report_data: dict[str, Any]) -> dict[str, Any]:
@@ -368,20 +403,45 @@ class RegionCoordinationBoard:
             self._reports.setdefault(report.task_id, []).append(published)
         return published.to_dict()
 
+    def reports(
+        self, task_id: str, *, assignment_id: str | None = None
+    ) -> dict[str, Any]:
+        """Return validated public reports, optionally for one assignment."""
+        task_id = _required_text(task_id, "task_id", max_length=200)
+        if assignment_id is not None:
+            assignment_id = _optional_text(
+                assignment_id, "assignment_id", max_length=200
+            )
+        with self._lock:
+            reports = list(self._reports.get(task_id, ()))
+        if assignment_id is not None:
+            reports = [
+                report for report in reports
+                if report.report.assignment_id == assignment_id
+            ]
+        return {
+            "task_id": task_id,
+            "assignment_id": assignment_id,
+            "reports": [report.to_dict() for report in reports],
+            "count": len(reports),
+            "contains_private_context": False,
+        }
+
     def status(self, task_id: str) -> dict[str, Any]:
         task_id = _required_text(task_id, "task_id", max_length=200)
         with self._lock:
             receipts = list(self._receipts.get(task_id, {}).values())
             reports = list(self._reports.get(task_id, ()))
-        latest_by_region: dict[str, PublishedRegionReport] = {}
+        latest_by_region: dict[tuple[str, str], PublishedRegionReport] = {}
         for report in reports:
-            latest_by_region[report.report.region] = report
+            latest_by_region[(report.report.region, report.report.assignment_id)] = report
         return {
             "task_id": task_id,
             "context_receipts": [receipt.to_dict() for receipt in receipts],
             "region_statuses": [
                 {
                     "region": published.report.region,
+                    "assignment_id": published.report.assignment_id,
                     "state": published.report.state,
                     "context_state": published.report.context_state,
                     "decision": published.decision.to_dict(),
@@ -404,13 +464,44 @@ class RegionCoordinationBoard:
             "contains_private_context": False,
         }
 
-    def clear(self, task_id: str) -> dict[str, Any]:
+    def clear(
+        self, task_id: str, *, assignment_id: str | None = None
+    ) -> dict[str, Any]:
         task_id = _required_text(task_id, "task_id", max_length=200)
+        if assignment_id is not None:
+            assignment_id = _optional_text(
+                assignment_id, "assignment_id", max_length=200
+            )
         with self._lock:
-            removed_receipts = len(self._receipts.pop(task_id, {}))
-            removed_reports = len(self._reports.pop(task_id, ()))
+            if assignment_id is None:
+                removed_receipts = len(self._receipts.pop(task_id, {}))
+                removed_reports = len(self._reports.pop(task_id, ()))
+            else:
+                receipts = self._receipts.get(task_id, {})
+                removed_receipts = sum(
+                    1 for key in receipts if key[1] == assignment_id
+                )
+                retained_receipts = {
+                    key: receipt for key, receipt in receipts.items()
+                    if key[1] != assignment_id
+                }
+                reports = self._reports.get(task_id, [])
+                retained_reports = [
+                    report for report in reports
+                    if report.report.assignment_id != assignment_id
+                ]
+                removed_reports = len(reports) - len(retained_reports)
+                if retained_receipts:
+                    self._receipts[task_id] = retained_receipts
+                else:
+                    self._receipts.pop(task_id, None)
+                if retained_reports:
+                    self._reports[task_id] = retained_reports
+                else:
+                    self._reports.pop(task_id, None)
         return {
             "task_id": task_id,
+            "assignment_id": assignment_id,
             "removed_receipts": removed_receipts,
             "removed_reports": removed_reports,
         }

@@ -216,3 +216,78 @@ def test_empty_expert_view_requests_context_without_calling_model():
     assert result["published_report"]["decision"]["action"] == "request_context"
     assert backend.calls == []
     assert board.inbox("expert-task")["count"] == 0
+
+
+def test_expert_reads_and_reports_only_its_assignment_channel():
+    workspace = CognitiveWorkspace()
+    board = RegionCoordinationBoard()
+    for assignment_id, content in (("parser", "Parser evidence"), ("network", "Network evidence")):
+        activated = _activated(content)
+        delivery = workspace.stage(
+            activated,
+            task_id="root",
+            audience="region",
+            target_region="debugging",
+            assignment_id=assignment_id,
+        )
+        board.record_receipt(
+            RegionContextReceipt.from_activated(
+                activated,
+                task_id="root",
+                region="debugging",
+                assignment_id=assignment_id,
+                evidence_refs=tuple(delivery.entry["evidence_refs"]),
+            )
+        )
+    backend = _Backend(_response())
+
+    result = asyncio.run(
+        RegionExpertEngine(backend=backend).run(
+            workspace=workspace,
+            coordination=board,
+            task_id="root",
+            assignment_id="parser",
+            region="debugging",
+            task="Inspect parser evidence only.",
+            model="expert-model",
+        )
+    ).to_dict()
+
+    assert result["ok"] is True
+    assert result["published_report"]["report"]["assignment_id"] == "parser"
+    assert "Parser evidence" in backend.calls[0]["user"]
+    assert "Network evidence" not in backend.calls[0]["user"]
+    assert len(board.status("root")["context_receipts"]) == 2
+
+
+def test_expert_can_publish_multi_assignment_coordination_fields():
+    workspace, board = _runtime("Grounded parser evidence for a bounded scope.")
+    backend = _Backend(
+        _response(
+            covered_scope="parser loading path",
+            unresolved_questions=["Does the gateway add a wrapper?"],
+            conflicts_with=["architecture"],
+            recommended_followups=["compare gateway and parser reports"],
+        )
+    )
+
+    result = _run(backend, workspace, board).to_dict()
+    report = result["published_report"]["report"]
+
+    assert report["covered_scope"] == "parser loading path"
+    assert report["unresolved_questions"] == ["Does the gateway add a wrapper?"]
+    assert report["conflicts_with"] == ["architecture"]
+    assert report["recommended_followups"] == [
+        "compare gateway and parser reports"
+    ]
+
+
+def test_expert_privacy_check_covers_followup_fields():
+    private = "This private followup detail is deliberately longer than thirty two characters"
+    workspace, board = _runtime(private)
+    backend = _Backend(_response(recommended_followups=[private]))
+
+    result = _run(backend, workspace, board).to_dict()
+
+    assert result["ok"] is False
+    assert result["error"].startswith("privacy_error")

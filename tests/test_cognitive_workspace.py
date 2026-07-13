@@ -156,6 +156,59 @@ def test_workspace_rejects_ambiguous_region_delivery_and_capacity_overflow():
         workspace.stage(_activated("second"), task_id="task", audience="shared")
 
 
+def test_same_region_assignments_cannot_read_each_others_private_context():
+    workspace = CognitiveWorkspace()
+    workspace.stage(
+        _activated("parser-only", evidence_id="parser"),
+        task_id="root",
+        audience="region",
+        target_region="debugging",
+        assignment_id="parser",
+    )
+    workspace.stage(
+        _activated("network-only", evidence_id="network"),
+        task_id="root",
+        audience="region",
+        target_region="debugging",
+        assignment_id="network",
+    )
+
+    parser = workspace.read(
+        "root", consumer="region", region="debugging", assignment_id="parser"
+    )
+    network = workspace.read(
+        "root", consumer="region", region="debugging", assignment_id="network"
+    )
+    legacy = workspace.read("root", consumer="region", region="debugging")
+
+    assert [block.content for block in parser.blocks] == ["parser-only"]
+    assert [block.content for block in network.blocks] == ["network-only"]
+    assert legacy.blocks == ()
+    assert parser.to_dict()["assignment_id"] == "parser"
+    assert workspace.inspect("root")["entries"][0]["assignment_id"] == "parser"
+
+
+def test_assignment_clear_is_scoped_and_assignment_is_region_only():
+    workspace = CognitiveWorkspace()
+    for assignment_id in ("a", "b"):
+        workspace.stage(
+            _activated(assignment_id),
+            task_id="root",
+            audience="region",
+            target_region="debugging",
+            assignment_id=assignment_id,
+        )
+
+    assert workspace.clear("root", assignment_id="a")["removed_entries"] == 1
+    assert workspace.read(
+        "root", consumer="region", region="debugging", assignment_id="b"
+    ).blocks
+    with pytest.raises(ValueError, match="only valid for region"):
+        workspace.stage(
+            _activated("x"), task_id="root", audience="shared", assignment_id="x"
+        )
+
+
 def test_mcp_stage_keeps_region_context_out_of_main_view(monkeypatch):
     from brainregion import server
 

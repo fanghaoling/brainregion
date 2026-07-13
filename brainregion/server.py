@@ -72,6 +72,7 @@ from .core.report import CanonicalFinding, Finding, ReviewReport  # noqa: E402
 from .core.reviewers.loader import list_reviewers as _list_reviewer_files  # noqa: E402
 from .core.workflow import suggest_workflow as _suggest_workflow  # noqa: E402
 from .core.wake import wake_gate as _wake_gate  # noqa: E402
+from .core.task_coordination import TaskCoordinationBoard as _TaskCoordinationBoard  # noqa: E402
 from .core.stages import CORE_REVIEWERS_DIR, build_default_pipeline  # noqa: E402
 from .core.stages.review import select_jobs_within_budget as _select_jobs_within_budget  # noqa: E402
 from .core import ReviewDocument  # noqa: E402
@@ -1607,6 +1608,7 @@ def _normalize_experience_region(region: str | None) -> str:
 # 进程内短生命周期认知状态：重启清空，不写 Experience Memory。
 _cognitive_workspace = _CognitiveWorkspace()
 _region_coordination_board = _RegionCoordinationBoard()
+_task_coordination_board = _TaskCoordinationBoard()
 
 # ── Phase 4:Skill/Region Manifest + Registry(三级结构地基;list_skills = discovery surface)──
 # lazy bootstrap(首次访问建):ProviderRegistry 注册 MemoryProvider → load skill YAML(校验 provider ref)
@@ -1655,6 +1657,91 @@ def list_skills(region: str | None = None) -> dict:
     reg = _skill_registry()
     manifests = reg.by_region(region) if region else reg.all_manifests()
     return {"skills": [m.to_public_dict() for m in manifests], "count": len(manifests)}
+
+
+@mcp.tool()
+def create_task(
+    task_id: str,
+    goal: str,
+    parent_task_id: str = "",
+    success_criteria: list[str] | None = None,
+    constraints: list[str] | None = None,
+    status: str = "queued",
+) -> dict:
+    """Register a main-brain task before delegating independent expert work."""
+    task = _task_coordination_board.create_task(
+        {
+            "task_id": task_id,
+            "goal": goal,
+            "parent_task_id": parent_task_id,
+            "success_criteria": success_criteria or [],
+            "constraints": constraints or [],
+            "status": status,
+        }
+    )
+    return {"task": task, "contains_context_content": False}
+
+
+@mcp.tool()
+def delegate_task(
+    task_id: str,
+    assignment_id: str,
+    region: str,
+    question: str,
+    scope: str = "",
+    depends_on: list[str] | None = None,
+    memory_request: dict | None = None,
+    expected_output: str = "region_report",
+    status: str = "queued",
+) -> dict:
+    """Create one independent expert assignment with a directional memory request."""
+    assignment = _task_coordination_board.delegate(
+        task_id,
+        {
+            "assignment_id": assignment_id,
+            "region": region,
+            "question": question,
+            "scope": scope,
+            "depends_on": depends_on or [],
+            "memory_request": memory_request or {},
+            "expected_output": expected_output,
+            "status": status,
+        },
+    )
+    return {"assignment": assignment, "contains_context_content": False}
+
+
+@mcp.tool()
+def task_status(task_id: str) -> dict:
+    """Inspect task assignments plus public report counts and latest decisions."""
+    status = _task_coordination_board.status(task_id)
+    reports = _region_coordination_board.reports(task_id)["reports"]
+    report_groups: dict[str, list[dict]] = {}
+    for published in reports:
+        assignment_id = published["report"].get("assignment_id", "")
+        report_groups.setdefault(assignment_id, []).append(published)
+    assignments: list[dict] = []
+    for assignment in status["assignments"]:
+        item = dict(assignment)
+        published = report_groups.get(item["assignment_id"], [])
+        item["report_count"] = len(published)
+        item["latest_report"] = published[-1] if published else None
+        assignments.append(item)
+    return {
+        **status,
+        "assignments": assignments,
+        "unassigned_report_count": len(report_groups.get("", [])),
+        "contains_private_context": False,
+    }
+
+
+@mcp.tool()
+def collect_reports(task_id: str, assignment_id: str = "") -> dict:
+    """Collect validated independent RegionReports without private workspace blocks."""
+    return _region_coordination_board.reports(
+        task_id,
+        assignment_id=assignment_id if assignment_id else None,
+    )
 
 
 @mcp.tool()
@@ -1756,6 +1843,7 @@ def stage_region_context(
     query: str,
     audience: str = "region",
     target_region: str = "",
+    assignment_id: str = "",
     ttl_steps: int = 3,
     task_intents: list[str] | None = None,
     events: list[str] | None = None,
@@ -1810,6 +1898,7 @@ def stage_region_context(
         task_id=task_id,
         audience=audience,
         target_region=target_region,
+        assignment_id=assignment_id,
         ttl_steps=ttl_steps,
     )
     recipient = target_region if str(audience).strip().casefold() == "region" else audience
@@ -1819,6 +1908,7 @@ def stage_region_context(
         task_id=task_id,
         region=recipient,
         evidence_refs=evidence_refs,
+        assignment_id=assignment_id,
     )
     _region_coordination_board.record_receipt(context_receipt)
     return {
@@ -1842,6 +1932,7 @@ def workspace_context(
     consumer: str = "main",
     report: dict | None = None,
     region: str = "",
+    assignment_id: str = "",
     steps: int = 1,
     max_context_tokens: int = 2000,
     max_blocks: int = 12,
@@ -1857,6 +1948,7 @@ def workspace_context(
             task_id,
             consumer=consumer,
             region=region,
+            assignment_id=assignment_id,
             max_context_tokens=max_context_tokens,
             max_blocks=max_blocks,
         ).to_dict()
@@ -1865,11 +1957,23 @@ def workspace_context(
     if operation == "advance":
         return _cognitive_workspace.advance(task_id, steps=steps)
     if operation == "clear":
-        context_result = _cognitive_workspace.clear(task_id)
-        coordination_result = _region_coordination_board.clear(task_id)
-        return {**context_result, **coordination_result}
+        context_result = _cognitive_workspace.clear(
+            task_id, assignment_id=assignment_id
+        )
+        coordination_result = (
+            _region_coordination_board.clear(
+                task_id, assignment_id=assignment_id if assignment_id else None
+            )
+        )
+        task_result = (
+            _task_coordination_board.clear(task_id) if not assignment_id else {}
+        )
+        return {**context_result, **coordination_result, **task_result}
     if operation == "publish_report":
-        return _region_coordination_board.publish(task_id, report or {})
+        report_data = dict(report or {})
+        if assignment_id:
+            report_data["assignment_id"] = assignment_id
+        return _region_coordination_board.publish(task_id, report_data)
     if operation == "status":
         return _region_coordination_board.status(task_id)
     if operation == "inbox":
@@ -1886,6 +1990,7 @@ async def run_region_expert(
     region: str,
     task: str,
     model: str,
+    assignment_id: str = "",
     max_context_tokens: int = 2000,
     max_blocks: int = 12,
     max_tokens: int = 1200,
@@ -1916,6 +2021,7 @@ async def run_region_expert(
             task_id,
             consumer="region",
             region=region,
+            assignment_id=assignment_id,
             max_context_tokens=max_context_tokens,
             max_blocks=max_blocks,
         )
@@ -1932,6 +2038,7 @@ async def run_region_expert(
                 "ok": False,
                 "task_id": task_id,
                 "region": region,
+                "assignment_id": assignment_id,
                 "model": entry["model"],
                 "endpoint_id": endpoint_id,
                 "published_report": None,
@@ -1976,6 +2083,7 @@ async def run_region_expert(
                 "ok": False,
                 "task_id": task_id,
                 "region": region,
+                "assignment_id": assignment_id,
                 "model": entry["model"],
                 "endpoint_id": entry.get("endpoint_id"),
                 "published_report": None,
@@ -1998,6 +2106,7 @@ async def run_region_expert(
         region=region,
         task=task,
         model=entry["model"],
+        assignment_id=assignment_id,
         endpoint_id=entry.get("endpoint_id"),
         max_context_tokens=max_context_tokens,
         max_blocks=max_blocks,
@@ -2006,6 +2115,7 @@ async def run_region_expert(
         effort=dd.get("effort"),
     )
     output = result.to_dict()
+    output["assignment_id"] = assignment_id
     output["budget"] = budget
     output["context_export"] = export_decision.to_dict()
     output["routing"] = {

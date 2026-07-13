@@ -345,6 +345,35 @@ The fixed authorization matrix is deliberately small: external endpoints receive
 receive public/project/private blocks, and local endpoints may also receive secret blocks. Export telemetry contains only
 mode, action, trust/sensitivity classes, and block counts; it never contains context text.
 
+### Task Delegation
+
+The main brain can register one task and split it into independent expert assignments before loading context:
+
+```text
+create_task(task_id="parser-fix", goal="Resolve the parser regression")
+delegate_task(
+    task_id="parser-fix",
+    assignment_id="debug-parser",
+    region="debugging",
+    question="Find the next bounded diagnostic step",
+    memory_request={
+        "query": "parser configuration regression",
+        "regions": ["memory", "debugging"],
+        "selectors": ["failure_lessons", "evidence_anchors"],
+        "max_context_tokens": 1200
+    }
+)
+```
+
+`MemoryRequest` is routing metadata, not recalled content. Use its values with `stage_region_context`, passing the same
+`task_id`, `assignment_id`, and target region. Workspace entries, context receipts, and RegionReports retain that
+assignment boundary. Two experts in the same region cannot read each other's assignment-private blocks.
+
+`task_status` joins assignment metadata with public report counts and latest decisions. `collect_reports` returns all
+validated reports or one assignment's reports. Neither tool returns private ContextBlocks or model reasoning. Reports can
+also declare `covered_scope`, `unresolved_questions`, `conflicts_with`, and `recommended_followups` for later main-brain
+aggregation; experts remain independent and do not automatically read one another's conclusions.
+
 ## Workflow Suggestions
 
 `suggest_workflow` builds on `route_regions` and returns explicit next tool-call suggestions for the main assistant or
