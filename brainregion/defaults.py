@@ -47,6 +47,7 @@ _BUILTINS = {
     "model_profiles": {},
     "workspace_roots": [],
     "privacy_policy": None,
+    "context_export_policy": {"mode": "off"},
     "context_modes": {},
     "min_compressed_chars": 50,
     "model_reliability_prior": {"mode": "builtin", "custom": {}},

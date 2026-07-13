@@ -239,3 +239,103 @@ def test_mcp_region_expert_ignores_unselected_endpoint_without_credentials(monke
     assert result["ok"] is True
     assert set(captured) == {"selected"}
     assert result["routing"]["endpoint_id"] == "selected"
+
+
+def test_mcp_export_off_and_audit_send_identical_model_prompts(monkeypatch):
+    from brainregion import server
+
+    workspace, board = _runtime("Private context must be byte-identical in off and audit.")
+    backend = _Backend()
+    policy = {"value": {"mode": "off"}}
+    read_count = {"value": 0}
+    original_read = workspace.read
+
+    def counted_read(*args, **kwargs):
+        read_count["value"] += 1
+        return original_read(*args, **kwargs)
+
+    monkeypatch.setattr(workspace, "read", counted_read)
+    monkeypatch.setattr(
+        server._defaults_mod,
+        "apply",
+        lambda **_kwargs: {
+            "endpoints": {},
+            "timeout": 90,
+            "effort": None,
+            "context_export_policy": policy["value"],
+        },
+    )
+    monkeypatch.setattr(server, "_resolve_endpoints", lambda _cfg: {})
+    monkeypatch.setattr(
+        server,
+        "_build_region_expert_engine",
+        lambda _dd, _registry: RegionExpertEngine(backend=backend),
+    )
+    monkeypatch.setattr(server, "_cognitive_workspace", workspace)
+    monkeypatch.setattr(server, "_region_coordination_board", board)
+
+    off = asyncio.run(
+        server.run_region_expert(
+            task_id="expert-mcp-task",
+            region="debugging",
+            task="Keep the prompt unchanged.",
+            model="mock-model",
+        )
+    )
+    policy["value"] = {"mode": "audit"}
+    audit = asyncio.run(
+        server.run_region_expert(
+            task_id="expert-mcp-task",
+            region="debugging",
+            task="Keep the prompt unchanged.",
+            model="mock-model",
+        )
+    )
+
+    assert backend.calls[0]["system"] == backend.calls[1]["system"]
+    assert backend.calls[0]["user"] == backend.calls[1]["user"]
+    assert off["context_export"]["action"] == "bypass"
+    assert audit["context_export"]["action"] == "would_deny"
+    assert audit["model_called"] is True
+    assert read_count["value"] == 3  # off:engine only; audit:policy + engine
+
+
+def test_mcp_export_enforce_denies_before_model_call(monkeypatch):
+    from brainregion import server
+
+    workspace, board = _runtime("Private memory must not leave through an external model.")
+    backend = _Backend()
+    monkeypatch.setattr(
+        server._defaults_mod,
+        "apply",
+        lambda **_kwargs: {
+            "endpoints": {},
+            "timeout": 90,
+            "effort": None,
+            "context_export_policy": {"mode": "enforce"},
+        },
+    )
+    monkeypatch.setattr(server, "_resolve_endpoints", lambda _cfg: {})
+    monkeypatch.setattr(
+        server,
+        "_build_region_expert_engine",
+        lambda _dd, _registry: RegionExpertEngine(backend=backend),
+    )
+    monkeypatch.setattr(server, "_cognitive_workspace", workspace)
+    monkeypatch.setattr(server, "_region_coordination_board", board)
+
+    result = asyncio.run(
+        server.run_region_expert(
+            task_id="expert-mcp-task",
+            region="debugging",
+            task="This call must be denied.",
+            model="mock-model",
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["model_called"] is False
+    assert result["error"].startswith("context_export_denied")
+    assert result["context_export"]["action"] == "deny"
+    assert result["context_export"]["context_modified"] is False
+    assert backend.calls == []

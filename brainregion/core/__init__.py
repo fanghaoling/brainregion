@@ -10,6 +10,13 @@ from .activation import (
     evaluate_activation,
     plan_activation,
 )
+from .context_export import (
+    ContextExportDecision,
+    bypass_context_export,
+    context_export_mode,
+    endpoint_context_trust,
+    evaluate_context_export,
+)
 from .context_loader import (
     ActivatedContext,
     ContextLoadRecord,
@@ -36,6 +43,11 @@ __all__ = [
     "ActivationPlan",
     "ActivationSignal",
     "ContextRequest",
+    "ContextExportDecision",
+    "bypass_context_export",
+    "context_export_mode",
+    "endpoint_context_trust",
+    "evaluate_context_export",
     "RegionWakeDecision",
     "evaluate_activation",
     "plan_activation",

@@ -44,6 +44,12 @@ from .adapters.generic import GenericAdapter  # noqa: E402
 from .adapters.unity import UnityAdapter  # noqa: E402
 from .core.activation import ActivationSignal as _ActivationSignal  # noqa: E402
 from .core.cognitive_workspace import CognitiveWorkspace as _CognitiveWorkspace  # noqa: E402
+from .core.context_export import (  # noqa: E402
+    bypass_context_export as _bypass_context_export,
+    context_export_mode as _context_export_mode,
+    endpoint_context_trust as _endpoint_context_trust,
+    evaluate_context_export as _evaluate_context_export,
+)
 from .core.context_loader import load_activation_context as _load_activation_context  # noqa: E402
 from .core.consult import ConsultEngine, ConsultRequest  # noqa: E402
 from .core.consultants import CONSULTANTS_DIR, list_consultants as _list_consultant_files  # noqa: E402
@@ -1897,15 +1903,61 @@ async def run_region_expert(
     endpoints_cfg = dd.get("endpoints") or {}
     entry = _normalize_one(model, set(endpoints_cfg), endpoints_cfg)
     endpoint_id = entry.get("endpoint_id")
-    selected_endpoints = (
-        {endpoint_id: endpoints_cfg[endpoint_id]} if endpoint_id is not None else {}
-    )
-    endpoint_registry = _resolve_endpoints(selected_endpoints)
     budget = {
         "max_usd": max_cost_usd,
         "estimated_usd": None,
         "exhausted": False,
     }
+    export_policy = dd.get("context_export_policy")
+    export_mode = _context_export_mode(export_policy)
+    export_decision = _bypass_context_export()
+    if export_mode != "off":
+        expert_view = _cognitive_workspace.read(
+            task_id,
+            consumer="region",
+            region=region,
+            max_context_tokens=max_context_tokens,
+            max_blocks=max_blocks,
+        )
+        endpoint_trust = _endpoint_context_trust(
+            endpoint_id, endpoints_cfg, export_policy
+        )
+        export_decision = _evaluate_context_export(
+            expert_view.blocks,
+            policy=export_policy,
+            endpoint_trust=endpoint_trust,
+        )
+        if not export_decision.permits_call:
+            return {
+                "ok": False,
+                "task_id": task_id,
+                "region": region,
+                "model": entry["model"],
+                "endpoint_id": endpoint_id,
+                "published_report": None,
+                "context": {
+                    "blocks_used": len(expert_view.blocks),
+                    "estimated_tokens": int(expert_view.trace.get("estimated_tokens") or 0),
+                    "private_context_returned": False,
+                },
+                "usage": {},
+                "cost_usd": None,
+                "cost_source": None,
+                "parse_ok": False,
+                "error": "context_export_denied: context exceeds endpoint trust",
+                "model_called": False,
+                "context_export": export_decision.to_dict(),
+                "budget": budget,
+                "routing": {
+                    "requested_model": model,
+                    "resolved_model": entry["model"],
+                    "endpoint_id": endpoint_id,
+                },
+            }
+    selected_endpoints = (
+        {endpoint_id: endpoints_cfg[endpoint_id]} if endpoint_id is not None else {}
+    )
+    endpoint_registry = _resolve_endpoints(selected_endpoints)
     if max_cost_usd is not None:
         if isinstance(max_cost_usd, bool) or float(max_cost_usd) < 0:
             raise ValueError("max_cost_usd must be a non-negative number")
@@ -1934,6 +1986,7 @@ async def run_region_expert(
                 "parse_ok": False,
                 "error": "budget_exceeded: expert model call skipped",
                 "model_called": False,
+                "context_export": export_decision.to_dict(),
                 "budget": budget,
                 "routing": {"requested_model": model, "resolved_model": entry["model"]},
             }
@@ -1954,6 +2007,7 @@ async def run_region_expert(
     )
     output = result.to_dict()
     output["budget"] = budget
+    output["context_export"] = export_decision.to_dict()
     output["routing"] = {
         "requested_model": model,
         "resolved_model": entry["model"],

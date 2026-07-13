@@ -11,6 +11,13 @@ def _write_json(path: Path, data: dict) -> None:
     path.write_text(json.dumps(data), encoding="utf-8")
 
 
+def test_context_export_policy_defaults_to_off(monkeypatch):
+    monkeypatch.setattr(defaults, "_global_config_paths", lambda: [])
+    monkeypatch.setattr(defaults, "_project_config_paths", lambda: [])
+
+    assert defaults.apply()["context_export_policy"] == {"mode": "off"}
+
+
 def test_global_config_is_loaded_from_explicit_path(tmp_path, monkeypatch):
     global_config = tmp_path / "global.json"
     _write_json(

@@ -314,6 +314,37 @@ usage/cost telemetry, routing metadata, and context counts; raw model output and
 If the region has no private context, the runtime publishes `request_context` without calling a model. A conservative
 single-job preflight skips the call when `max_cost_usd` cannot cover the configured model and output cap.
 
+Expert context export has an independent three-state authorization gate. It never rewrites allowed context:
+
+```json
+{
+  "context_export_policy": {
+    "mode": "audit",
+    "endpoint_trust": {
+      "trusted_gateway": "trusted"
+    },
+    "source_sensitivity": {
+      "public_docs": "public"
+    },
+    "default_sensitivity": "private"
+  }
+}
+```
+
+- `off` is the default and a true bypass: blocks are not classified and model prompts are unchanged.
+- `audit` records `allow` or `would_deny` metadata but still sends the byte-identical prompt.
+- `enforce` sends the original context when allowed or skips the model call before prompt construction.
+
+Endpoint trust is `external`, `trusted`, or `local`. It can be configured in the policy map above or inline as
+`endpoints.<id>.context_trust`; policy overrides inline metadata. Official/bare model routes default to `external`.
+Block sensitivity is `public`, `project`, `private`, or `secret`. A block-level `metadata.sensitivity` wins, followed by
+`source_sensitivity`, then `default_sensitivity`. Built-in source defaults classify Git as `project`, memory as `private`,
+and unknown sources conservatively as `private`.
+
+The fixed authorization matrix is deliberately small: external endpoints receive only public blocks, trusted endpoints
+receive public/project/private blocks, and local endpoints may also receive secret blocks. Export telemetry contains only
+mode, action, trust/sensitivity classes, and block counts; it never contains context text.
+
 ## Workflow Suggestions
 
 `suggest_workflow` builds on `route_regions` and returns explicit next tool-call suggestions for the main assistant or
