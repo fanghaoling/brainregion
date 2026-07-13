@@ -5,6 +5,16 @@ sanity（含负对照），用于在量 region routing 前先把尺子验证准�
 """
 from __future__ import annotations
 
+from .delegation import (
+    DELEGATION_ARMS,
+    DelegationEvalTask,
+    DelegationRun,
+    ExpertEvalResult,
+    MainEvalResult,
+    build_delegation_plan,
+    run_delegation_eval,
+    summarize_delegation_records,
+)
 from .runner import DEFAULT_VARIANTS, build_engines, run_eval
 from .schema import (
     BlindJudgement,
@@ -15,6 +25,14 @@ from .schema import (
 )
 
 __all__ = [
+    "DELEGATION_ARMS",
+    "DelegationEvalTask",
+    "DelegationRun",
+    "ExpertEvalResult",
+    "MainEvalResult",
+    "build_delegation_plan",
+    "run_delegation_eval",
+    "summarize_delegation_records",
     "DEFAULT_VARIANTS",
     "build_engines",
     "run_eval",

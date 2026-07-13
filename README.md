@@ -374,6 +374,26 @@ validated reports or one assignment's reports. Neither tool returns private Cont
 also declare `covered_scope`, `unresolved_questions`, `conflicts_with`, and `recommended_followups` for later main-brain
 aggregation; experts remain independent and do not automatically read one another's conclusions.
 
+### Delegation Evaluation
+
+`plan_delegation_experiment` creates a matched run matrix in `task -> repeat -> arm` order:
+
+- `main_only`: the main runner receives no expert reports.
+- `single_expert`: only the first deterministic assignment runs.
+- `multi_expert`: every assignment runs independently; experts never receive peer reports.
+
+The plan tool never calls a model. A host adapter can execute the plan with `run_delegation_eval`, providing async expert
+and main runners. Both adapters receive a `DelegationRun` carrying the matched repeat and arm, so they can reuse the same
+environment seed across A/B/C. The harness validates RegionReports before giving them to the main runner, isolates
+individual expert failures, and records only final-answer summaries rather than model reasoning.
+
+`summarize_delegation_experiment` accepts metric-only records and rejects unknown fields such as raw context or answer
+text. Repeats are averaged within each task before paired bootstrap, so repeated runs are not treated as independent
+samples. Only repeat IDs present in both compared arms are paired. Reports split main/expert/total token and cost usage,
+repeated attempts, report adoption, solve rate, score, and pairwise deltas. Fewer than 30 complete task pairs are
+explicitly labeled `pilot_*`; missing one arm does not remove a
+task from comparisons between other complete arm pairs.
+
 ## Workflow Suggestions
 
 `suggest_workflow` builds on `route_regions` and returns explicit next tool-call suggestions for the main assistant or

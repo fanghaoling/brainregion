@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from brainregion.core.cognitive_workspace import CognitiveWorkspace
 from brainregion.core.region_reporting import RegionCoordinationBoard
 from brainregion.core.task_coordination import TaskCoordinationBoard
@@ -124,3 +126,77 @@ def test_task_status_never_contains_workspace_context(monkeypatch):
     assert status["contains_context_content"] is False
     assert status["contains_private_context"] is False
     assert "context_blocks" not in json.dumps(status)
+
+
+def _metric_record(task_id: str, arm: str, solved: bool) -> dict:
+    expert = arm != "main_only"
+    return {
+        "task_id": task_id,
+        "repeat": 0,
+        "arm": arm,
+        "solved": solved,
+        "score": float(solved),
+        "steps": 2,
+        "repeated_attempts": 0,
+        "reports_produced": int(expert),
+        "reports_adopted": int(expert),
+        "expert_failures": 0,
+        "main_input_tokens": 100,
+        "main_total_tokens": 120,
+        "expert_total_tokens": 30 if expert else 0,
+        "total_tokens": 150 if expert else 120,
+        "main_cost_usd": 0.02,
+        "expert_cost_usd": 0.01 if expert else 0.0,
+        "total_cost_usd": 0.03 if expert else 0.02,
+        "main_error": False,
+    }
+
+
+def test_mcp_delegation_experiment_plan_and_metric_summary(monkeypatch):
+    from brainregion import server
+
+    monkeypatch.setattr(server, "_task_coordination_board", TaskCoordinationBoard())
+    server.create_task(task_id="root", goal="g")
+    server.delegate_task(
+        task_id="root",
+        assignment_id="debug",
+        region="debugging",
+        question="q1",
+    )
+    server.delegate_task(
+        task_id="root",
+        assignment_id="review",
+        region="review",
+        question="q2",
+    )
+
+    plan = server.plan_delegation_experiment("root", repeats=2)
+    records = []
+    for task_id in ("a", "b"):
+        records.extend(
+            [
+                _metric_record(task_id, "main_only", False),
+                _metric_record(task_id, "single_expert", True),
+                _metric_record(task_id, "multi_expert", True),
+            ]
+        )
+    summary = server.summarize_delegation_experiment(
+        records,
+        run_id="mcp-delegation",
+        bootstrap_samples=50,
+    )
+
+    assert len(plan["runs"]) == 6
+    assert plan["runs"][1]["assignment_ids"] == ["debug"]
+    assert plan["runs"][2]["assignment_ids"] == ["debug", "review"]
+    assert plan["models_called"] is False
+    assert summary["bootstrap_unit"] == "task"
+    assert summary["pairwise"]["main_only_vs_single_expert"]["n_tasks"] == 2
+    assert "cases" not in summary
+
+
+def test_mcp_delegation_summary_rejects_context_fields():
+    from brainregion import server
+
+    with pytest.raises(ValueError, match="unknown field"):
+        server.summarize_delegation_experiment([{**_metric_record("a", "main_only", False), "raw_context": "no"}])

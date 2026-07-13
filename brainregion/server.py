@@ -83,6 +83,11 @@ from .memory import MemoryProvider, governance, store as memory_store  # noqa: E
 from .git import GitProvider  # noqa: E402
 from .privacy import build_policy  # noqa: E402
 from .providers import LiteLLMBackend  # noqa: E402
+from .eval.delegation import (  # noqa: E402
+    DelegationEvalTask as _DelegationEvalTask,
+    build_delegation_plan as _build_delegation_plan,
+    summarize_delegation_records as _summarize_delegation_records,
+)
 from .workspace import apply_text_patch as _apply_text_patch  # noqa: E402
 from .workspace import inspect_file as _inspect_file  # noqa: E402
 from .workspace import list_allowed_roots as _list_allowed_roots  # noqa: E402
@@ -1741,6 +1746,33 @@ def collect_reports(task_id: str, assignment_id: str = "") -> dict:
     return _region_coordination_board.reports(
         task_id,
         assignment_id=assignment_id if assignment_id else None,
+    )
+
+
+@mcp.tool()
+def plan_delegation_experiment(
+    task_id: str,
+    repeats: int = 1,
+    arms: list[str] | None = None,
+) -> dict:
+    """Build a matched main-only/single/multi run plan without calling models."""
+    task = _DelegationEvalTask.from_task_status(
+        _task_coordination_board.status(task_id)
+    )
+    return _build_delegation_plan(task, repeats=repeats, arms=arms)
+
+
+@mcp.tool()
+def summarize_delegation_experiment(
+    records: list[dict],
+    run_id: str = "",
+    bootstrap_samples: int | None = None,
+) -> dict:
+    """Aggregate metric-only delegation records with task-level paired bootstrap."""
+    return _summarize_delegation_records(
+        records,
+        run_id=run_id,
+        bootstrap_samples=bootstrap_samples,
     )
 
 
