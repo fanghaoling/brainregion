@@ -161,6 +161,7 @@ def test_fixture_delegation_eval_runs_fresh_arms_and_reuses_matched_experts():
 
     assert report["n_runs"] == 6
     assert all(summary["solve_rate"] == 1.0 for summary in report["per_arm"].values())
+    assert all(summary["protocol_completion_rate"] == 1.0 for summary in report["per_arm"].values())
     assert report["per_arm"]["single_expert"]["report_adoption_rate"] == 1.0
     assert report["per_arm"]["multi_expert"]["report_adoption_rate"] == 1.0
     assert report["execution"]["actual_main_runs"] == 6
@@ -177,6 +178,13 @@ def test_fixture_delegation_eval_runs_fresh_arms_and_reuses_matched_experts():
     assert sum("<expert_reports>" not in user for user in backend.main_initial_users) == 2
     multi_cases = [case for case in report["cases"] if case["arm"] == "multi_expert"]
     assert all(case["main_result"]["adopted_assignment_ids"] == ["debugging", "review"] for case in multi_cases)
+    assert all(case["main_result"]["termination_reason"] == "done" for case in report["cases"])
+    assert all(
+        case["main_result"]["sandbox_diagnostics"]["tool_sequence"]
+        == ["apply_text_patch", "workspace_run_check", "done"]
+        for case in report["cases"]
+    )
+    assert all(case["main_result"]["sandbox_diagnostics"]["contains_reasoning"] is False for case in report["cases"])
 
 
 def test_done_call_adoption_contract_is_strict_and_deduplicated():
@@ -211,6 +219,36 @@ def test_fixture_delegation_rejects_duplicate_experts_before_model_calls():
                 duplicate,
             )
         )
+
+
+def test_fixture_delegation_marks_provider_failure_as_invalid_run():
+    class FailingBackend:
+        async def complete_messages(self, messages, **kwargs):
+            return ModelResponse(model=kwargs["model"], error="quota exceeded")
+
+        async def complete(self, **kwargs):
+            raise AssertionError("main_only must not call an expert")
+
+    report = asyncio.run(
+        run_fixture_delegation_eval(
+            FailingBackend(),
+            "main-model",
+            [get_fixture("off_by_one")],
+            _experts(),
+            arms=["main_only"],
+            max_steps=10,
+            consecutive_error_limit=3,
+        )
+    )
+
+    summary = report["per_arm"]["main_only"]
+    main_result = report["cases"][0]["main_result"]
+    assert summary["n_valid_runs"] == 0
+    assert summary["solve_rate"] is None
+    assert summary["infrastructure_failures"] == 1
+    assert main_result["infrastructure_error"] is True
+    assert main_result["termination_reason"] == "model_error"
+    assert main_result["error"] == "sandbox_model_error"
 
 
 def test_delegation_cli_parses_repeatable_endpoint_qualified_experts():

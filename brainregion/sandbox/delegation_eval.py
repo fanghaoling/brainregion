@@ -8,6 +8,7 @@ those public reports, then edits and verifies a fresh sandbox directory.
 from __future__ import annotations
 
 import json
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -208,6 +209,7 @@ async def run_fixture_delegation_eval(
     fixture_by_id = {task.id: task for task in tasks}
     expert_by_id = {expert.assignment_id: expert for expert in experts}
     expert_cache: dict[tuple[str, int, str], ExpertEvalResult] = {}
+    main_diagnostics: dict[tuple[str, int, str], dict[str, Any]] = {}
     kept_run_dirs: list[dict[str, Any]] = []
     actual_expert_model_calls = 0
     actual_main_runs = 0
@@ -306,11 +308,32 @@ async def run_fixture_delegation_eval(
             actual_main_runs += 1
             actual_main_model_calls += trajectory.n_steps
             actual_main_cost_usd += float(trajectory.total_main_cost_usd)
+            tool_sequence: list[str] = []
+            touched_paths: list[str] = []
+            for step in trajectory.steps:
+                label = step.tool or ("done" if step.done else "model_turn")
+                tool_sequence.append(label)
+                path = step.args.get("path") if isinstance(step.args, dict) else None
+                if isinstance(path, str) and path not in touched_paths:
+                    touched_paths.append(path)
+            main_diagnostics[(eval_task.task_id, run.repeat, run.arm)] = {
+                "tool_sequence": tool_sequence,
+                "tool_call_counts": dict(Counter(tool_sequence)),
+                "touched_paths": touched_paths,
+                "workspace_effects": trajectory.workspace_effects,
+                "verification_runs": trajectory.verification_runs,
+                "last_verification_passed": trajectory.last_verification_passed,
+                "contains_reasoning": False,
+                "contains_tool_results": False,
+            }
             return MainEvalResult(
                 solved=trajectory.tests_green,
                 score=float(trajectory.tests_green),
                 steps=trajectory.n_steps,
                 repeated_attempts=max(0, trajectory.workspace_effects - 1),
+                protocol_completed=trajectory.done,
+                termination_reason=trajectory.termination_reason,
+                infrastructure_error=trajectory.termination_reason == "model_error",
                 adopted_assignment_ids=tuple(trajectory.adopted_assignment_ids),
                 usage=dict(trajectory.total_main_usage),
                 cost_usd=float(trajectory.total_main_cost_usd),
@@ -320,7 +343,9 @@ async def run_fixture_delegation_eval(
                     f"workspace_effects={trajectory.workspace_effects}"
                 ),
                 error=(
-                    f"sandbox_{trajectory.termination_reason}" if trajectory.termination_reason == "parse_error" else ""
+                    f"sandbox_{trajectory.termination_reason}"
+                    if trajectory.termination_reason in {"model_error", "parse_error"}
+                    else ""
                 ),
             )
         finally:
@@ -361,6 +386,21 @@ async def run_fixture_delegation_eval(
         "contains_trajectories": False,
         "contains_private_context": False,
     }
+    for case in report["cases"]:
+        key = (case["task_id"], case["repeat"], case["arm"])
+        case["main_result"]["sandbox_diagnostics"] = main_diagnostics.get(
+            key,
+            {
+                "tool_sequence": [],
+                "tool_call_counts": {},
+                "touched_paths": [],
+                "workspace_effects": 0,
+                "verification_runs": 0,
+                "last_verification_passed": None,
+                "contains_reasoning": False,
+                "contains_tool_results": False,
+            },
+        )
     return report
 
 
@@ -371,11 +411,15 @@ def render_fixture_delegation_summary(report: dict[str, Any]) -> str:
         f"main={execution.get('main_model', '')} actual_cost=${float(execution.get('actual_total_cost_usd') or 0):.4f}",
     ]
     for arm, summary in (report.get("per_arm") or {}).items():
+        solve_rate = summary.get("solve_rate")
+        solve_text = "NA" if solve_rate is None else f"{float(solve_rate):.2f}"
         lines.append(
-            f"  {arm}: solve_rate={float(summary.get('solve_rate') or 0):.2f} "
+            f"  {arm}: solve_rate={solve_text} valid={summary.get('n_valid_runs')}/{summary.get('n_runs')} "
+            f"completed={summary.get('protocol_completion_rate')} "
             f"steps={float(summary.get('mean_steps') or 0):.1f} "
             f"cost=${float(summary.get('mean_total_cost_usd') or 0):.4f} "
-            f"adoption={summary.get('report_adoption_rate')}"
+            f"adoption={summary.get('report_adoption_rate')} "
+            f"adoption_observed={summary.get('adoption_observation_rate')}"
         )
     for name, pair in (report.get("pairwise") or {}).items():
         delta = ((pair.get("deltas") or {}).get("solved_delta") or {}).get("point")

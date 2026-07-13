@@ -418,6 +418,17 @@ model thoughts and sandbox trajectories are deliberately excluded; use `--keep` 
 local inspection. The first adapter intentionally supports bounded fixtures only. Real-repository worktree delegation
 requires a separate context acquisition and isolation layer.
 
+Multi-file calibration fixtures are opt-in and never expand the default sandbox suite. Select one or more of
+`tenant_cache_scope`, `settings_precedence`, `event_bus_snapshot`, and `retry_error_scope` through `--tasks`. Reports
+separate objective `solve_rate` from `protocol_completion_rate`: a model may turn pytest green yet still exhaust its
+step budget without emitting a valid completion response. Calibrate the main model on `main_only` first, then run the
+three-arm matrix only for tasks whose baseline is neither a floor nor a ceiling.
+
+Provider, quota, network, and runner failures are marked as infrastructure errors and excluded from valid solve-rate
+and matched-pair denominators. Explicit report adoption is observable only when the main model emits a valid completion
+response, so reports include both `report_adoption_rate` and `adoption_observation_rate`; a missing completion is not
+silently counted as rejecting expert advice.
+
 ## Workflow Suggestions
 
 `suggest_workflow` builds on `route_regions` and returns explicit next tool-call suggestions for the main assistant or

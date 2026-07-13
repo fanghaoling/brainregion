@@ -46,6 +46,7 @@ _RECORD_FIELDS = frozenset(
         "main_error",
     }
 )
+_OPTIONAL_RECORD_FIELDS = frozenset({"protocol_completed", "infrastructure_error"})
 
 
 def _required_text(value: Any, name: str, *, max_length: int = 4000) -> str:
@@ -189,6 +190,9 @@ class MainEvalResult:
     score: float | None = None
     steps: int = 0
     repeated_attempts: int = 0
+    protocol_completed: bool | None = None
+    termination_reason: str = ""
+    infrastructure_error: bool = False
     adopted_assignment_ids: tuple[str, ...] = ()
     usage: dict[str, Any] = field(default_factory=dict)
     cost_usd: float = 0.0
@@ -204,6 +208,11 @@ class MainEvalResult:
                 raise ValueError("main score must be between 0 and 1")
         _nonnegative_int(self.steps, "main steps")
         _nonnegative_int(self.repeated_attempts, "main repeated_attempts")
+        if self.protocol_completed is not None and not isinstance(self.protocol_completed, bool):
+            raise ValueError("main protocol_completed must be a boolean or null")
+        if not isinstance(self.infrastructure_error, bool):
+            raise ValueError("main infrastructure_error must be a boolean")
+        _bounded_text(self.termination_reason, "termination_reason", max_length=100)
         _nonnegative_float(self.cost_usd, "main cost_usd")
         _bounded_text(self.answer_summary, "answer_summary")
         _bounded_text(self.error, "main error", max_length=500)
@@ -214,6 +223,9 @@ class MainEvalResult:
             "score": self.score,
             "steps": self.steps,
             "repeated_attempts": self.repeated_attempts,
+            "protocol_completed": self.protocol_completed,
+            "termination_reason": self.termination_reason,
+            "infrastructure_error": self.infrastructure_error,
             "adopted_assignment_ids": list(dict.fromkeys(self.adopted_assignment_ids)),
             "usage": normalize_usage(self.usage),
             "cost_usd": float(self.cost_usd),
@@ -247,6 +259,8 @@ class DelegationCase:
             "score": self.main_result.score,
             "steps": self.main_result.steps,
             "repeated_attempts": self.main_result.repeated_attempts,
+            "protocol_completed": self.main_result.protocol_completed,
+            "infrastructure_error": self.main_result.infrastructure_error,
             "reports_produced": len(successful_assignments),
             "reports_adopted": len(adopted),
             "expert_failures": sum(1 for result in self.expert_results if result.error),
@@ -398,6 +412,7 @@ async def run_delegation_eval(
                 except Exception as exc:  # noqa: BLE001 - keep matched matrix complete
                     main_result = MainEvalResult(
                         solved=False,
+                        infrastructure_error=True,
                         error=f"main_runner_error: {exc}"[:500],
                     )
                 cases.append(
@@ -428,6 +443,7 @@ _METRICS = (
     "score",
     "steps",
     "repeated_attempts",
+    "protocol_completed",
     "reports_produced",
     "reports_adopted",
     "expert_failures",
@@ -453,25 +469,37 @@ def _per_arm(records: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         grouped.setdefault(record["arm"], []).append(record)
     output: dict[str, dict[str, Any]] = {}
     for arm, arm_records in grouped.items():
-        reports = sum(int(record["reports_produced"]) for record in arm_records)
-        adopted = sum(int(record["reports_adopted"]) for record in arm_records)
+        valid_records = [record for record in arm_records if not record.get("infrastructure_error")]
+        reports = sum(int(record["reports_produced"]) for record in valid_records)
+        observable_reports = sum(
+            int(record["reports_produced"]) for record in valid_records if record.get("protocol_completed") is not False
+        )
+        adopted = sum(
+            int(record["reports_adopted"]) for record in valid_records if record.get("protocol_completed") is not False
+        )
         output[arm] = {
             "n_runs": len(arm_records),
+            "n_valid_runs": len(valid_records),
             "n_tasks": len({record["task_id"] for record in arm_records}),
-            "solve_rate": _mean(arm_records, "solved"),
-            "mean_score": _mean(arm_records, "score"),
-            "mean_steps": _mean(arm_records, "steps"),
-            "mean_repeated_attempts": _mean(arm_records, "repeated_attempts"),
-            "mean_main_input_tokens": _mean(arm_records, "main_input_tokens"),
-            "mean_main_total_tokens": _mean(arm_records, "main_total_tokens"),
-            "mean_expert_total_tokens": _mean(arm_records, "expert_total_tokens"),
-            "mean_total_tokens": _mean(arm_records, "total_tokens"),
-            "mean_main_cost_usd": _mean(arm_records, "main_cost_usd"),
-            "mean_expert_cost_usd": _mean(arm_records, "expert_cost_usd"),
-            "mean_total_cost_usd": _mean(arm_records, "total_cost_usd"),
-            "report_adoption_rate": adopted / reports if reports else None,
+            "valid_run_rate": len(valid_records) / len(arm_records),
+            "raw_solve_rate": _mean(arm_records, "solved"),
+            "solve_rate": _mean(valid_records, "solved"),
+            "mean_score": _mean(valid_records, "score"),
+            "mean_steps": _mean(valid_records, "steps"),
+            "mean_repeated_attempts": _mean(valid_records, "repeated_attempts"),
+            "protocol_completion_rate": _mean(valid_records, "protocol_completed"),
+            "mean_main_input_tokens": _mean(valid_records, "main_input_tokens"),
+            "mean_main_total_tokens": _mean(valid_records, "main_total_tokens"),
+            "mean_expert_total_tokens": _mean(valid_records, "expert_total_tokens"),
+            "mean_total_tokens": _mean(valid_records, "total_tokens"),
+            "mean_main_cost_usd": _mean(valid_records, "main_cost_usd"),
+            "mean_expert_cost_usd": _mean(valid_records, "expert_cost_usd"),
+            "mean_total_cost_usd": _mean(valid_records, "total_cost_usd"),
+            "report_adoption_rate": adopted / observable_reports if observable_reports else None,
+            "adoption_observation_rate": observable_reports / reports if reports else None,
             "expert_failures": sum(int(record["expert_failures"]) for record in arm_records),
             "main_failures": sum(bool(record["main_error"]) for record in arm_records),
+            "infrastructure_failures": sum(bool(record.get("infrastructure_error")) for record in arm_records),
         }
     return output
 
@@ -482,7 +510,14 @@ def _paired_task_rows(records: list[dict[str, Any]], control: str, treatment: st
         grouped.setdefault(record["task_id"], {}).setdefault(record["repeat"], {})[record["arm"]] = record
     rows: list[dict[str, Any]] = []
     for task_id, by_repeat in grouped.items():
-        matched = [arms for arms in by_repeat.values() if control in arms and treatment in arms]
+        matched = [
+            arms
+            for arms in by_repeat.values()
+            if control in arms
+            and treatment in arms
+            and not arms[control].get("infrastructure_error")
+            and not arms[treatment].get("infrastructure_error")
+        ]
         if not matched:
             continue
         row: dict[str, Any] = {"task_id": task_id, "matched_repeats": len(matched)}
@@ -533,7 +568,7 @@ def summarize_delegation_records(
     for record in records:
         if not isinstance(record, dict):
             raise ValueError("delegation record must be an object")
-        unknown = set(record) - _RECORD_FIELDS
+        unknown = set(record) - _RECORD_FIELDS - _OPTIONAL_RECORD_FIELDS
         if unknown:
             raise ValueError(f"delegation record unknown field(s): {sorted(unknown)}")
         arm = str(record.get("arm") or "")
@@ -557,6 +592,14 @@ def summarize_delegation_records(
             raise ValueError("reports_adopted cannot exceed reports_produced")
         if not isinstance(record.get("main_error", False), bool):
             raise ValueError("delegation record main_error must be a boolean")
+        protocol_completed = record.get("protocol_completed")
+        if protocol_completed is not None and not isinstance(protocol_completed, bool):
+            raise ValueError("delegation record protocol_completed must be a boolean or null")
+        infrastructure_error = record.get("infrastructure_error", False)
+        if not isinstance(infrastructure_error, bool):
+            raise ValueError("delegation record infrastructure_error must be a boolean")
+        if protocol_completed is False and reports_adopted:
+            raise ValueError("reports_adopted requires an observable protocol completion")
         item = {
             "task_id": _required_text(record.get("task_id"), "task_id", max_length=200),
             "repeat": _nonnegative_int(record.get("repeat"), "repeat"),
@@ -565,6 +608,8 @@ def summarize_delegation_records(
             "score": score,
             "steps": _nonnegative_int(record.get("steps"), "steps"),
             "repeated_attempts": _nonnegative_int(record.get("repeated_attempts"), "repeated_attempts"),
+            "protocol_completed": protocol_completed,
+            "infrastructure_error": infrastructure_error,
             "reports_produced": reports_produced,
             "reports_adopted": reports_adopted,
             "expert_failures": _nonnegative_int(record.get("expert_failures"), "expert_failures"),
@@ -612,6 +657,7 @@ def summarize_delegation_records(
             for metric in (
                 "solved",
                 "score",
+                "protocol_completed",
                 "repeated_attempts",
                 "main_input_tokens",
                 "total_tokens",

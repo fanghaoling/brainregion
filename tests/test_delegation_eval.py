@@ -88,6 +88,8 @@ def test_runner_executes_zero_one_many_experts_and_tracks_split_costs():
             score=0.5 if run.arm == ARM_MAIN_ONLY else 1.0,
             steps=3 if run.arm == ARM_MAIN_ONLY else 2,
             repeated_attempts=1 if run.arm == ARM_MAIN_ONLY else 0,
+            protocol_completed=run.arm != ARM_MAIN_ONLY,
+            termination_reason="max_steps" if run.arm == ARM_MAIN_ONLY else "done",
             adopted_assignment_ids=adopted,
             usage={"input_tokens": 100, "output_tokens": 20},
             cost_usd=0.02,
@@ -111,6 +113,9 @@ def test_runner_executes_zero_one_many_experts_and_tracks_split_costs():
     assert report["per_arm"][ARM_SINGLE_EXPERT]["report_adoption_rate"] == 1.0
     assert report["per_arm"][ARM_MULTI_EXPERT]["mean_expert_cost_usd"] == 0.02
     assert report["per_arm"][ARM_MULTI_EXPERT]["mean_total_tokens"] == 150
+    assert report["per_arm"][ARM_MAIN_ONLY]["protocol_completion_rate"] == 0.0
+    assert report["per_arm"][ARM_MULTI_EXPERT]["protocol_completion_rate"] == 1.0
+    assert report["cases"][0]["main_result"]["termination_reason"] == "max_steps"
     assert report["pairwise"]["main_only_vs_single_expert"]["n_tasks"] == 3
     assert report["bootstrap_unit"] == "task"
     assert report["contains_reasoning"] is False
@@ -286,6 +291,42 @@ def test_summary_requires_complete_metric_schema():
         summarize_delegation_records([record])
 
 
+def test_infrastructure_failures_are_excluded_from_solve_rate_and_pairing():
+    control = _paired_record("a", 0, ARM_MAIN_ONLY, False)
+    treatment = {
+        **_paired_record("a", 0, ARM_SINGLE_EXPERT, False),
+        "infrastructure_error": True,
+        "main_error": True,
+    }
+
+    summary = summarize_delegation_records([control, treatment], run_id="infrastructure-filter", bootstrap_samples=50)
+    treatment_summary = summary["per_arm"][ARM_SINGLE_EXPERT]
+
+    assert treatment_summary["n_valid_runs"] == 0
+    assert treatment_summary["valid_run_rate"] == 0.0
+    assert treatment_summary["raw_solve_rate"] == 0.0
+    assert treatment_summary["solve_rate"] is None
+    assert treatment_summary["infrastructure_failures"] == 1
+    assert summary["pairwise"]["main_only_vs_single_expert"]["n_tasks"] == 0
+
+
+def test_adoption_rate_is_conditioned_on_protocol_completion():
+    incomplete = {
+        **_paired_record("a", 0, ARM_SINGLE_EXPERT, True),
+        "protocol_completed": False,
+        "reports_adopted": 0,
+    }
+
+    summary = summarize_delegation_records([incomplete], run_id="adoption-observation")
+    arm = summary["per_arm"][ARM_SINGLE_EXPERT]
+
+    assert arm["report_adoption_rate"] is None
+    assert arm["adoption_observation_rate"] == 0.0
+
+    with pytest.raises(ValueError, match="observable protocol completion"):
+        summarize_delegation_records([{**incomplete, "reports_adopted": 1}])
+
+
 def test_contracts_fail_fast_for_invalid_tasks_arms_and_main_results():
     with pytest.raises(ValueError, match="unknown field"):
         DelegationEvalTask.from_dict({"task_id": "x", "goal": "g", "raw_context": "forbidden"})
@@ -308,6 +349,8 @@ def test_contracts_fail_fast_for_invalid_tasks_arms_and_main_results():
         {"reports_produced": 0, "reports_adopted": 1},
         {"task_id": ""},
         {"main_error": "false"},
+        {"protocol_completed": "false"},
+        {"infrastructure_error": "false"},
         {"steps": 1.5},
         {"raw_context": "must not be accepted"},
     ],

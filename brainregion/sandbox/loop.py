@@ -1230,7 +1230,7 @@ async def run_agent(
                 ))
                 emit_event("sandbox.step", payload={"task_id": task.id, "arm": arm, "step": step, "model_error": resp.error})
                 if consecutive_errors >= consecutive_error_limit:
-                    traj.termination_reason = "parse_error"
+                    traj.termination_reason = "model_error"
                     break
                 messages.append({"role": "assistant", "content": resp.content or ""})
                 messages.append({"role": "user", "content": f"ERROR: 上一步模型输出无效({resp.error or 'empty'})。重发一个合法 JSON tool-call。"})
@@ -1422,6 +1422,8 @@ async def run_agent(
             traj.solve_status = "budget_exceeded"
         elif traj.termination_reason == "parse_error":
             traj.solve_status = "parse_error"
+        elif traj.termination_reason == "model_error":
+            traj.solve_status = "model_error"
         else:
             traj.solve_status = "tests_fail"
 

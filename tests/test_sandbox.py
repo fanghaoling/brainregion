@@ -313,6 +313,31 @@ def test_loop_consecutive_parse_error_early_stop():
         cleanup_run_dir(run_dir)
 
 
+def test_loop_consecutive_backend_errors_are_infrastructure_failures():
+    class FailingBackend:
+        async def complete_messages(self, messages, **kwargs):
+            return ModelResponse(model="mock", error="provider unavailable")
+
+    task, run_dir = _materialized("off_by_one")
+    try:
+        traj = asyncio.run(
+            run_agent(
+                FailingBackend(),
+                "mock",
+                task,
+                run_dir=run_dir,
+                arm="none",
+                max_steps=10,
+                consecutive_error_limit=3,
+            )
+        )
+        assert traj.solve_status == "model_error"
+        assert traj.termination_reason == "model_error"
+        assert traj.n_steps == 3
+    finally:
+        cleanup_run_dir(run_dir)
+
+
 def test_loop_budget_exceeded_terminates():
     task, run_dir = _materialized("off_by_one")
     try:

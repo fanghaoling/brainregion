@@ -5,6 +5,7 @@ gold_diff 仅作人类诊断(solved 以 tests-green 为准,见 verify.py)。
 """
 from __future__ import annotations
 
+from .delegation_fixtures import DELEGATION_CALIBRATION_FIXTURES
 from .task import SandboxTask
 
 # --- fixture 1:off-by-one(区间端点)---
@@ -223,13 +224,17 @@ SANDBOX_FIXTURES: list[SandboxTask] = [
     ),
 ]
 
+ALL_SANDBOX_FIXTURES: tuple[SandboxTask, ...] = tuple(
+    [*SANDBOX_FIXTURES, *DELEGATION_CALIBRATION_FIXTURES]
+)
+
 
 def get_fixture(task_id: str) -> SandboxTask:
-    for task in SANDBOX_FIXTURES:
+    for task in ALL_SANDBOX_FIXTURES:
         if task.id == task_id:
             return task
     raise KeyError(f"unknown sandbox fixture: {task_id}")
 
 
 def list_fixture_ids() -> list[str]:
-    return [t.id for t in SANDBOX_FIXTURES]
+    return [t.id for t in ALL_SANDBOX_FIXTURES]
