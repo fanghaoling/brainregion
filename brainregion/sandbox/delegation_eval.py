@@ -31,6 +31,7 @@ from brainregion.eval.delegation import (
 
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
 from .delegation_trigger import DelegationTriggerPolicy
+from .delegation_shadow import shadow_cases_from_delegation_report, summarize_shadow_gates
 from .loop import AdvisoryInjection, AdvisoryTriggerState, run_agent
 from .task import SandboxTask
 
@@ -333,6 +334,16 @@ async def run_fixture_delegation_eval(
                 "verification_runs": trajectory.verification_runs,
                 "last_verification_passed": trajectory.last_verification_passed,
                 "advisory_injections": list(trajectory.advisory_injections),
+                "progress_trace": trajectory.progress_trace,
+                "cognitive_scaffold": (
+                    trajectory.cognitive_state.public_metrics()
+                    if trajectory.cognitive_state
+                    else {
+                        "enabled": False,
+                        "contains_state_content": False,
+                        "contains_reasoning": False,
+                    }
+                ),
                 "contains_reasoning": False,
                 "contains_tool_results": False,
             }
@@ -441,6 +452,7 @@ async def run_fixture_delegation_eval(
         "main_endpoint_id": main_endpoint_id,
         "experts": [expert.public_dict() for expert in experts],
         "trigger_policy": trigger_policy.to_dict(),
+        "max_steps": max_steps,
         "actual_main_runs": actual_main_runs,
         "actual_main_model_calls": actual_main_model_calls,
         "actual_expert_model_calls": actual_expert_model_calls,
@@ -464,10 +476,19 @@ async def run_fixture_delegation_eval(
                 "verification_runs": 0,
                 "last_verification_passed": None,
                 "advisory_injections": [],
+                "progress_trace": [],
+                "cognitive_scaffold": {
+                    "enabled": False,
+                    "contains_state_content": False,
+                    "contains_reasoning": False,
+                },
                 "contains_reasoning": False,
                 "contains_tool_results": False,
             },
         )
+    report["shadow_gates"] = summarize_shadow_gates(
+        shadow_cases_from_delegation_report(report, max_steps=max_steps)
+    )
     return report
 
 
@@ -494,6 +515,13 @@ def render_fixture_delegation_summary(report: dict[str, Any]) -> str:
         lines.append(
             f"  {name}: n_tasks={pair.get('n_tasks')} matched_repeats={pair.get('n_matched_repeats')} "
             f"solve_delta={delta} gate={(pair.get('gate') or {}).get('decision')}"
+        )
+    for name, shadow in ((report.get("shadow_gates") or {}).get("policies") or {}).items():
+        lines.append(
+            f"  shadow/{name}: activation={shadow.get('activation_rate')} "
+            f"easy_false_wake={shadow.get('easy_case_false_wake_rate')} "
+            f"hard_wake={shadow.get('hard_case_wake_rate')} "
+            f"avoided={shadow.get('expert_calls_avoided_vs_always_on')}"
         )
     return "\n".join(lines)
 

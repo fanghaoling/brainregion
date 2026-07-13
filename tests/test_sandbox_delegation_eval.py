@@ -226,6 +226,7 @@ def test_fixture_delegation_eval_runs_fresh_arms_and_reuses_matched_experts():
     assert report["execution"]["actual_expert_cost_usd"] == pytest.approx(0.04)
     assert report["execution"]["contains_trajectories"] is False
     assert report["contains_reasoning"] is False
+    assert report["shadow_gates"]["models_called"] is False
     assert len(backend.expert_calls) == 4
     assert backend.main_calls == 18
     assert all("<expert_reports>" not in call["user"] for call in backend.expert_calls)
@@ -240,6 +241,16 @@ def test_fixture_delegation_eval_runs_fresh_arms_and_reuses_matched_experts():
         for case in report["cases"]
     )
     assert all(case["main_result"]["sandbox_diagnostics"]["contains_reasoning"] is False for case in report["cases"])
+    for case in report["cases"]:
+        progress = case["main_result"]["sandbox_diagnostics"]["progress_trace"]
+        assert [step["operation"] for step in progress] == [
+            "apply_text_patch",
+            "workspace_run_check",
+            "done",
+        ]
+        assert progress[0]["workspace_effect"] is True
+        assert progress[1]["verification_passed"] is True
+        assert all("thought" not in step and "result" not in step and "args" not in step for step in progress)
 
 
 def test_done_call_adoption_contract_is_strict_and_deduplicated():
@@ -300,6 +311,8 @@ def test_triggered_fixture_arm_wakes_after_observed_stall_and_then_injects_repor
     }
     assert diagnostics["advisory_injections"][0]["step"] == 2
     assert diagnostics["advisory_injections"][0]["contains_advice"] is False
+    assert diagnostics["progress_trace"][0]["target_is_new"] is True
+    assert diagnostics["progress_trace"][2]["workspace_effect"] is True
     assert diagnostics["tool_sequence"] == [
         "search_text",
         "read_text",

@@ -53,12 +53,17 @@ def _effort_kwargs(model: str, effort: str | None, thinking: bool | None = None)
             kw["reasoning_effort"] = effort
         return kw
     if "claude" in model:
-        if not effort:
+        # Preserve the legacy ``effort`` behavior while also honoring an explicit
+        # thinking switch. This matters for matched experiments: thinking=True
+        # must not silently collapse into the control arm when effort is omitted.
+        if thinking is False:
             return {}
-        return {
-            "thinking": {"type": "adaptive"},
-            "extra_body": {"output_config": {"effort": effort}},
-        }
+        if thinking is True or effort:
+            kwargs: dict = {"thinking": {"type": "adaptive"}}
+            if effort:
+                kwargs["extra_body"] = {"output_config": {"effort": effort}}
+            return kwargs
+        return {}
     if re.match(r"o[1-9]", short):  # o1/o3/o4/o5 系列
         return {"reasoning_effort": effort} if effort else {}
     return {}

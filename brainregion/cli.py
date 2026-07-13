@@ -18,16 +18,6 @@ import json
 import sys
 from pathlib import Path
 
-from brainregion.server import review_document
-
-# eval 子命令单独编排（不走 review_document；它直接调 engine 做 A/B 隔离）
-from brainregion.eval import cli as eval_cli
-from brainregion.sandbox import cli as sandbox_cli
-from brainregion.sandbox.env_eval import ARM_PRESETS
-
-ARM_PRESETS_KEYS = list(ARM_PRESETS.keys())
-
-
 def _read_text_input(args) -> str:
     """plan/doc 输入优先级：--text > 文件路径 > stdin(-)。"""
     if args.text is not None:
@@ -216,9 +206,14 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_run.add_argument("--max-cost-usd", type=float, default=None)
     p_sb_run.add_argument("--max-tokens", type=int, default=None)
     p_sb_run.add_argument("--thinking", default="off", choices=["off", "on"],
-                          help="DeepSeek 思考模式(off=关=便宜快非推理,默认;on=开+--effort 控强度)。非 deepseek 模型忽略。")
+                          help="Provider 原生思考模式(off=关,默认;on=开;Claude 可配 --effort)")
     p_sb_run.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"],
                           help="思考开时的强度(--thinking on 才生效;deepseek: low/medium→high,xhigh→max)")
+    p_sb_run.add_argument(
+        "--cognitive-scaffold",
+        action="store_true",
+        help="启用证据关联的外部认知状态；不记录或请求思维链",
+    )
     p_sb_run.add_argument("--keep", action="store_true", help="失败时保留 run_dir 供检视")
     # --- worktree 模式(真实仓库任务)---
     p_sb_run.add_argument("--worktree", action="store_true",
@@ -285,6 +280,42 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_delegation.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])
     p_sb_delegation.add_argument("--keep", action="store_true", help="Keep failed arm directories")
     p_sb_delegation.add_argument("--out", default=None, help="Report directory")
+
+    p_sb_cognitive = p_sb_sub.add_parser(
+        "cognitive-eval",
+        help="Matched 2x2: provider-native thinking x external cognitive state",
+    )
+    p_sb_cognitive.add_argument("--tasks", required=True, help="Comma-separated fixture ids")
+    p_sb_cognitive.add_argument("--main-brain", default=None, help="Main executor model reference")
+    p_sb_cognitive.add_argument(
+        "--arms",
+        default="plain,native_thinking,external_scaffold,combined",
+        help="Comma-separated cognitive evaluation arms",
+    )
+    p_sb_cognitive.add_argument("--repeats", type=int, default=1)
+    p_sb_cognitive.add_argument("--max-steps", type=int, default=None)
+    p_sb_cognitive.add_argument("--max-cost-usd", type=float, default=None, help="Per-run cost limit")
+    p_sb_cognitive.add_argument("--max-tokens", type=int, default=None)
+    p_sb_cognitive.add_argument("--bootstrap-samples", type=int, default=None)
+    p_sb_cognitive.add_argument(
+        "--effort",
+        default=None,
+        choices=["low", "medium", "high", "xhigh", "max"],
+        help="Native-thinking effort; applied only to native_thinking and combined arms",
+    )
+    p_sb_cognitive.add_argument("--out", default=None, help="Report directory")
+
+    p_sb_shadow = p_sb_sub.add_parser(
+        "delegation-shadow",
+        help="Replay candidate expert-activation gates from a delegation report without model calls",
+    )
+    p_sb_shadow.add_argument("--report", required=True, help="Existing delegation report JSON")
+    p_sb_shadow.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Original main-run step budget; required for legacy reports that did not record it",
+    )
 
     p_sb_vb = p_sb_sub.add_parser(
         "verify-brain",
@@ -390,7 +421,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_env_eval.add_argument("--repeats", type=int, default=3, help="每 (config,arm) 重复 run 数(pilot=3;formal≥10)")
     p_sb_env_eval.add_argument("--metronome-period", type=int, default=3,
                                help="Phase 4.1 push 臂:每 N 步注入 region_status(默认 3;正式扫 {2,3,5})")
-    p_sb_env_eval.add_argument("--arms", default="memory-strategy", choices=list(ARM_PRESETS_KEYS),
+    p_sb_env_eval.add_argument("--arms", default="memory-strategy",
                                help="臂预设(memory-strategy=D.3+Echo 控制臂 / memory-baseline / all)")
     p_sb_env_eval.add_argument("--arm", action="append", default=None,
                                help="显式 feature-config(可多次):如 --arm mem=region,strat=real --arm mem=region,strat=echo "
@@ -875,6 +906,9 @@ def main() -> None:
     except Exception:  # noqa: BLE001 — stdout 不可重配（如被捕获）时静默
         pass
     args = build_parser().parse_args()
+    if args.command in {"eval", "calibrate", "routing", "outcome", "capability"}:
+        from brainregion.eval import cli as eval_cli
+
     if args.command == "eval":
         result = asyncio.run(eval_cli.run(args))
         if args.output_format != "json":
@@ -913,12 +947,28 @@ def main() -> None:
         _emit(result, args)
         return
     if args.command == "sandbox":
+        if args.sandbox_command == "delegation-shadow":
+            from brainregion.sandbox.delegation_shadow import (
+                render_shadow_gate_summary,
+                replay_shadow_report,
+            )
+
+            try:
+                result = replay_shadow_report(args.report, max_steps=args.max_steps)
+            except ValueError as exc:
+                raise SystemExit(str(exc)) from exc
+            print(render_shadow_gate_summary(result))
+            return
+        from brainregion.sandbox import cli as sandbox_cli
+
         if args.sandbox_command == "run":
             asyncio.run(sandbox_cli.run(args))
         elif args.sandbox_command == "eval":
             asyncio.run(sandbox_cli.run_eval(args))
         elif args.sandbox_command == "delegation-eval":
             asyncio.run(sandbox_cli.run_delegation_eval(args))
+        elif args.sandbox_command == "cognitive-eval":
+            asyncio.run(sandbox_cli.run_cognitive_eval(args))
         elif args.sandbox_command == "verify-brain":
             asyncio.run(sandbox_cli.verify_brain(args))
         elif args.sandbox_command == "env":
@@ -941,6 +991,8 @@ def main() -> None:
         extra_context=args.extra_context, effort=args.effort,
         max_cost_usd=args.max_cost_usd, timeout=args.timeout,
     )
+    from brainregion.server import review_document
+
     if args.command == "code":
         files = {f: Path(f).read_text(encoding="utf-8") for f in args.files}
         result = asyncio.run(review_document(content="", document_type="code", files=files, **common))

@@ -428,6 +428,23 @@ not inspect model thoughts or trust self-reported confidence. The expert call oc
 run that keeps progressing records zero expert calls, tokens, and cost. Reports expose `expert_activation_rate` and a
 content-free trigger trace alongside solve, completion, adoption, token, and cost metrics.
 
+Each sandbox case also stores a content-free `progress_trace`: operation name, hashed target identity, whether the
+target is new, whether the step changed the workspace, verification outcome, and error status. It excludes model
+thoughts, tool arguments, queries, paths, and tool-result text. Candidate gates can therefore be replayed without model
+calls or credentials:
+
+```powershell
+brain-region sandbox delegation-shadow `
+  --report .brain-region/sandbox/delegation-1783925472487.json `
+  --max-steps 4
+```
+
+New reports record `execution.max_steps`; `--max-steps` is only needed for legacy reports. Shadow output compares the
+original effect-only gate with repetition, novelty-stall, and novelty-plus-deadline policies. `easy_case_false_wake_rate`
+uses eventual main-only success as a proxy for avoidable activation, while `hard_case_wake_rate` uses eventual failure
+as a proxy for possible need. These labels calibrate scheduling behavior but are not causal proof that expert advice
+would rescue a task. Legacy reports without `progress_trace` are explicitly marked `legacy_approximate`.
+
 Each expert receives an isolated, read-only snapshot of the same fixture source and tests. Experts return validated
 RegionReports only; they do not edit the main workspace or read peer reports. For the same task and repeat, an expert
 result is reused between `single_expert` and `multi_expert`, keeping its advice identical and avoiding duplicate billing.
@@ -449,6 +466,43 @@ Provider, quota, network, and runner failures are marked as infrastructure error
 and matched-pair denominators. Explicit report adoption is observable only when the main model emits a valid completion
 response, so reports include both `report_adoption_rate` and `adoption_observation_rate`; a missing completion is not
 silently counted as rejecting expert advice.
+
+### Cognitive Scaffold Pilot
+
+The sandbox can persist a compact `MainCognitiveState` across model turns. It stores only bounded task state: the
+current subgoal, evidence-linked facts, revisable hypotheses, prior attempts, blockers, the next action, and the
+remaining verification gap. It does not request, store, or expose chain-of-thought. Facts must cite an available
+`goal`, completed `step:N`, or activated `expert:ASSIGNMENT_ID`; invalid updates are observed but never block the
+requested workspace tool.
+
+Enable it for a manual fixture run:
+
+```powershell
+brain-region sandbox run `
+  --task off_by_one `
+  --main-brain modelbridge_anthropic/claude-sonnet-5 `
+  --cognitive-scaffold
+```
+
+Compare provider-native thinking and the external scaffold with a matched 2x2 experiment:
+
+```powershell
+brain-region sandbox cognitive-eval `
+  --tasks tenant_cache_scope,settings_precedence `
+  --main-brain modelbridge_anthropic/claude-sonnet-5 `
+  --effort medium `
+  --repeats 2
+```
+
+The four arms are `plain`, `native_thinking`, `external_scaffold`, and `combined`. Every arm receives the same task and
+model but runs in a fresh fixture directory. Reports compare objective solve/completion rates, steps, repeated targets,
+input/total/reasoning tokens, cost, scaffold update validity, paired main effects, and the factorial interaction.
+`native_thinking_requested` confirms that the backend received `thinking=True`; `native_thinking_observed` is stricter
+and requires nonzero reasoning-token telemetry. Some gateways do not expose reasoning tokens, so a false observed flag
+is inconclusive rather than proof that provider-side thinking was disabled. `thinking_telemetry_status` also detects
+reasoning tokens in a nominally disabled control arm. Claude and DeepSeek currently have verified adapter-level
+contrasts; other model families are labeled unverified unless their provider contract is added. Reports contain no
+trajectories, state content, model reasoning, tool arguments, or tool-result text.
 
 ## Workflow Suggestions
 

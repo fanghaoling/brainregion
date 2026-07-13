@@ -27,6 +27,11 @@ from .delegation_eval import (
     run_fixture_delegation_eval,
 )
 from .delegation_trigger import DelegationTriggerPolicy
+from .delegation_shadow import (
+    render_shadow_gate_summary,
+    replay_shadow_report,
+)
+from .cognitive_eval import render_cognitive_eval_summary, run_cognitive_scaffold_eval
 from .eval import render_summary, run_sandbox_eval, write_report
 from .envs import GridWorld, build_env_system_prompt, write_replay_html
 from .fixtures import SANDBOX_FIXTURES, get_fixture, list_fixture_ids
@@ -148,6 +153,7 @@ def _agent_kwargs(args: argparse.Namespace, dd: dict[str, Any], endpoint_id: str
         "effort": args.effort,
         "brain_verify": bool(getattr(args, "brain_verify", False)),
         "brain_delegate": bool(getattr(args, "brain_delegate", False)),
+        "cognitive_scaffold": bool(getattr(args, "cognitive_scaffold", False)),
     }
 
 
@@ -428,6 +434,54 @@ async def run_delegation_eval(args: argparse.Namespace) -> dict[str, Any]:
     return {"report": report, "path": str(path)}
 
 
+async def run_cognitive_eval(args: argparse.Namespace) -> dict[str, Any]:
+    """Run the native-thinking x external-scaffold matched fixture matrix."""
+    dd = _defaults_mod.apply()
+    model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
+    if not model_str:
+        raise SystemExit("--main-brain is required (or configure sandbox_main_brain)")
+    backend, registry = _build_backend(
+        dd,
+        endpoint_ids=_endpoint_ids_for_refs(dd, [model_str]),
+    )
+    model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
+    tasks = _resolve_tasks(args)
+    selected_arms = [arm.strip() for arm in str(args.arms or "").split(",") if arm.strip()] or None
+    try:
+        report = await run_cognitive_scaffold_eval(
+            backend,
+            model,
+            tasks,
+            endpoint_id=endpoint_id,
+            repeats=int(args.repeats),
+            arms=selected_arms,
+            max_steps=int(args.max_steps or dd.get("sandbox_max_steps", 10)),
+            max_cost_usd=float(args.max_cost_usd or dd.get("sandbox_max_cost_usd", 0.5)),
+            temperature=float(dd.get("sandbox_temperature", 0.0)),
+            max_tokens=int(args.max_tokens or 2048),
+            transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
+            consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
+            effort=args.effort,
+            bootstrap_samples=args.bootstrap_samples,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    path = write_report(report, args.out)
+    print(render_cognitive_eval_summary(report))
+    print(f"\nReport: {path}")
+    return {"report": report, "path": str(path)}
+
+
+def run_delegation_shadow(args: argparse.Namespace) -> dict[str, Any]:
+    """Replay content-free gate candidates from a saved delegation report."""
+    try:
+        summary = replay_shadow_report(args.report, max_steps=args.max_steps)
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    print(render_shadow_gate_summary(summary))
+    return summary
+
+
 async def verify_brain(args: argparse.Namespace) -> dict[str, Any]:
     """`brain-region sandbox verify-brain`:§15.8 trace-first + test-backstop 落地。
 
@@ -678,7 +732,7 @@ async def run_env_eval(args: argparse.Namespace) -> dict[str, Any]:
     pairwise delta+CI 有值、cost 不超 cap)—— **非**「Strategy 显著」结论(N 小,pilot_ 前缀,signal_regime 看 regime)。
     """
     from .env_eval import (
-        ARM_PRESETS, ARMS_MEMORY_STRATEGY, EnvConfig, run_env_eval as run_env_eval_harness,
+        ARM_PRESETS, EnvConfig, run_env_eval as run_env_eval_harness,
         render_env_eval_summary, write_report,
     )
 
@@ -721,7 +775,10 @@ async def run_env_eval(args: argparse.Namespace) -> dict[str, Any]:
     if getattr(args, "arm", None):  # 显式 feature-config(覆盖预设)
         arms = tuple(_parse_arm_spec(s) for s in args.arm)
     else:
-        arms = ARM_PRESETS.get(args.arms or "memory-strategy", ARMS_MEMORY_STRATEGY)
+        preset = args.arms or "memory-strategy"
+        if preset not in ARM_PRESETS:
+            raise SystemExit(f"--arms 非法 {preset!r};合法:{list(ARM_PRESETS)}")
+        arms = ARM_PRESETS[preset]
 
     logger.info("env-eval: %d configs × %d arms × %d repeats = ≤%d runs",
                 len(configs), len(arms), args.repeats, len(configs) * len(arms) * args.repeats)

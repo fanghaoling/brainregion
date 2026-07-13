@@ -38,6 +38,10 @@ def test_effort_kwargs_mapping():
         "thinking": {"type": "adaptive"},
         "extra_body": {"output_config": {"effort": "high"}},
     }
+    assert _effort_kwargs("claude-sonnet-5", None, thinking=True) == {
+        "thinking": {"type": "adaptive"},
+    }
+    assert _effort_kwargs("claude-sonnet-5", "high", thinking=False) == {}
     # OpenAI o 系列: reasoning_effort
     assert _effort_kwargs("o3-mini", "high") == {"reasoning_effort": "high"}
     assert _effort_kwargs("o4-mini", "low") == {"reasoning_effort": "low"}
