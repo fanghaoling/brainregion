@@ -353,6 +353,49 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sb_cognitive.add_argument("--out", default=None, help="Report directory")
 
+    p_sb_tool_results = p_sb_sub.add_parser(
+        "tool-result-eval",
+        help="Matched full vs compact tool-result transcript lifecycle evaluation",
+    )
+    p_sb_tool_results.add_argument("--tasks", required=True, help="Comma-separated fixture ids")
+    p_sb_tool_results.add_argument("--main-brain", default=None, help="Main executor model reference")
+    p_sb_tool_results.add_argument(
+        "--arms",
+        default="full,compact",
+        help="Comma-separated lifecycle arms; full is control and compact is treatment",
+    )
+    p_sb_tool_results.add_argument("--repeats", type=int, default=1)
+    p_sb_tool_results.add_argument("--max-steps", type=int, default=None)
+    p_sb_tool_results.add_argument(
+        "--max-cost-usd", type=float, default=None, help="Per-run cost limit"
+    )
+    p_sb_tool_results.add_argument("--max-tokens", type=int, default=None)
+    p_sb_tool_results.add_argument("--bootstrap-samples", type=int, default=None)
+    p_sb_tool_results.add_argument("--thinking", default="off", choices=["off", "on"])
+    p_sb_tool_results.add_argument(
+        "--effort",
+        default=None,
+        choices=["low", "medium", "high", "xhigh", "max"],
+    )
+    p_sb_tool_results.add_argument(
+        "--cognitive-scaffold",
+        action="store_true",
+        help="Apply the same external cognitive scaffold to both lifecycle arms",
+    )
+    p_sb_tool_results.add_argument(
+        "--scaffold-mode",
+        default="runtime_checkpoint",
+        choices=["runtime_checkpoint", "model_managed"],
+    )
+    p_sb_tool_results.add_argument("--checkpoint-period", type=int, default=3)
+    p_sb_tool_results.add_argument(
+        "--tool-result-live-reads",
+        type=int,
+        default=3,
+        help="Recent full read_text results retained by the compact arm",
+    )
+    p_sb_tool_results.add_argument("--out", default=None, help="Report directory")
+
     p_sb_shadow = p_sb_sub.add_parser(
         "delegation-shadow",
         help="Replay candidate expert-activation gates from a delegation report without model calls",
@@ -1017,6 +1060,8 @@ def main() -> None:
             asyncio.run(sandbox_cli.run_delegation_eval(args))
         elif args.sandbox_command == "cognitive-eval":
             asyncio.run(sandbox_cli.run_cognitive_eval(args))
+        elif args.sandbox_command == "tool-result-eval":
+            asyncio.run(sandbox_cli.run_tool_result_lifecycle_eval(args))
         elif args.sandbox_command == "verify-brain":
             asyncio.run(sandbox_cli.verify_brain(args))
         elif args.sandbox_command == "env":

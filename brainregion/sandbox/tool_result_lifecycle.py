@@ -61,6 +61,7 @@ class ToolResultLifecycle:
     body_characters_removed: int = 0
     body_estimated_tokens_removed: int = 0
     estimated_input_tokens_avoided: int = 0
+    first_compaction_step: int | None = None
     compacted_by_tool: dict[str, int] = field(default_factory=dict)
     _seen_result_ids: set[str] = field(default_factory=set, repr=False)
     _active_receipts: int = field(default=0, repr=False)
@@ -128,6 +129,8 @@ class ToolResultLifecycle:
             metadata["receipt_characters"] = len(receipt)
             metadata["estimated_tokens_removed"] = original_tokens - receipt_tokens
             self.compacted_results += 1
+            if self.first_compaction_step is None:
+                self.first_compaction_step = next_step
             self.body_characters_removed += len(original) - len(receipt)
             self.body_estimated_tokens_removed += original_tokens - receipt_tokens
             tool = record["tool"]
@@ -181,6 +184,7 @@ class ToolResultLifecycle:
             "body_characters_removed": self.body_characters_removed,
             "body_estimated_tokens_removed": self.body_estimated_tokens_removed,
             "estimated_input_tokens_avoided": self.estimated_input_tokens_avoided,
+            "first_compaction_step": self.first_compaction_step,
             "compacted_by_tool": dict(sorted(self.compacted_by_tool.items())),
             "contains_result_content": False,
             "contains_reasoning": False,

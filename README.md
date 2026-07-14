@@ -537,6 +537,31 @@ receipt would not save estimated tokens. Reports expose only the number of compa
 unloaded body size, cumulative estimated input tokens avoided on later turns, and counts by tool; they never retain
 result bodies.
 
+Measure that policy directly with a matched lifecycle experiment:
+
+```powershell
+brain-region sandbox tool-result-eval `
+  --tasks tenant_cache_scope,settings_precedence `
+  --main-brain buzz_anthropic/claude-sonnet-5 `
+  --cognitive-scaffold `
+  --scaffold-mode runtime_checkpoint `
+  --tool-result-live-reads 3 `
+  --repeats 2
+```
+
+`full` is the control and `compact` is the treatment. Each pair uses fresh fixture directories, and arm order alternates
+across task/repeat pairs; `arm_order_counts` shows whether both orders were actually represented. The report records
+objective solve and protocol completion, repeated retrievals and reads, provider-reported input/total tokens, attributed
+tool-transcript tokens, cost, and receipt metrics. Deltas are always `compact - full`; a one-task pilot gets a
+descriptive raw delta, while bootstrap intervals require at least two matched tasks.
+
+Because provider output can diverge even at temperature zero, the runtime also records the first turn where a receipt
+actually reached the model and compares both arms' content-free tool traces before that intervention. The all-pairs
+effect remains descriptive, while `exposure_aligned_effect` only includes pairs whose observable action prefix matched
+before compaction. `pre_exposure_diverged` means the pair cannot attribute its outcome difference to the lifecycle
+policy. Reports retain hashed target identities and aggregate metrics, but no tool-result body, model reasoning, query,
+path, tool argument, or exception message.
+
 ## Workflow Suggestions
 
 `suggest_workflow` builds on `route_regions` and returns explicit next tool-call suggestions for the main assistant or

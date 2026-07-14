@@ -39,6 +39,7 @@ from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
 from .loop import run_agent, run_cognitive_loop, scoped_env, scoped_memory_mode
 from .brain_verify import TraceResult, composite_verify, extract_final_patch, forced_trace
 from .task import SandboxTask, WorktreeTask
+from .tool_result_eval import render_tool_result_eval_summary, run_tool_result_eval
 from .worktree import (
     bootstrap_worktree,
     capture_worktree_diff,
@@ -478,6 +479,49 @@ async def run_cognitive_eval(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit(str(exc)) from exc
     path = write_report(report, args.out)
     print(render_cognitive_eval_summary(report))
+    print(f"\nReport: {path}")
+    return {"report": report, "path": str(path)}
+
+
+async def run_tool_result_lifecycle_eval(args: argparse.Namespace) -> dict[str, Any]:
+    """Run a matched full/compact tool-result lifecycle fixture matrix."""
+    dd = _defaults_mod.apply()
+    model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
+    if not model_str:
+        raise SystemExit("--main-brain is required (or configure sandbox_main_brain)")
+    backend, registry = _build_backend(
+        dd,
+        endpoint_ids=_endpoint_ids_for_refs(dd, [model_str]),
+    )
+    model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
+    tasks = _resolve_tasks(args)
+    selected_arms = [arm.strip() for arm in str(args.arms or "").split(",") if arm.strip()]
+    try:
+        report = await run_tool_result_eval(
+            backend,
+            model,
+            tasks,
+            endpoint_id=endpoint_id,
+            repeats=int(args.repeats),
+            arms=selected_arms or None,
+            max_steps=int(args.max_steps or dd.get("sandbox_max_steps", 10)),
+            max_cost_usd=float(args.max_cost_usd or dd.get("sandbox_max_cost_usd", 0.5)),
+            temperature=float(dd.get("sandbox_temperature", 0.0)),
+            max_tokens=int(args.max_tokens or 2048),
+            transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
+            consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
+            thinking=_thinking_arg(args) is True,
+            effort=args.effort,
+            cognitive_scaffold=bool(args.cognitive_scaffold),
+            scaffold_mode=args.scaffold_mode,
+            checkpoint_period=int(args.checkpoint_period),
+            tool_result_live_reads=int(args.tool_result_live_reads),
+            bootstrap_samples=args.bootstrap_samples,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    path = write_report(report, args.out)
+    print(render_tool_result_eval_summary(report))
     print(f"\nReport: {path}")
     return {"report": report, "path": str(path)}
 

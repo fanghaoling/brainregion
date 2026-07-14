@@ -34,6 +34,7 @@ def test_search_result_gets_one_guaranteed_consumer_turn_then_receipt():
     }
     metrics = lifecycle.public_metrics()
     assert metrics["compacted_results"] == 1
+    assert metrics["first_compaction_step"] == 2
     assert metrics["compacted_by_tool"] == {"search_text": 1}
     assert metrics["body_estimated_tokens_removed"] > 0
     assert metrics["estimated_input_tokens_avoided"] > 0
@@ -91,3 +92,4 @@ def test_error_result_gets_extra_recovery_turn_and_full_mode_is_inert():
     assert "tool_result_receipt" not in untouched["content"]
     assert full.public_metrics()["enabled"] is False
     assert full.public_metrics()["tool_results_observed"] == 1
+    assert full.public_metrics()["first_compaction_step"] is None
