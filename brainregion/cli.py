@@ -196,6 +196,10 @@ def build_parser() -> argparse.ArgumentParser:
         "--verification-region", action="store_true",
         help="真实补丁落盘后由 VerificationOptionRegion 自动运行 task pytest；默认关",
     )
+    p_sb_run.add_argument(
+        "--evidence-region", action="store_true",
+        help="由无模型 EvidenceRegion 预读任务明确点名的文件，并发布到共享工作台；默认关",
+    )
     p_sb_run.add_argument("--max-iterations", type=int, default=3,
                           help="外环最大迭代数(仅 --brain-loop 生效,默认 3)")
     p_sb_run.add_argument("--orthogonal-brain", default=None,

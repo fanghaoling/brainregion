@@ -156,6 +156,43 @@ def test_workspace_rejects_ambiguous_region_delivery_and_capacity_overflow():
         workspace.stage(_activated("second"), task_id="task", audience="shared")
 
 
+def test_region_publish_reuses_workspace_visibility_provenance_and_evidence_refs():
+    workspace = CognitiveWorkspace()
+    block = ContextBlock(
+        source="evidence_region",
+        title="Source snapshot",
+        content="grounded source",
+        metadata={"path": "src/parser.py", "sha": "abc123"},
+    )
+
+    delivery = workspace.publish(
+        [block],
+        task_id="task-publish",
+        source_region="evidence",
+        source_skill="sandbox-evidence",
+        audience="shared",
+        ttl_steps=2,
+    ).to_dict()
+
+    assert delivery["entry"]["source_regions"] == ["evidence"]
+    assert delivery["entry"]["source_skills"] == ["sandbox-evidence"]
+    assert delivery["entry"]["evidence_refs"] == [
+        "evidence_region:sha:abc123",
+        "evidence_region:path:src/parser.py",
+    ]
+    assert workspace.read("task-publish", consumer="main").blocks[0].content == "grounded source"
+
+
+def test_region_publish_rejects_non_blocks():
+    workspace = CognitiveWorkspace()
+    with pytest.raises(ValueError, match="ContextBlock"):
+        workspace.publish(  # type: ignore[list-item]
+            ["not-a-block"],
+            task_id="task-publish",
+            source_region="evidence",
+        )
+
+
 def test_same_region_assignments_cannot_read_each_others_private_context():
     workspace = CognitiveWorkspace()
     workspace.stage(

@@ -13,9 +13,11 @@ from threading import RLock
 from typing import Any, Literal
 from uuid import uuid4
 
+from .activation import ActivationPlan
 from .context import ContextBlock
 from .context_loader import (
     ActivatedContext,
+    ContextLoadRecord,
     context_block_to_dict,
     estimate_context_tokens,
     fit_context_blocks,
@@ -191,6 +193,59 @@ class CognitiveWorkspace:
                 raise RuntimeError("cognitive workspace entry capacity exceeded")
             self._entries.setdefault(task_id, []).append(entry)
         return WorkspaceDelivery(status="staged", task_id=task_id, entry=entry.to_public_dict())
+
+    def publish(
+        self,
+        blocks: tuple[ContextBlock, ...] | list[ContextBlock],
+        *,
+        task_id: str,
+        source_region: str,
+        audience: ContextAudience = "shared",
+        target_region: str = "",
+        assignment_id: str = "",
+        source_skill: str = "",
+        ttl_steps: int = 3,
+    ) -> WorkspaceDelivery:
+        """Publish region-produced context through the normal workspace boundary.
+
+        Functional regions use this entry point after the host has executed their
+        bounded tool requests. The synthetic activation record preserves source
+        provenance while ``stage`` remains the sole storage and visibility path.
+        """
+        source_region = _identifier(source_region, "source_region").casefold()
+        source_skill = str(source_skill or f"runtime-{source_region}").strip()
+        if not source_skill or len(source_skill) > 200:
+            raise ValueError("source_skill must contain 1..200 characters")
+        normalized_blocks = tuple(blocks)
+        if any(not isinstance(block, ContextBlock) for block in normalized_blocks):
+            raise ValueError("blocks must contain only ContextBlock values")
+        activated = ActivatedContext(
+            activation=ActivationPlan(
+                decisions=(),
+                woken_regions=(source_region,),
+                context_requests=(),
+                trace={"models_called": False, "source": "region_publish"},
+            ),
+            blocks=normalized_blocks,
+            loads=(
+                ContextLoadRecord(
+                    skill_id=source_skill,
+                    region=source_region,
+                    status="loaded" if normalized_blocks else "empty",
+                    provider="region_runtime",
+                    blocks_loaded=len(normalized_blocks),
+                ),
+            ),
+            trace={"models_called": False, "source": "region_publish"},
+        )
+        return self.stage(
+            activated,
+            task_id=task_id,
+            audience=audience,
+            target_region=target_region,
+            assignment_id=assignment_id,
+            ttl_steps=ttl_steps,
+        )
 
     def read(
         self,

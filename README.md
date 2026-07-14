@@ -493,6 +493,33 @@ brain-region sandbox run `
   --tool-result-live-reads 3
 ```
 
+### Functional Region Workbench Pilot
+
+The code sandbox can split grounded tool work from repair decisions without adding persona-style model experts.
+`EvidenceRegion` is model-free: it selects only bounded relative text paths explicitly named by the task or test
+arguments, while the host executes each `read_text` request. It publishes source snapshots with paths, line ranges,
+truncation state, and SHA evidence anchors through the existing `CognitiveWorkspace`. It cannot patch files or decide
+which repair to adopt.
+
+When evidence and verification are both enabled, they publish into one replaceable `<region_workbench>` message.
+The main model receives source snapshots before its first decision and objective pytest results after a real workspace
+effect. It remains responsible for diagnosis, patch selection, and completion. This avoids duplicating the same result
+through both Region execution and workbench messages. The existing verification-only behavior is unchanged.
+
+```powershell
+brain-region sandbox run `
+  --task off_by_one `
+  --main-brain buzz_anthropic/claude-sonnet-5 `
+  --evidence-region `
+  --verification-region
+```
+
+Both flags are off by default and are currently limited to the single-pass sandbox runner. Trajectory telemetry records
+content-free workbench entry/block counts, estimated loaded tokens, publishing regions, Region activations, and Region
+tool calls. It does not serialize artifact content or model reasoning. A matched `main_only` / passive-context /
+evidence / evidence-plus-verification evaluation remains a later experiment, so this pilot establishes the execution
+and handoff boundary rather than claiming a quality improvement.
+
 Compare provider-native thinking and the external scaffold with a matched 2x2 experiment:
 
 ```powershell

@@ -177,8 +177,13 @@ async def _run_expert(
     if python_exe is not None:
         kwargs["python_exe"] = python_exe
     if bool(getattr(args, "brain_loop", False)):
-        if bool(getattr(args, "verification_region", False)):
-            raise SystemExit("--verification-region 暂不与 --brain-loop 组合；先在单遍 expert 中验证")
+        if bool(getattr(args, "verification_region", False)) or bool(
+            getattr(args, "evidence_region", False)
+        ):
+            raise SystemExit(
+                "--evidence-region/--verification-region 暂不与 --brain-loop 组合；"
+                "先在单遍 expert 中验证"
+            )
         kwargs.pop("brain_verify", None)
         kwargs.pop("brain_delegate", None)
         ortho_model, ortho_ep = _resolve_orthogonal(args, dd, endpoint_id)
@@ -194,6 +199,9 @@ async def _run_expert(
         kwargs["option_region"] = VerificationOptionRegion()
         kwargs["option_continuous"] = True
         kwargs["max_option_activations"] = max(1, int(kwargs["max_steps"]))
+    if bool(getattr(args, "evidence_region", False)):
+        from .regions import EvidenceRegion
+        kwargs["evidence_region"] = EvidenceRegion()
     return await run_agent(backend, model, task, run_dir=run_dir, **kwargs)
 
 

@@ -13,6 +13,7 @@ from .topo_region import TopologicalRegion
 from .path_region import PathTraceRegion
 from .navigation_region import GroundedNavigationRegion, NavigationRegion
 from .verification_region import VerificationOptionRegion
+from .evidence_region import EvidenceRegion, EvidenceRequest
 
 __all__ = [
     "MemoryRegion",
@@ -25,4 +26,6 @@ __all__ = [
     "NavigationRegion",
     "GroundedNavigationRegion",
     "VerificationOptionRegion",
+    "EvidenceRegion",
+    "EvidenceRequest",
 ]
