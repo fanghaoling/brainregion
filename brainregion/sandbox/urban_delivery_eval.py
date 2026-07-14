@@ -58,6 +58,21 @@ DELIVERY_EVAL_COMPARISONS: tuple[tuple[str, str, str], ...] = (
     ("main_only_vs_navigation_region", "main_only", "navigation_region"),
 )
 
+_DELIVERY_DELTA_METRICS: dict[str, str] = {
+    "solve_rate_delta": "solve_rate",
+    "completion_fraction_delta": "mean_completion_fraction",
+    "efficiency_delta": "mean_efficiency",
+    "elapsed_time_delta": "mean_elapsed_time",
+    "main_turns_delta": "mean_main_turns",
+    "main_env_actions_delta": "mean_main_env_actions",
+    "delegated_action_share_delta": "mean_delegated_action_share",
+    "blocked_actions_delta": "mean_blocked_actions",
+    "automatic_region_activations_delta": "mean_automatic_region_activations",
+    "explicit_navigation_calls_delta": "mean_explicit_navigation_calls",
+    "input_tokens_delta": "mean_input_tokens",
+    "cost_delta": "mean_cost",
+}
+
 
 def build_delivery_env(config: DeliveryEvalConfig) -> UrbanDeliveryEnv:
     scenario = generate_urban_delivery_scenario(
@@ -252,20 +267,6 @@ def _bootstrap_deltas(
     control_arm: str,
     treatment_arm: str,
 ) -> dict[str, dict[str, Any]]:
-    metrics = {
-        "solve_rate_delta": "solve_rate",
-        "completion_fraction_delta": "mean_completion_fraction",
-        "efficiency_delta": "mean_efficiency",
-        "elapsed_time_delta": "mean_elapsed_time",
-        "main_turns_delta": "mean_main_turns",
-        "main_env_actions_delta": "mean_main_env_actions",
-        "delegated_action_share_delta": "mean_delegated_action_share",
-        "blocked_actions_delta": "mean_blocked_actions",
-        "automatic_region_activations_delta": "mean_automatic_region_activations",
-        "explicit_navigation_calls_delta": "mean_explicit_navigation_calls",
-        "input_tokens_delta": "mean_input_tokens",
-        "cost_delta": "mean_cost",
-    }
     return {
         metric: eval_stats.bootstrap_statistic(
             rows,
@@ -277,7 +278,7 @@ def _bootstrap_deltas(
             ),
             seed=eval_stats.seed_for(run_id, f"delivery|{comparison}|{metric}"),
         )
-        for metric, aggregate_key in metrics.items()
+        for metric, aggregate_key in _DELIVERY_DELTA_METRICS.items()
     }
 
 
@@ -290,6 +291,7 @@ def aggregate_delivery_report(
     runs: list[dict[str, Any]],
     orphan_runs: list[dict[str, Any]],
     cost_total: float,
+    max_cost_usd: float,
     cost_capped: bool,
     temperature: float,
     thinking: bool | None,
@@ -322,6 +324,18 @@ def aggregate_delivery_report(
             control_arm=control_arm,
             treatment_arm=treatment_arm,
         )
+        for comparison, control_arm, treatment_arm in DELIVERY_EVAL_COMPARISONS
+    }
+    descriptive_deltas = {
+        comparison: {
+            metric: _paired_delta(
+                rows,
+                aggregate_key,
+                control_arm=control_arm,
+                treatment_arm=treatment_arm,
+            )
+            for metric, aggregate_key in _DELIVERY_DELTA_METRICS.items()
+        }
         for comparison, control_arm, treatment_arm in DELIVERY_EVAL_COMPARISONS
     }
     if runs:
@@ -364,7 +378,12 @@ def aggregate_delivery_report(
         "per_arm": per_arm,
         "per_config": [{label: values} for label, values in per_config.items()],
         "pairwise": pairwise,
+        "descriptive_deltas": descriptive_deltas,
+        "cost_budget_usd": round(max_cost_usd, 6),
         "cost_total": round(cost_total, 6),
+        "budget_semantics": "call_boundary_soft_cap",
+        "budget_overrun_usd": round(max(0.0, cost_total - max_cost_usd), 6),
+        "within_budget": cost_total <= max_cost_usd,
         "cost_capped": cost_capped,
         "incomplete_pairs": bool(orphan_runs),
         "orphan_runs": orphan_runs,
@@ -416,7 +435,7 @@ async def run_delivery_eval(
                     model,
                     config,
                     arm,
-                    max_cost_usd=max(0.01, max_cost_usd - cost_total),
+                    max_cost_usd=max(0.0, max_cost_usd - cost_total),
                     temperature=temperature,
                     max_tokens=max_tokens,
                     endpoint_id=endpoint_id,
@@ -455,6 +474,7 @@ async def run_delivery_eval(
         runs=runs,
         orphan_runs=orphan_runs,
         cost_total=cost_total,
+        max_cost_usd=max_cost_usd,
         cost_capped=cost_capped,
         temperature=temperature,
         thinking=thinking,
@@ -507,6 +527,7 @@ def render_delivery_summary(report: dict[str, Any]) -> str:
     }
     for comparison, label in comparison_labels.items():
         pair = report["pairwise"][comparison]
+        raw = report["descriptive_deltas"][comparison]
         lines.extend(["", f"**{label}:**"])
         for metric in (
             "solve_rate_delta", "efficiency_delta", "main_turns_delta",
@@ -514,12 +535,13 @@ def render_delivery_summary(report: dict[str, Any]) -> str:
         ):
             value = pair[metric]
             lines.append(
-                f"- {metric}: point={_fmt(value.get('point'))}, "
+                f"- {metric}: raw={_fmt(raw.get(metric))}, bootstrap={_fmt(value.get('point'))}, "
                 f"CI=[{_fmt(value.get('low'))}, {_fmt(value.get('high'))}]"
             )
     lines.append(
         f"\n完整 config={report['n_complete_configs']}, signal={report['signal_regime']}, "
-        f"cost=${report['cost_total']:.4f}, incomplete_pairs={report['incomplete_pairs']}"
+        f"cost=${report['cost_total']:.4f}/${report['cost_budget_usd']:.4f}, "
+        f"overrun=${report['budget_overrun_usd']:.4f}, incomplete_pairs={report['incomplete_pairs']}"
     )
     return "\n".join(lines)
 

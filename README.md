@@ -569,6 +569,8 @@ emits or executes a movement. Reports separate `navigation_interface - main_only
 comparison. They include objective completion, oracle-relative efficiency, elapsed simulation time, action ownership,
 activations, replanning, main turns, tokens, and cost. Arm order rotates across configs and repeats; a cost-capped
 partial triplet is retained only as an orphan diagnostic and excluded from paired statistics.
+`--max-cost-usd` is enforced between model calls. Because a provider reports actual usage only after a request returns,
+one in-flight request may cross the boundary; reports expose `budget_overrun_usd` instead of presenting it as a hard cap.
 
 Compare provider-native thinking and the external scaffold with a matched 2x2 experiment:
 

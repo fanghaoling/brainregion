@@ -5,6 +5,8 @@ import asyncio
 import csv
 import json
 
+import pytest
+
 from brainregion.providers.base import ModelResponse
 from brainregion.sandbox.envs import generate_urban_delivery_scenario, shortest_path
 from brainregion.sandbox.urban_delivery_eval import (
@@ -50,6 +52,7 @@ def _aggregate(configs, runs, **overrides):
         "runs": runs,
         "orphan_runs": [],
         "cost_total": sum(run["cost"] for run in runs),
+        "max_cost_usd": 1.0,
         "cost_capped": False,
         "temperature": 0.0,
         "thinking": False,
@@ -86,6 +89,9 @@ def test_aggregate_uses_config_level_paired_deltas():
     assert pair["solve_rate_delta"]["point"] == 0.5
     assert interface["solve_rate_delta"]["point"] == 0.0
     assert execution["solve_rate_delta"]["point"] == 0.5
+    assert report["descriptive_deltas"]["navigation_interface_vs_navigation_region"][
+        "main_turns_delta"
+    ] == -12.0
     assert pair["main_turns_delta"]["point"] == -12.0
     assert pair["main_env_actions_delta"]["point"] == -32.0
     assert report["per_arm"]["navigation_region"]["mean_delegated_action_share"] > 0.8
@@ -109,6 +115,31 @@ def test_incomplete_cost_capped_pair_is_orphaned_not_aggregated(monkeypatch):
     assert len(report["orphan_runs"]) == 1
     assert report["incomplete_pairs"] is True
     assert report["per_arm"]["main_only"]["n_runs"] == 0
+    assert report["budget_semantics"] == "call_boundary_soft_cap"
+    assert report["budget_overrun_usd"] == 0.1
+    assert report["within_budget"] is False
+
+
+def test_remaining_arm_budget_is_not_raised_to_hidden_minimum(monkeypatch):
+    config = DeliveryEvalConfig(seed=0)
+    received_budgets = []
+
+    async def fake_episode(backend, model, cfg, arm, **kwargs):
+        received_budgets.append(kwargs["max_cost_usd"])
+        return _run(cfg, arm.name, cost=0.995 if len(received_budgets) == 1 else 0.006)
+
+    monkeypatch.setattr(
+        "brainregion.sandbox.urban_delivery_eval._run_delivery_episode",
+        fake_episode,
+    )
+    report = asyncio.run(run_delivery_eval(
+        object(), "mock", [config], repeats=1, max_cost_usd=1.0, log_progress=False,
+    ))
+
+    assert received_budgets[0] == 1.0
+    assert received_budgets[1] == pytest.approx(0.005)
+    assert len(report["orphan_runs"]) == 2
+    assert report["budget_overrun_usd"] == pytest.approx(0.001)
 
 
 def test_arm_order_rotates_across_repeats(monkeypatch):

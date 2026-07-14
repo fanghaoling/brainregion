@@ -623,7 +623,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_delivery_eval.add_argument("--max-main-turns", type=int, default=None, help="每局主脑轮次上限")
     p_sb_delivery_eval.add_argument("--option-actions", type=int, default=16, help="每次脑区执行动作上限(1..16)")
     p_sb_delivery_eval.add_argument("--repeats", type=int, default=2, help="每个 config 每臂重复次数(默认 2)")
-    p_sb_delivery_eval.add_argument("--max-cost-usd", type=float, default=None, help="全局成本上限")
+    p_sb_delivery_eval.add_argument(
+        "--max-cost-usd",
+        type=float,
+        default=None,
+        help="全局调用边界预算；单次已发出的模型请求可能轻微越界",
+    )
     p_sb_delivery_eval.add_argument("--max-tokens", type=int, default=None)
     p_sb_delivery_eval.add_argument("--thinking", default="off", choices=["off", "on"])
     p_sb_delivery_eval.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])

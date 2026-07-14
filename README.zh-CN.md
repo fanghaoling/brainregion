@@ -441,6 +441,8 @@ brain-region --config brain_region_config.json --env-file .env sandbox delivery-
 `navigation_interface - main_only`（界面暴露效应）与 `navigation_region - navigation_interface`
 （grounded 执行策略增量），并保留端到端比较。成本截断产生的不完整三元组只作为 orphan 诊断保留，
 不进入配对统计。
+`--max-cost-usd` 在模型调用边界检查；provider 只会在请求结束后返回真实用量，因此最后一个在途请求可能
+轻微越界，报告会显式给出 `budget_overrun_usd`，不把它描述成无法保证的硬上限。
 
 ## Review Memory
 
