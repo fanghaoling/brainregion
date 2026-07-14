@@ -13,6 +13,7 @@ from brainregion.runtime import normalize_usage
 from .input_attribution import merge_input_attributions
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
 from .loop import run_agent
+from .prefix_replay import ModelPrefixTape, PrefixReplayBackend
 from .task import SandboxTask
 
 ARM_FULL = "full"
@@ -34,6 +35,7 @@ _METRICS = (
     "repeated_read_rate",
 )
 _RETRIEVAL_TOOLS = frozenset({"search_text", "read_text", "inspect_file"})
+_MAX_SAFE_SHARED_PREFIX_TURNS = 2
 
 
 def _selected_arms(names: list[str] | tuple[str, ...] | None) -> tuple[str, ...]:
@@ -68,6 +70,7 @@ async def run_tool_result_eval(
     scaffold_mode: str = "runtime_checkpoint",
     checkpoint_period: int = 3,
     tool_result_live_reads: int = 3,
+    shared_prefix_turns: int = _MAX_SAFE_SHARED_PREFIX_TURNS,
     run_id: str = "",
     bootstrap_samples: int | None = None,
 ) -> dict[str, Any]:
@@ -92,12 +95,25 @@ async def run_tool_result_eval(
         or tool_result_live_reads < 0
     ):
         raise ValueError("tool_result_live_reads must be a non-negative integer")
+    if (
+        isinstance(shared_prefix_turns, bool)
+        or not isinstance(shared_prefix_turns, int)
+        or not 0 <= shared_prefix_turns <= _MAX_SAFE_SHARED_PREFIX_TURNS
+    ):
+        raise ValueError(
+            "shared_prefix_turns must be an integer between 0 and 2; "
+            "later turns may already contain the treatment"
+        )
 
     selected_arms = _selected_arms(arms)
     run_id = run_id or f"tool-result-{int(time.time() * 1000)}"
     cases: list[dict[str, Any]] = []
     actual_model_calls = 0
+    accounted_model_calls = 0
+    replayed_model_calls = 0
     actual_cost_usd = 0.0
+    accounted_cost_usd = 0.0
+    replayed_accounted_cost_usd = 0.0
     execution_order = 0
     arm_order_counts = {"full_first": 0, "compact_first": 0, "single_arm": 0}
 
@@ -112,13 +128,29 @@ async def run_tool_result_eval(
                 arm_order_counts["full_first"] += 1
             else:
                 arm_order_counts["compact_first"] += 1
-            for lifecycle_mode in ordered_arms:
+            pair_prefix_enabled = shared_prefix_turns > 0 and len(ordered_arms) > 1
+            prefix_tape = ModelPrefixTape(
+                turn_limit=shared_prefix_turns if pair_prefix_enabled else 0
+            )
+            for arm_index, lifecycle_mode in enumerate(ordered_arms):
+                prefix_role = (
+                    "capture"
+                    if pair_prefix_enabled and arm_index == 0
+                    else "replay"
+                    if pair_prefix_enabled
+                    else "disabled"
+                )
+                run_backend = PrefixReplayBackend(
+                    backend,
+                    prefix_tape,
+                    role=prefix_role,
+                )
                 run_dir = make_run_dir(prefix="brainregion-tool-result-eval-")
                 materialize_fixture(task, Path(run_dir))
                 execution_order += 1
                 try:
                     trajectory = await run_agent(
-                        backend,
+                        run_backend,
                         model,
                         task,
                         run_dir=run_dir,
@@ -138,8 +170,6 @@ async def run_tool_result_eval(
                         tool_result_lifecycle=lifecycle_mode,
                         tool_result_live_reads=tool_result_live_reads,
                     )
-                    actual_model_calls += trajectory.n_steps
-                    actual_cost_usd += float(trajectory.total_main_cost_usd)
                     cases.append(
                         _case_from_trajectory(
                             trajectory,
@@ -147,6 +177,7 @@ async def run_tool_result_eval(
                             repeat=repeat,
                             arm=lifecycle_mode,
                             execution_order=execution_order,
+                            shared_prefix=run_backend.public_metrics(),
                         )
                     )
                 except Exception as exc:  # noqa: BLE001 - preserve the matched matrix
@@ -157,10 +188,20 @@ async def run_tool_result_eval(
                             arm=lifecycle_mode,
                             execution_order=execution_order,
                             live_read_results=tool_result_live_reads,
+                            shared_prefix=run_backend.public_metrics(),
                             error=exc,
                         )
                     )
                 finally:
+                    prefix_metrics = run_backend.public_metrics()
+                    actual_model_calls += int(prefix_metrics["provider_calls"])
+                    accounted_model_calls += int(prefix_metrics["accounted_calls"])
+                    replayed_model_calls += int(prefix_metrics["replayed_calls"])
+                    actual_cost_usd += float(prefix_metrics["provider_cost_usd"])
+                    accounted_cost_usd += float(prefix_metrics["accounted_cost_usd"])
+                    replayed_accounted_cost_usd += float(
+                        prefix_metrics["replayed_accounted_cost_usd"]
+                    )
                     cleanup_run_dir(run_dir)
 
     report = summarize_tool_result_records(
@@ -178,6 +219,8 @@ async def run_tool_result_eval(
         "scaffold_mode": scaffold_mode if cognitive_scaffold else None,
         "checkpoint_period": checkpoint_period if cognitive_scaffold else None,
         "tool_result_live_reads": tool_result_live_reads,
+        "shared_prefix_turns": shared_prefix_turns,
+        "shared_prefix_policy": "exact_response_replay_before_earliest_treatment_v1",
         "max_steps": max_steps,
         "arm_order_policy": "alternating_by_task_repeat",
         "arm_order_counts": arm_order_counts,
@@ -186,7 +229,11 @@ async def run_tool_result_eval(
             and arm_order_counts["compact_first"] > 0
         ),
         "actual_model_calls": actual_model_calls,
+        "accounted_model_calls": accounted_model_calls,
+        "replayed_model_calls": replayed_model_calls,
         "actual_cost_usd": actual_cost_usd,
+        "accounted_cost_usd": accounted_cost_usd,
+        "replayed_accounted_cost_usd": replayed_accounted_cost_usd,
         "contains_trajectories": False,
         "contains_result_content": False,
         "contains_reasoning": False,
@@ -201,6 +248,7 @@ def _case_from_trajectory(
     repeat: int,
     arm: str,
     execution_order: int,
+    shared_prefix: dict[str, Any],
 ) -> dict[str, Any]:
     usage = normalize_usage(trajectory.total_main_usage)
     trace = trajectory.progress_trace
@@ -233,6 +281,7 @@ def _case_from_trajectory(
         "repeated_read_rate": _repeat_rate(read_steps),
         "main_input_attribution": attribution,
         "tool_result_lifecycle": trajectory.tool_result_lifecycle,
+        "shared_prefix": dict(shared_prefix),
         "progress_trace": trace,
         "contains_result_content": False,
         "contains_reasoning": False,
@@ -246,6 +295,7 @@ def _error_case(
     arm: str,
     execution_order: int,
     live_read_results: int,
+    shared_prefix: dict[str, Any],
     error: Exception,
 ) -> dict[str, Any]:
     return {
@@ -273,6 +323,7 @@ def _error_case(
         "repeated_read_rate": None,
         "main_input_attribution": merge_input_attributions([]),
         "tool_result_lifecycle": _empty_lifecycle_metrics(arm, live_read_results),
+        "shared_prefix": dict(shared_prefix),
         "progress_trace": [],
         "error": f"runner_error:{type(error).__name__}",
         "contains_result_content": False,
@@ -302,6 +353,7 @@ def summarize_tool_result_records(
         arm_records = grouped[arm]
         valid = [record for record in arm_records if not record.get("infrastructure_error")]
         lifecycle = [record.get("tool_result_lifecycle") or {} for record in valid]
+        shared_prefix = [record.get("shared_prefix") or {} for record in valid]
         input_attribution = _summarize_input_attribution(valid)
         per_arm[arm] = {
             "n_runs": len(arm_records),
@@ -333,6 +385,11 @@ def summarize_tool_result_records(
             "mean_estimated_input_tokens_avoided": _mean(
                 lifecycle, "estimated_input_tokens_avoided"
             ),
+            "mean_provider_model_calls": _mean(shared_prefix, "provider_calls"),
+            "mean_replayed_model_calls": _mean(shared_prefix, "replayed_calls"),
+            "mean_actual_provider_cost_usd": _mean(
+                shared_prefix, "provider_cost_usd"
+            ),
             "input_attribution": input_attribution,
             "infrastructure_failures": len(arm_records) - len(valid),
         }
@@ -343,7 +400,9 @@ def summarize_tool_result_records(
     aligned_pairs = {
         (item["task_id"], item["repeat"])
         for item in pair_diagnostics
-        if item["treatment_exposed"] and item["pre_exposure_trace_match"] is True
+        if item["treatment_exposed"]
+        and item["pre_exposure_trace_match"] is True
+        and item["prefix_replay_valid"] is not False
     }
     aligned_rows = _complete_task_rows(records, allowed_pairs=aligned_pairs)
     return {
@@ -379,7 +438,10 @@ def render_tool_result_eval_summary(report: dict[str, Any]) -> str:
         f"(tasks={report['n_tasks']}, runs={report['n_runs']})",
         f"model={execution.get('model', '')} counterbalanced={execution.get('counterbalanced_order')} "
         f"scaffold={execution.get('cognitive_scaffold')} "
-        f"actual_cost=${float(execution.get('actual_cost_usd') or 0):.4f}",
+        f"actual_cost=${float(execution.get('actual_cost_usd') or 0):.4f} "
+        f"accounted_cost=${float(execution.get('accounted_cost_usd') or 0):.4f} "
+        f"provider_calls={execution.get('actual_model_calls')} "
+        f"replayed_calls={execution.get('replayed_model_calls')}",
     ]
     for arm, summary in (report.get("per_arm") or {}).items():
         lines.append(
@@ -414,7 +476,8 @@ def render_tool_result_eval_summary(report: dict[str, Any]) -> str:
     lines.append(
         f"  pair_quality={quality.get('status')} exposed={quality.get('treatment_exposed_pairs')} "
         f"pre_aligned={quality.get('pre_exposure_aligned_pairs')} "
-        f"pre_diverged={quality.get('pre_exposure_diverged_pairs')}"
+        f"pre_diverged={quality.get('pre_exposure_diverged_pairs')} "
+        f"prefix_invalid={quality.get('prefix_replay_invalid_pairs')}"
     )
     lines.append(
         f"  exposure-aligned compact-full: solve={aligned_raw.get('solved')} "
@@ -496,21 +559,58 @@ def _pair_diagnostics(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
         first_compaction_step = (compact.get("tool_result_lifecycle") or {}).get(
             "first_compaction_step"
         )
-        treatment_exposed = isinstance(first_compaction_step, int)
+        full_prefix = full.get("shared_prefix") or {}
+        compact_prefix = compact.get("shared_prefix") or {}
+        prefix_runs = [full_prefix, compact_prefix]
+        capture_prefix = next(
+            (item for item in prefix_runs if item.get("role") == "capture"),
+            None,
+        )
+        replay_prefix = next(
+            (item for item in prefix_runs if item.get("role") == "replay"),
+            None,
+        )
+        prefix_replay_valid = None
+        common_prefix_turns = 0
+        if replay_prefix is not None:
+            common_prefix_turns = int(replay_prefix.get("replayed_calls") or 0)
+            prefix_replay_valid = (
+                int(replay_prefix.get("replay_mismatches") or 0) == 0
+                and int(replay_prefix.get("replay_shortfalls") or 0) == 0
+            )
+        treatment_exposed = (
+            isinstance(first_compaction_step, int)
+            and not isinstance(first_compaction_step, bool)
+        )
+        full_trace = {step["step"]: step for step in full.get("progress_trace") or []}
+        compact_trace = {
+            step["step"]: step for step in compact.get("progress_trace") or []
+        }
+        trace_stop = max([*full_trace, *compact_trace], default=-1) + 1
+        first_observable_divergence_step = _first_trace_divergence(
+            full_trace,
+            compact_trace,
+            start=0,
+            stop=trace_stop,
+        )
         first_divergence_step = None
+        first_post_exposure_divergence_step = None
         pre_exposure_trace_match = None
         if treatment_exposed:
-            full_trace = {step["step"]: step for step in full.get("progress_trace") or []}
-            compact_trace = {
-                step["step"]: step for step in compact.get("progress_trace") or []
-            }
-            for step_index in range(first_compaction_step):
-                if _trace_signature(full_trace.get(step_index)) != _trace_signature(
-                    compact_trace.get(step_index)
-                ):
-                    first_divergence_step = step_index
-                    break
+            first_divergence_step = _first_trace_divergence(
+                full_trace,
+                compact_trace,
+                start=0,
+                stop=first_compaction_step,
+            )
             pre_exposure_trace_match = first_divergence_step is None
+            if pre_exposure_trace_match:
+                first_post_exposure_divergence_step = _first_trace_divergence(
+                    full_trace,
+                    compact_trace,
+                    start=first_compaction_step,
+                    stop=trace_stop,
+                )
         diagnostics.append(
             {
                 "task_id": task_id,
@@ -519,8 +619,33 @@ def _pair_diagnostics(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 "compact_execution_order": compact.get("execution_order"),
                 "treatment_exposed": treatment_exposed,
                 "first_compaction_step": first_compaction_step,
+                "prefix_capture_arm": (
+                    full["arm"]
+                    if capture_prefix is full_prefix
+                    else compact["arm"]
+                    if capture_prefix is compact_prefix
+                    else None
+                ),
+                "prefix_replay_arm": (
+                    full["arm"]
+                    if replay_prefix is full_prefix
+                    else compact["arm"]
+                    if replay_prefix is compact_prefix
+                    else None
+                ),
+                "common_prefix_turns": common_prefix_turns,
+                "prefix_replay_valid": prefix_replay_valid,
+                "prefix_covers_pre_exposure": (
+                    common_prefix_turns >= first_compaction_step
+                    if treatment_exposed
+                    else None
+                ),
                 "pre_exposure_trace_match": pre_exposure_trace_match,
                 "first_divergence_step": first_divergence_step,
+                "first_observable_divergence_step": first_observable_divergence_step,
+                "first_post_exposure_divergence_step": (
+                    first_post_exposure_divergence_step
+                ),
                 "contains_result_content": False,
                 "contains_reasoning": False,
             }
@@ -541,14 +666,37 @@ def _trace_signature(step: dict[str, Any] | None) -> tuple[Any, ...] | None:
     )
 
 
+def _first_trace_divergence(
+    full_trace: dict[int, dict[str, Any]],
+    compact_trace: dict[int, dict[str, Any]],
+    *,
+    start: int,
+    stop: int,
+) -> int | None:
+    for step_index in range(start, stop):
+        if _trace_signature(full_trace.get(step_index)) != _trace_signature(
+            compact_trace.get(step_index)
+        ):
+            return step_index
+    return None
+
+
 def _pair_quality(diagnostics: list[dict[str, Any]]) -> dict[str, Any]:
     exposed = [item for item in diagnostics if item["treatment_exposed"]]
-    aligned = [item for item in exposed if item["pre_exposure_trace_match"] is True]
+    aligned = [
+        item
+        for item in exposed
+        if item["pre_exposure_trace_match"] is True
+        and item["prefix_replay_valid"] is not False
+    ]
     diverged = [item for item in exposed if item["pre_exposure_trace_match"] is False]
+    prefix_invalid = [item for item in diagnostics if item["prefix_replay_valid"] is False]
     if not diagnostics:
         status = "no_matched_pairs"
     elif not exposed:
         status = "no_treatment_exposure"
+    elif prefix_invalid:
+        status = "prefix_replay_invalid"
     elif not aligned:
         status = "pre_exposure_diverged"
     elif diverged:
@@ -561,6 +709,11 @@ def _pair_quality(diagnostics: list[dict[str, Any]]) -> dict[str, Any]:
         "treatment_exposed_pairs": len(exposed),
         "pre_exposure_aligned_pairs": len(aligned),
         "pre_exposure_diverged_pairs": len(diverged),
+        "prefix_replayed_pairs": sum(item["common_prefix_turns"] > 0 for item in diagnostics),
+        "prefix_replay_invalid_pairs": len(prefix_invalid),
+        "prefix_covers_pre_exposure_pairs": sum(
+            item["prefix_covers_pre_exposure"] is True for item in diagnostics
+        ),
         "unexposed_pairs": len(diagnostics) - len(exposed),
         "alignment_uses_content_free_tool_trace": True,
     }

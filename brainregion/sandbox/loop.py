@@ -18,6 +18,7 @@ import math
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Awaitable, Callable
 
 from brainregion.core.stages.parse import extract_json_object
@@ -727,6 +728,28 @@ def _compact(value: Any) -> str:
     return text[:_RESULT_CAP_CHARS] + "\n...[truncated]"
 
 
+def _portable_workspace_value(value: Any, root: str) -> Any:
+    """Replace a run-local absolute root in model-visible tool data with ``.``."""
+    aliases = {root, str(Path(root).expanduser().resolve(strict=False))} if root else set()
+    aliases.update(alias.replace("\\", "/") for alias in tuple(aliases))
+    return _replace_workspace_aliases(value, tuple(sorted(aliases, key=len, reverse=True)))
+
+
+def _replace_workspace_aliases(value: Any, aliases: tuple[str, ...]) -> Any:
+    if isinstance(value, dict):
+        return {key: _replace_workspace_aliases(item, aliases) for key, item in value.items()}
+    if isinstance(value, list):
+        return [_replace_workspace_aliases(item, aliases) for item in value]
+    if isinstance(value, tuple):
+        return [_replace_workspace_aliases(item, aliases) for item in value]
+    if not isinstance(value, str):
+        return value
+    portable = value
+    for alias in aliases:
+        portable = portable.replace(alias, ".")
+    return portable
+
+
 def _progress_target(call: ToolCall) -> tuple[str, str]:
     """Return a content-free target class and stable fingerprint for one tool call."""
     if isinstance(call.args.get("path"), str):
@@ -756,7 +779,7 @@ def _progress_target_label(call: ToolCall) -> str:
     return str(value or "").strip()[:300]
 
 
-def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
+def dispatch_tool(call: ToolCall, *, portable_root: str = "") -> tuple[str, str | None]:
     """执行 tool-call → (result_str, error)。error 非 None = 执行失败(进错误反馈,不崩)。"""
     try:
         if call.tool == "list_allowed_roots":
@@ -850,9 +873,13 @@ def dispatch_tool(call: ToolCall) -> tuple[str, str | None]:
             raise RuntimeError("delegate_navigation: 导航执行脑区未激活")
         else:
             return "", "unreachable: unknown tool"
-        return _compact(out), None
+        visible_out = _portable_workspace_value(out, portable_root) if portable_root else out
+        return _compact(visible_out), None
     except Exception as e:  # noqa: BLE001 — 工具错误进反馈,不打断 loop
-        return "", f"{type(e).__name__}: {e}"
+        error = f"{type(e).__name__}: {e}"
+        if portable_root:
+            error = str(_portable_workspace_value(error, portable_root))
+        return "", error
 
 
 def _build_system_prompt(task: SandboxTask | WorktreeTask, python_exe: str) -> str:
@@ -1808,7 +1835,7 @@ async def run_agent(
                 except Exception as exc:  # noqa: BLE001 — region failure becomes tool feedback
                     result_str, exec_err = "", f"delegate_navigation 失败: {exc}"
             else:
-                result_str, exec_err = dispatch_tool(call)
+                result_str, exec_err = dispatch_tool(call, portable_root=run_dir)
             patch_info = _last_patch_info.get() or {}
             check_info = _last_check_info.get() or {}
             patch_applied = (

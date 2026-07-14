@@ -516,6 +516,7 @@ async def run_tool_result_lifecycle_eval(args: argparse.Namespace) -> dict[str, 
             scaffold_mode=args.scaffold_mode,
             checkpoint_period=int(args.checkpoint_period),
             tool_result_live_reads=int(args.tool_result_live_reads),
+            shared_prefix_turns=int(args.shared_prefix_turns),
             bootstrap_samples=args.bootstrap_samples,
         )
     except ValueError as exc:

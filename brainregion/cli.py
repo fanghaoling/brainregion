@@ -394,6 +394,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
         help="Recent full read_text results retained by the compact arm",
     )
+    p_sb_tool_results.add_argument(
+        "--shared-prefix-turns",
+        type=int,
+        default=2,
+        help="Exact pre-treatment model responses replayed into the second arm (0..2)",
+    )
     p_sb_tool_results.add_argument("--out", default=None, help="Report directory")
 
     p_sb_shadow = p_sb_sub.add_parser(

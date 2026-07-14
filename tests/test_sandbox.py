@@ -26,7 +26,7 @@ from brainregion.sandbox import (
 )
 from brainregion.sandbox.eval import evaluate_gate, run_sandbox_eval
 from brainregion.sandbox.fixtures import SANDBOX_FIXTURES, get_fixture
-from brainregion.sandbox.loop import ALLOWED_TOOLS, parse_tool_call
+from brainregion.sandbox.loop import ALLOWED_TOOLS, dispatch_tool, parse_tool_call
 from brainregion.sandbox.isolation import FixturePathError
 from brainregion.sandbox.task import SandboxTask
 from brainregion.workspace import apply_text_patch, read_text
@@ -168,6 +168,31 @@ def test_materialize_writes_files(tmp_path):
     materialize_fixture(task, tmp_path)
     assert (tmp_path / "a" / "b.py").read_text(encoding="utf-8") == "print(1)"
     assert (tmp_path / "test_t.py").exists()
+
+
+def test_sandbox_tool_result_uses_portable_workspace_root():
+    task, run_dir = _materialized("off_by_one")
+    try:
+        call, error = parse_tool_call(
+            _J(
+                {
+                    "thought": "find range",
+                    "tool": "search_text",
+                    "args": {"query": "range", "max_results": 1},
+                }
+            )
+        )
+        assert error is None and call is not None
+        with scoped_workspace_root(run_dir):
+            result, tool_error = dispatch_tool(call, portable_root=run_dir)
+        payload = json.loads(result)
+        assert tool_error is None
+        assert payload["roots"][0]["path"] == "."
+        assert payload["matches"][0]["path"].startswith(".")
+        assert run_dir not in result
+        assert str(Path(run_dir).resolve()) not in result
+    finally:
+        cleanup_run_dir(run_dir)
 
 
 # ---------- verifier ----------

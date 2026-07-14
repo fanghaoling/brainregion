@@ -150,7 +150,14 @@ def test_tool_result_eval_measures_real_input_savings_without_changing_outcome()
         "compact_first": 0,
         "single_arm": 0,
     }
-    assert report["execution"]["actual_model_calls"] == 10
+    assert report["execution"]["shared_prefix_turns"] == 2
+    assert report["execution"]["actual_model_calls"] == 8
+    assert report["execution"]["accounted_model_calls"] == 10
+    assert report["execution"]["replayed_model_calls"] == 2
+    assert report["execution"]["actual_cost_usd"] < report["execution"][
+        "accounted_cost_usd"
+    ]
+    assert [call["turn"] for call in backend.calls] == [0, 1, 2, 3, 4, 2, 3, 4]
     assert [case["arm"] for case in report["cases"]] == [ARM_FULL, ARM_COMPACT]
     assert all(case["solved"] for case in report["cases"])
     assert all(case["protocol_completed"] for case in report["cases"])
@@ -174,6 +181,13 @@ def test_tool_result_eval_measures_real_input_savings_without_changing_outcome()
     assert report["pair_quality"]["pre_exposure_aligned_pairs"] == 1
     assert report["pair_diagnostics"][0]["first_compaction_step"] == 2
     assert report["pair_diagnostics"][0]["first_divergence_step"] is None
+    assert report["pair_diagnostics"][0]["first_observable_divergence_step"] is None
+    assert report["pair_diagnostics"][0]["first_post_exposure_divergence_step"] is None
+    assert report["pair_diagnostics"][0]["common_prefix_turns"] == 2
+    assert report["pair_diagnostics"][0]["prefix_capture_arm"] == ARM_FULL
+    assert report["pair_diagnostics"][0]["prefix_replay_arm"] == ARM_COMPACT
+    assert report["pair_diagnostics"][0]["prefix_replay_valid"] is True
+    assert report["pair_diagnostics"][0]["prefix_covers_pre_exposure"] is True
     assert report["exposure_aligned_effect"]["raw_deltas"]["main_input_tokens"] < 0
 
     rendered = json.dumps(report, ensure_ascii=False)
@@ -181,6 +195,49 @@ def test_tool_result_eval_measures_real_input_savings_without_changing_outcome()
     assert "catalog.txt" not in rendered
     assert "range(start, end + 1)" not in rendered
     assert all(case["contains_result_content"] is False for case in report["cases"])
+
+
+def test_tool_result_eval_reverses_prefix_roles_with_counterbalanced_repeat(monkeypatch):
+    import brainregion.sandbox.loop as sandbox_loop
+
+    monkeypatch.setattr(
+        sandbox_loop,
+        "verify_solution",
+        lambda *args, **kwargs: {"tests_green": False},
+    )
+    task = _task("counterbalanced-prefix")
+    backend = _UsageAwareBackend(_materialized_sha(task))
+
+    report = asyncio.run(
+        run_tool_result_eval(
+            backend,
+            "usage-aware-main",
+            [task],
+            repeats=2,
+            max_steps=2,
+            max_cost_usd=1.0,
+            bootstrap_samples=20,
+        )
+    )
+
+    assert report["execution"]["counterbalanced_order"] is True
+    assert report["execution"]["arm_order_counts"] == {
+        "full_first": 1,
+        "compact_first": 1,
+        "single_arm": 0,
+    }
+    assert report["execution"]["accounted_model_calls"] == 8
+    assert report["execution"]["actual_model_calls"] == 4
+    assert report["execution"]["replayed_model_calls"] == 4
+    assert [
+        (case["repeat"], case["arm"], case["shared_prefix"]["role"])
+        for case in report["cases"]
+    ] == [
+        (0, ARM_FULL, "capture"),
+        (0, ARM_COMPACT, "replay"),
+        (1, ARM_COMPACT, "capture"),
+        (1, ARM_FULL, "replay"),
+    ]
 
 
 def _record(task_id: str, arm: str, input_tokens: int, solved: bool = True) -> dict:
@@ -267,8 +324,90 @@ def test_tool_result_summary_rejects_pre_exposure_divergence_from_aligned_effect
     assert report["matched_effect"]["raw_deltas"]["solved"] == -1.0
     assert report["pair_quality"]["status"] == "pre_exposure_diverged"
     assert report["pair_diagnostics"][0]["first_divergence_step"] == 1
+    assert report["pair_diagnostics"][0]["first_observable_divergence_step"] == 1
+    assert report["pair_diagnostics"][0]["first_post_exposure_divergence_step"] is None
     assert report["exposure_aligned_effect"]["n_tasks"] == 0
     assert report["exposure_aligned_effect"]["raw_deltas"]["solved"] is None
+
+
+def test_tool_result_summary_locates_first_post_exposure_divergence():
+    full = _record("post-exposure", ARM_FULL, 1000)
+    compact = _record("post-exposure", ARM_COMPACT, 700)
+
+    def trace(targets: tuple[str, ...]) -> list[dict]:
+        return [
+            {
+                "step": step,
+                "operation": "search_text" if step == 0 else "read_text",
+                "target_kind": "query" if step == 0 else "path",
+                "target_fingerprint": target,
+                "target_is_new": True,
+                "workspace_effect": False,
+                "verification_passed": None,
+                "error": False,
+            }
+            for step, target in enumerate(targets)
+        ]
+
+    full["progress_trace"] = trace(("shared-search", "shared-read", "full-read"))
+    compact["progress_trace"] = trace(("shared-search", "shared-read", "compact-read"))
+    compact["tool_result_lifecycle"] = {"first_compaction_step": 2}
+
+    report = summarize_tool_result_records(
+        [full, compact],
+        run_id="post-exposure-divergence",
+        bootstrap_samples=20,
+    )
+
+    diagnostics = report["pair_diagnostics"][0]
+    assert diagnostics["pre_exposure_trace_match"] is True
+    assert diagnostics["first_divergence_step"] is None
+    assert diagnostics["first_observable_divergence_step"] == 2
+    assert diagnostics["first_post_exposure_divergence_step"] == 2
+    assert report["exposure_aligned_effect"]["n_tasks"] == 1
+    assert report["exposure_aligned_effect"]["raw_deltas"]["solved"] == 0.0
+
+
+def test_tool_result_summary_excludes_request_mismatch_from_aligned_effect():
+    full = _record("prefix-mismatch", ARM_FULL, 1000)
+    compact = _record("prefix-mismatch", ARM_COMPACT, 700)
+    trace = [
+        {
+            "step": step,
+            "operation": operation,
+            "target_kind": "query" if step == 0 else "path",
+            "target_fingerprint": f"target-{step}",
+            "target_is_new": True,
+            "workspace_effect": False,
+            "verification_passed": None,
+            "error": False,
+        }
+        for step, operation in enumerate(("search_text", "read_text"))
+    ]
+    full["progress_trace"] = trace
+    compact["progress_trace"] = trace
+    compact["tool_result_lifecycle"] = {"first_compaction_step": 2}
+    full["shared_prefix"] = {
+        "role": "capture",
+        "captured_calls": 2,
+    }
+    compact["shared_prefix"] = {
+        "role": "replay",
+        "replayed_calls": 1,
+        "replay_mismatches": 1,
+        "replay_shortfalls": 0,
+    }
+
+    report = summarize_tool_result_records(
+        [full, compact],
+        run_id="prefix-mismatch",
+        bootstrap_samples=20,
+    )
+
+    assert report["pair_quality"]["status"] == "prefix_replay_invalid"
+    assert report["pair_quality"]["pre_exposure_aligned_pairs"] == 0
+    assert report["pair_quality"]["prefix_replay_invalid_pairs"] == 1
+    assert report["exposure_aligned_effect"]["n_tasks"] == 0
 
 
 def test_tool_result_eval_rejects_invalid_matrix_configuration():
@@ -280,6 +419,8 @@ def test_tool_result_eval_rejects_invalid_matrix_configuration():
         asyncio.run(run_tool_result_eval(backend, "main", [task], arms=[ARM_FULL, ARM_FULL]))
     with pytest.raises(ValueError, match="tool_result_live_reads must be a non-negative integer"):
         asyncio.run(run_tool_result_eval(backend, "main", [task], tool_result_live_reads=-1))
+    with pytest.raises(ValueError, match="shared_prefix_turns must be an integer between 0 and 2"):
+        asyncio.run(run_tool_result_eval(backend, "main", [task], shared_prefix_turns=3))
     assert backend.calls == []
 
 
@@ -306,5 +447,6 @@ def test_tool_result_eval_cli_contract():
     assert args.scaffold_mode == "runtime_checkpoint"
     assert args.checkpoint_period == 3
     assert args.tool_result_live_reads == 3
+    assert args.shared_prefix_turns == 2
     assert args.thinking == "on"
     assert args.effort == "medium"

@@ -546,6 +546,7 @@ brain-region sandbox tool-result-eval `
   --cognitive-scaffold `
   --scaffold-mode runtime_checkpoint `
   --tool-result-live-reads 3 `
+  --shared-prefix-turns 2 `
   --repeats 2
 ```
 
@@ -559,8 +560,20 @@ Because provider output can diverge even at temperature zero, the runtime also r
 actually reached the model and compares both arms' content-free tool traces before that intervention. The all-pairs
 effect remains descriptive, while `exposure_aligned_effect` only includes pairs whose observable action prefix matched
 before compaction. `pre_exposure_diverged` means the pair cannot attribute its outcome difference to the lifecycle
-policy. Reports retain hashed target identities and aggregate metrics, but no tool-result body, model reasoning, query,
-path, tool argument, or exception message.
+policy. Pair diagnostics also report the first observable and first post-exposure divergence step, making it possible to
+separate a valid treatment branch from an already-diverged prefix without storing the actions themselves. Reports retain
+hashed target identities and aggregate metrics, but no tool-result body, model reasoning, query, path, tool argument, or
+exception message.
+
+By default the second arm also replays the first two exact model responses captured from the first arm. Two is the safe
+ceiling: those responses are generated before an earlier result can be compacted, while replaying a later response could
+copy behavior produced after the treatment. Every replay verifies a hash of the complete provider request; a mismatch
+falls back to a real call and marks the pair invalid rather than silently reusing the response. The tape exists only in
+memory and is never written to the report. Set `--shared-prefix-turns 0` to disable this control.
+
+Per-arm token and cost metrics still include replayed responses so the counterfactual runs remain comparable. The
+execution block separately reports `accounted_model_calls/accounted_cost_usd` and the calls/cost actually sent to the
+provider. Replayed calls reduce experiment billing, but that reduction is not credited to the compact lifecycle.
 
 ## Workflow Suggestions
 
