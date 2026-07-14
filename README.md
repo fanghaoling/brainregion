@@ -562,12 +562,13 @@ brain-region sandbox delivery-eval `
   --repeats 2
 ```
 
-The matched arms are `main_only` and `navigation_region`. Reports include objective completion, oracle-relative
-efficiency, elapsed simulation time, main and delegated actions, vehicle-triggered replanning, main turns, tokens, and
-cost. Arm order rotates across configs and repeats; a cost-capped half-pair is retained only as an orphan diagnostic and
-is excluded from paired statistics. This first comparison estimates the whole navigation feature package, including
-its disclosed prompt contract and execution trace. A later matched-exposure control is still required to isolate
-execution-policy value from interface exposure.
+The matched arms are `main_only`, `navigation_interface`, and `navigation_region`. The interface control receives the
+same public observation, prompt/tool contract, and interaction-triggered activations as the real Region, but never
+emits or executes a movement. Reports separate `navigation_interface - main_only` (interface exposure) from
+`navigation_region - navigation_interface` (grounded execution-policy increment), while retaining the end-to-end
+comparison. They include objective completion, oracle-relative efficiency, elapsed simulation time, action ownership,
+activations, replanning, main turns, tokens, and cost. Arm order rotates across configs and repeats; a cost-capped
+partial triplet is retained only as an orphan diagnostic and excluded from paired statistics.
 
 Compare provider-native thinking and the external scaffold with a matched 2x2 experiment:
 

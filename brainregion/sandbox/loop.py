@@ -1384,6 +1384,8 @@ async def run_agent(
     option_continuous: bool | None = None,  # 通用参数；None 时回退 navigation_continuous
     navigation_continuous: bool = False,  # Phase 4.10:主脑 act 后事件驱动再唤醒;不按每模型轮盲轮询
     option_initial_activation: bool = True,  # False=等主脑首次环境动作后再按 continuous 唤醒
+    option_reactivation_statuses: set[str] | frozenset[str] | None = None,
+    # None=任意有效主脑环境动作；显式集合可把唤醒收窄到 interacted/moved/blocked 等事件。
     max_option_activations: int = 10,  # 自动 option 唤醒上限(工具显式调用不计入)
     status_injector: Any = None,        # Phase 4.1 metronome:async (step, messages)->(status_str|None, cost_usd);None=现行为
     status_period: int = 3,
@@ -1464,6 +1466,11 @@ async def run_agent(
     )
     _option_continuous = bool(navigation_continuous) if option_continuous is None else bool(option_continuous)
     _option_initial_activation = bool(option_initial_activation)
+    _option_reactivation_statuses = (
+        None
+        if option_reactivation_statuses is None
+        else frozenset(str(status) for status in option_reactivation_statuses)
+    )
     _max_option_activations = max(0, int(max_option_activations))
     _effect_clock = 0
     _pending_effect: dict[str, Any] | None = None
@@ -1661,7 +1668,12 @@ async def run_agent(
 
         # Region-first:activate before the first main-model decision.
         initial_decision = scheduler.initial(
-            region_available=_option_initial_activation and _option_region is not None and _env is not None,
+            region_available=(
+                _option_initial_activation
+                and _max_option_activations > 0
+                and _option_region is not None
+                and _env is not None
+            ),
             action_budget=_option_autorun_actions,
         )
         if initial_decision.activate:
@@ -1701,12 +1713,32 @@ async def run_agent(
             remaining_actions = (
                 None if _max_env_actions is None else max(0, _max_env_actions - traj.env_actions)
             )
+            remaining_activations = max(
+                0, _max_option_activations - traj.automatic_region_activations,
+            )
+            scheduler_budget = (
+                remaining_activations
+                if remaining_actions is None
+                else min(remaining_actions, remaining_activations)
+            )
+            last_env_action = traj.env_action_trace[-1] if traj.env_action_trace else None
+            status_allows_reactivation = (
+                _option_reactivation_statuses is None
+                or (
+                    last_env_action is not None
+                    and last_env_action.get("status") in _option_reactivation_statuses
+                )
+            )
             reactivation = scheduler.after_environment_change(
                 action_clock=traj.env_actions,
-                last_actor=(traj.env_action_trace[-1].get("actor") if traj.env_action_trace else None),
+                last_actor=(last_env_action.get("actor") if last_env_action else None),
                 solved=bool(getattr(_env, "solved", False)),
-                region_available=_option_region is not None and _env is not None,
-                remaining_actions=remaining_actions,
+                region_available=(
+                    _option_region is not None
+                    and _env is not None
+                    and status_allows_reactivation
+                ),
+                remaining_actions=scheduler_budget,
             )
             if reactivation.activate:
                 try:

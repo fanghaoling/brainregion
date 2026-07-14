@@ -427,6 +427,21 @@ Panel 快捷写法：
 
 strict privacy 更适合 plan review。code review 在脱敏后可能损失太多语义。
 
+## 城区配送三臂评测
+
+配送沙盒用确定性路网测试运动控制卸载，主脑保留 `pickup`、`deliver` 和完成判断：
+
+```powershell
+brain-region --config brain_region_config.json --env-file .env sandbox delivery-eval `
+  --main-brain buzz_anthropic/claude-sonnet-5 --sizes 9 --seeds 0,1 --repeats 2
+```
+
+三条匹配评测臂分别是 `main_only`、`navigation_interface` 和 `navigation_region`。界面对照臂与真实脑区
+接收相同公开观察、提示/工具契约和交互事件唤醒，但永远不产生或执行移动。报告分别计算
+`navigation_interface - main_only`（界面暴露效应）与 `navigation_region - navigation_interface`
+（grounded 执行策略增量），并保留端到端比较。成本截断产生的不完整三元组只作为 orphan 诊断保留，
+不进入配对统计。
+
 ## Review Memory
 
 用 `mark_finding` 标记 finding 是否有用：

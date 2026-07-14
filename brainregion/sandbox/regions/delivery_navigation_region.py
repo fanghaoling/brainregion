@@ -158,6 +158,24 @@ class DeliveryNavigationRegion:
         return []
 
 
+class DeliveryNavigationInterfaceRegion(DeliveryNavigationRegion):
+    """Matched-exposure control: ingest public state but never propose an action."""
+
+    def next_action(self, observation: str) -> str | None:
+        self._ingest(observation)
+        self.last_decision = "interface_control_no_action"
+        self.confidence = 0.0
+        return None
+
+    def snapshot(self) -> dict[str, Any]:
+        state = super().snapshot()
+        state.update({
+            "policy": "matched_interface_no_action",
+            "control": "interface_only",
+        })
+        return state
+
+
 def parse_delivery_observation(observation: str) -> DeliveryObservation:
     if not isinstance(observation, str):
         raise TypeError("observation must be text")
@@ -198,4 +216,9 @@ def parse_delivery_observation(observation: str) -> DeliveryObservation:
     )
 
 
-__all__ = ["DeliveryNavigationRegion", "DeliveryObservation", "parse_delivery_observation"]
+__all__ = [
+    "DeliveryNavigationInterfaceRegion",
+    "DeliveryNavigationRegion",
+    "DeliveryObservation",
+    "parse_delivery_observation",
+]

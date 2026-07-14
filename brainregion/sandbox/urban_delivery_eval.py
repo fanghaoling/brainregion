@@ -1,4 +1,4 @@
-"""城区配送 main-only vs grounded 导航执行脑区的成对 A/B harness。"""
+"""城区配送主脑、匹配界面对照与 grounded 导航执行脑区的成对评测。"""
 from __future__ import annotations
 
 import csv
@@ -15,7 +15,7 @@ from brainregion.runtime import merge_usage, normalize_usage
 from .envs import UrbanDeliveryEnv, build_env_system_prompt, generate_urban_delivery_scenario
 from .isolation import cleanup_run_dir, make_run_dir
 from .loop import run_agent, scoped_env
-from .regions import DeliveryNavigationRegion
+from .regions import DeliveryNavigationInterfaceRegion, DeliveryNavigationRegion
 from .task import SandboxTask
 
 logger = logging.getLogger("brainregion.sandbox.urban_delivery_eval")
@@ -43,11 +43,19 @@ class DeliveryEvalConfig:
 class DeliveryEvalArm:
     name: str
     navigation_region: bool = False
+    interface_control: bool = False
 
 
 DELIVERY_EVAL_ARMS: tuple[DeliveryEvalArm, ...] = (
     DeliveryEvalArm("main_only"),
+    DeliveryEvalArm("navigation_interface", interface_control=True),
     DeliveryEvalArm("navigation_region", navigation_region=True),
+)
+
+DELIVERY_EVAL_COMPARISONS: tuple[tuple[str, str, str], ...] = (
+    ("main_only_vs_navigation_interface", "main_only", "navigation_interface"),
+    ("navigation_interface_vs_navigation_region", "navigation_interface", "navigation_region"),
+    ("main_only_vs_navigation_region", "main_only", "navigation_region"),
 )
 
 
@@ -77,7 +85,12 @@ async def _run_delivery_episode(
     option_actions: int,
 ) -> dict[str, Any]:
     env = build_delivery_env(config)
-    navigation_region = DeliveryNavigationRegion() if arm.navigation_region else None
+    if arm.navigation_region:
+        navigation_region = DeliveryNavigationRegion()
+    elif arm.interface_control:
+        navigation_region = DeliveryNavigationInterfaceRegion()
+    else:
+        navigation_region = None
     goal = "按顺序完成全部配送订单，并在最后一单后返回商铺 S"
     task = SandboxTask(id=f"delivery-{config.label}", goal=goal)
     main_turn_cap = (
@@ -111,12 +124,13 @@ async def _run_delivery_episode(
                 endpoint_id=endpoint_id,
                 thinking=thinking,
                 effort=effort,
-                system_prompt=build_env_system_prompt(env, goal, navigation=arm.navigation_region),
+                system_prompt=build_env_system_prompt(env, goal, navigation=navigation_region is not None),
                 verify_fn=verify,
                 option_region=navigation_region,
                 option_autorun_actions=(option_actions if navigation_region else 0),
                 option_continuous=bool(navigation_region),
                 option_initial_activation=False,
+                option_reactivation_statuses={"interacted"},
                 max_option_activations=max(10, config.orders * 2 + 2),
             )
     finally:
@@ -163,6 +177,7 @@ async def _run_delivery_episode(
         ),
         "navigation_replans": region_state.get("replans", 0),
         "navigation_known_vehicles": region_state.get("known_vehicles", 0),
+        "navigation_policy": region_state.get("policy"),
         "delivered_orders": metrics["delivered_orders"],
         "returned_orders": metrics["returned_orders"],
         "completion_fraction": metrics["returned_orders"] / config.orders,
@@ -203,6 +218,8 @@ def _aggregate_arm(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_delegated_actions": _mean(runs, "delegated_actions"),
         "mean_delegated_action_share": _mean(runs, "delegated_action_share"),
         "mean_blocked_actions": _mean(runs, "blocked_actions"),
+        "mean_automatic_region_activations": _mean(runs, "automatic_region_activations"),
+        "mean_explicit_navigation_calls": _mean(runs, "explicit_navigation_calls"),
         "mean_navigation_replans": _mean(runs, "navigation_replans"),
         "mean_main_input_tokens": _mean(runs, "main_input_tokens"),
         "mean_input_tokens": _mean(runs, "input_tokens"),
@@ -211,17 +228,30 @@ def _aggregate_arm(runs: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _paired_delta(rows: list[dict[str, Any]], key: str) -> float | None:
+def _paired_delta(
+    rows: list[dict[str, Any]],
+    key: str,
+    *,
+    control_arm: str,
+    treatment_arm: str,
+) -> float | None:
     deltas = []
     for row in rows:
-        control = row["main_only"].get(key)
-        treatment = row["navigation_region"].get(key)
+        control = row[control_arm].get(key)
+        treatment = row[treatment_arm].get(key)
         if control is not None and treatment is not None:
             deltas.append(float(treatment) - float(control))
     return sum(deltas) / len(deltas) if deltas else None
 
 
-def _bootstrap_deltas(rows: list[dict[str, Any]], run_id: str) -> dict[str, dict[str, Any]]:
+def _bootstrap_deltas(
+    rows: list[dict[str, Any]],
+    run_id: str,
+    *,
+    comparison: str,
+    control_arm: str,
+    treatment_arm: str,
+) -> dict[str, dict[str, Any]]:
     metrics = {
         "solve_rate_delta": "solve_rate",
         "completion_fraction_delta": "mean_completion_fraction",
@@ -231,14 +261,21 @@ def _bootstrap_deltas(rows: list[dict[str, Any]], run_id: str) -> dict[str, dict
         "main_env_actions_delta": "mean_main_env_actions",
         "delegated_action_share_delta": "mean_delegated_action_share",
         "blocked_actions_delta": "mean_blocked_actions",
+        "automatic_region_activations_delta": "mean_automatic_region_activations",
+        "explicit_navigation_calls_delta": "mean_explicit_navigation_calls",
         "input_tokens_delta": "mean_input_tokens",
         "cost_delta": "mean_cost",
     }
     return {
         metric: eval_stats.bootstrap_statistic(
             rows,
-            lambda sampled, aggregate_key=aggregate_key: _paired_delta(sampled, aggregate_key),
-            seed=eval_stats.seed_for(run_id, f"delivery|{metric}"),
+            lambda sampled, aggregate_key=aggregate_key: _paired_delta(
+                sampled,
+                aggregate_key,
+                control_arm=control_arm,
+                treatment_arm=treatment_arm,
+            ),
+            seed=eval_stats.seed_for(run_id, f"delivery|{comparison}|{metric}"),
         )
         for metric, aggregate_key in metrics.items()
     }
@@ -277,7 +314,16 @@ def aggregate_delivery_report(
         for config in configs
         if all(per_config[config.label][arm.name]["n_runs"] > 0 for arm in DELIVERY_EVAL_ARMS)
     ]
-    pairwise = _bootstrap_deltas(rows, run_id)
+    pairwise = {
+        comparison: _bootstrap_deltas(
+            rows,
+            run_id,
+            comparison=comparison,
+            control_arm=control_arm,
+            treatment_arm=treatment_arm,
+        )
+        for comparison, control_arm, treatment_arm in DELIVERY_EVAL_COMPARISONS
+    }
     if runs:
         signal_regime = (
             "all_solve" if all(run["solved"] for run in runs)
@@ -301,17 +347,23 @@ def aggregate_delivery_report(
             "navigation_region reads only public observation and owns movement actions; "
             "main brain retains pickup, deliver, and done decisions"
         ),
-        "interpretation_limit": (
-            "This first comparison estimates the whole navigation feature package, including its disclosed prompt "
-            "contract and execution trace; it does not yet isolate policy content from interface exposure."
+        "interface_control_contract": (
+            "navigation_interface receives the same public observation, prompt/tool contract, and "
+            "interaction-triggered activations, but its matched control policy never emits or executes an action"
         ),
+        "interpretation_limit": (
+            "navigation_interface - main_only estimates prompt/tool/no-op activation exposure; "
+            "navigation_region - navigation_interface estimates the grounded execution-policy increment. "
+            "Explicit delegate calls and post-activation transcripts may still diverge and remain observable mediators."
+        ),
+        "primary_comparison": "navigation_interface_vs_navigation_region",
         "primary_metric": "solve_rate_delta",
         "secondary_metrics": ["efficiency_delta", "main_turns_delta", "main_env_actions_delta"],
         "signal_regime": signal_regime,
         "n_complete_configs": len(rows),
         "per_arm": per_arm,
         "per_config": [{label: values} for label, values in per_config.items()],
-        "pairwise": {"main_only_vs_navigation_region": pairwise},
+        "pairwise": pairwise,
         "cost_total": round(cost_total, 6),
         "cost_capped": cost_capped,
         "incomplete_pairs": bool(orphan_runs),
@@ -421,7 +473,8 @@ def write_delivery_report(report: dict[str, Any], out_dir: str | Path | None = N
     columns = [
         "config", "repeat", "arm", "solved", "termination", "main_turns", "env_actions",
         "main_env_actions", "delegated_actions", "delegated_action_share", "blocked_actions",
-        "navigation_replans", "delivered_orders", "returned_orders", "completion_fraction",
+        "automatic_region_activations", "explicit_navigation_calls", "navigation_replans",
+        "delivered_orders", "returned_orders", "completion_fraction",
         "elapsed_time", "oracle_optimal_time", "efficiency", "input_tokens", "output_tokens", "cost",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
@@ -436,27 +489,34 @@ def render_delivery_summary(report: dict[str, Any]) -> str:
     lines = [
         f"### delivery-eval {report['run_id']}",
         "",
-        "| arm | solve | efficiency | main turns | main actions | delegated share | cost |",
-        "|---|---:|---:|---:|---:|---:|---:|",
+        "| arm | solve | efficiency | main turns | main actions | delegated share | auto wakes | cost |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for arm in report["arms"]:
         summary = report["per_arm"][arm]
         lines.append(
             f"| {arm} | {summary['solve_rate']:.3f} | {_fmt(summary['mean_efficiency'])} | "
             f"{_fmt(summary['mean_main_turns'])} | {_fmt(summary['mean_main_env_actions'])} | "
-            f"{_fmt(summary['mean_delegated_action_share'])} | {_fmt(summary['mean_cost'])} |"
+            f"{_fmt(summary['mean_delegated_action_share'])} | "
+            f"{_fmt(summary['mean_automatic_region_activations'])} | {_fmt(summary['mean_cost'])} |"
         )
-    pair = report["pairwise"]["main_only_vs_navigation_region"]
-    lines.extend(["", "**navigation_region - main_only:**"])
-    for metric in (
-        "solve_rate_delta", "efficiency_delta", "main_turns_delta",
-        "main_env_actions_delta", "input_tokens_delta", "cost_delta",
-    ):
-        value = pair[metric]
-        lines.append(
-            f"- {metric}: point={_fmt(value.get('point'))}, "
-            f"CI=[{_fmt(value.get('low'))}, {_fmt(value.get('high'))}]"
-        )
+    comparison_labels = {
+        "main_only_vs_navigation_interface": "navigation_interface - main_only",
+        "navigation_interface_vs_navigation_region": "navigation_region - navigation_interface",
+        "main_only_vs_navigation_region": "navigation_region - main_only",
+    }
+    for comparison, label in comparison_labels.items():
+        pair = report["pairwise"][comparison]
+        lines.extend(["", f"**{label}:**"])
+        for metric in (
+            "solve_rate_delta", "efficiency_delta", "main_turns_delta",
+            "main_env_actions_delta", "input_tokens_delta", "cost_delta",
+        ):
+            value = pair[metric]
+            lines.append(
+                f"- {metric}: point={_fmt(value.get('point'))}, "
+                f"CI=[{_fmt(value.get('low'))}, {_fmt(value.get('high'))}]"
+            )
     lines.append(
         f"\n完整 config={report['n_complete_configs']}, signal={report['signal_regime']}, "
         f"cost=${report['cost_total']:.4f}, incomplete_pairs={report['incomplete_pairs']}"
@@ -470,6 +530,7 @@ def _fmt(value: Any) -> str:
 
 __all__ = [
     "DELIVERY_EVAL_ARMS",
+    "DELIVERY_EVAL_COMPARISONS",
     "DeliveryEvalArm",
     "DeliveryEvalConfig",
     "aggregate_delivery_report",

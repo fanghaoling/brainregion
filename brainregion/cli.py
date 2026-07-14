@@ -611,7 +611,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_sb_delivery_eval = p_sb_sub.add_parser(
         "delivery-eval",
-        help="城区配送成对 A/B:main_only vs grounded 导航执行脑区，统计效率、动作卸载、token 与成本",
+        help="城区配送三臂评测:主脑 vs 匹配界面对照 vs grounded 导航执行，统计效率、动作卸载、token 与成本",
     )
     p_sb_delivery_eval.add_argument("--main-brain", default=None, help="主脑模型")
     p_sb_delivery_eval.add_argument("--sizes", default="9", help="地图边长，逗号分隔(默认 9)")

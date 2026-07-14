@@ -74,11 +74,18 @@ def test_aggregate_uses_config_level_paired_deltas():
     runs = []
     for index, config in enumerate(configs):
         runs.append(_run(config, "main_only", solved=bool(index), completion_fraction=0.5 + 0.5 * index))
+        runs.append(_run(
+            config, "navigation_interface", solved=bool(index), completion_fraction=0.5 + 0.5 * index,
+        ))
         runs.append(_run(config, "navigation_region", solved=True, completion_fraction=1.0))
     report = _aggregate(configs, runs)
     pair = report["pairwise"]["main_only_vs_navigation_region"]
+    interface = report["pairwise"]["main_only_vs_navigation_interface"]
+    execution = report["pairwise"]["navigation_interface_vs_navigation_region"]
     assert report["n_complete_configs"] == 2
     assert pair["solve_rate_delta"]["point"] == 0.5
+    assert interface["solve_rate_delta"]["point"] == 0.0
+    assert execution["solve_rate_delta"]["point"] == 0.5
     assert pair["main_turns_delta"]["point"] == -12.0
     assert pair["main_env_actions_delta"]["point"] == -32.0
     assert report["per_arm"]["navigation_region"]["mean_delegated_action_share"] > 0.8
@@ -118,23 +125,30 @@ def test_arm_order_rotates_across_repeats(monkeypatch):
         object(), "mock", [config], repeats=2, max_cost_usd=1.0, log_progress=False,
     ))
     assert [run["arm"] for run in report["runs"]] == [
-        "main_only", "navigation_region", "navigation_region", "main_only",
+        "main_only", "navigation_interface", "navigation_region",
+        "navigation_interface", "navigation_region", "main_only",
     ]
-    assert report["runs"][0]["arm_order"] == ["main_only", "navigation_region"]
-    assert report["runs"][2]["arm_order"] == ["navigation_region", "main_only"]
+    assert report["runs"][0]["arm_order"] == [
+        "main_only", "navigation_interface", "navigation_region",
+    ]
+    assert report["runs"][3]["arm_order"] == [
+        "navigation_interface", "navigation_region", "main_only",
+    ]
 
 
 def test_report_writes_json_csv_and_markdown(tmp_path):
     configs = [DeliveryEvalConfig(seed=0), DeliveryEvalConfig(seed=1)]
-    runs = [_run(config, arm) for config in configs for arm in ("main_only", "navigation_region")]
+    arms = ("main_only", "navigation_interface", "navigation_region")
+    runs = [_run(config, arm) for config in configs for arm in arms]
     report = _aggregate(configs, runs)
     json_path, csv_path = write_delivery_report(report, tmp_path)
     summary = render_delivery_summary(report)
     assert json_path.is_file() and csv_path.is_file()
     with csv_path.open(encoding="utf-8") as handle:
         rows = list(csv.DictReader(handle))
-    assert len(rows) == 4 and {row["arm"] for row in rows} == {"main_only", "navigation_region"}
-    assert "main_only_vs_navigation_region" not in summary
+    assert len(rows) == 6 and {row["arm"] for row in rows} == set(arms)
+    assert "navigation_interface - main_only" in summary
+    assert "navigation_region - navigation_interface" in summary
     assert "navigation_region - main_only" in summary
 
 
@@ -153,15 +167,27 @@ def test_delivery_eval_cli_argparse():
 
 
 class _PairedScriptBackend:
-    def __init__(self, main_script, navigation_script):
-        self.scripts = {"main": main_script, "navigation": navigation_script}
-        self.indices = {"main": 0, "navigation": 0}
+    def __init__(self, main_script, interface_script, navigation_script):
+        self.scripts = {
+            "main": main_script,
+            "interface": interface_script,
+            "navigation": navigation_script,
+        }
+        self.indices = {arm: 0 for arm in self.scripts}
+        self.current_arm = "main"
+        self.navigation_episodes = 0
 
     async def complete_messages(self, messages, **kwargs):
-        arm = "navigation" if "导航执行脑区" in messages[0]["content"] else "main"
-        index = self.indices[arm]
-        self.indices[arm] += 1
-        content = self.scripts[arm][min(index, len(self.scripts[arm]) - 1)]
+        if not any(message.get("role") == "assistant" for message in messages):
+            if "导航执行脑区" in messages[0]["content"]:
+                self.current_arm = ("interface", "navigation")[self.navigation_episodes]
+                self.navigation_episodes += 1
+            else:
+                self.current_arm = "main"
+        index = self.indices[self.current_arm]
+        self.indices[self.current_arm] += 1
+        script = self.scripts[self.current_arm]
+        content = script[min(index, len(script) - 1)]
         return ModelResponse(model="mock", content=content, usage={}, cost_usd=0.0)
 
 
@@ -193,6 +219,7 @@ def test_real_harness_pair_separates_main_and_region_action_ownership():
     done = json.dumps({"thought": "完成", "done": True, "answer": "配送完成"})
     backend = _PairedScriptBackend(
         [_tool(action) for action in main_actions] + [done],
+        [_tool(action) for action in main_actions] + [done],
         [_tool("pickup"), _tool("deliver"), done],
     )
 
@@ -208,9 +235,14 @@ def test_real_harness_pair_separates_main_and_region_action_ownership():
 
     by_arm = {run["arm"]: run for run in report["runs"]}
     assert by_arm["main_only"]["solved"] is True
+    assert by_arm["navigation_interface"]["solved"] is True
     assert by_arm["navigation_region"]["solved"] is True
     assert by_arm["main_only"]["delegated_actions"] == 0
+    assert by_arm["navigation_interface"]["delegated_actions"] == 0
     assert by_arm["navigation_region"]["delegated_actions"] > 0
+    assert by_arm["navigation_interface"]["main_movement_actions"] > 0
     assert by_arm["navigation_region"]["main_movement_actions"] == 0
     assert by_arm["navigation_region"]["region_interaction_actions"] == 0
+    assert by_arm["navigation_interface"]["automatic_region_activations"] == 2
+    assert by_arm["navigation_region"]["automatic_region_activations"] == 2
     assert by_arm["navigation_region"]["main_turns"] < by_arm["main_only"]["main_turns"]

@@ -9,7 +9,7 @@ from brainregion.sandbox import cleanup_run_dir, make_run_dir
 from brainregion.sandbox.envs import UrbanDeliveryEnv, build_env_system_prompt, generate_urban_delivery_scenario
 from brainregion.sandbox.loop import run_agent, scoped_env
 from brainregion.sandbox.option_runtime import OptionRegion
-from brainregion.sandbox.regions import DeliveryNavigationRegion
+from brainregion.sandbox.regions import DeliveryNavigationInterfaceRegion, DeliveryNavigationRegion
 from brainregion.sandbox.regions.delivery_navigation_region import parse_delivery_observation
 from brainregion.sandbox.task import SandboxTask
 
@@ -34,6 +34,20 @@ def _drive_region(env, region, *, limit=100):
 
 def test_delivery_navigation_region_implements_option_protocol():
     assert isinstance(DeliveryNavigationRegion(), OptionRegion)
+    assert isinstance(DeliveryNavigationInterfaceRegion(), OptionRegion)
+
+
+def test_interface_control_ingests_public_observation_but_never_emits_actions():
+    scenario = generate_urban_delivery_scenario(seed=0, width=9, height=9, order_count=1, vehicle_count=1)
+    env = UrbanDeliveryEnv(scenario)
+    env.step("pickup")
+    region = DeliveryNavigationInterfaceRegion()
+
+    assert region.next_action(env.observation()) is None
+    state = region.snapshot()
+    assert state["policy"] == "matched_interface_no_action"
+    assert state["control"] == "interface_only"
+    assert state["known_roads"] > 0
 
 
 def test_parse_delivery_observation_tracks_main_interaction_state():
@@ -139,6 +153,48 @@ def test_run_agent_sleeps_region_until_pickup_then_unloads_all_movement():
         "after_main_action", "after_main_action",
     ]
     assert "导航执行脑区" in backend.messages[0][0]["content"]
+
+
+def test_automatic_navigation_activation_respects_runtime_cap():
+    scenario = generate_urban_delivery_scenario(seed=0, width=9, height=9, order_count=1, vehicle_count=1)
+    env = UrbanDeliveryEnv(scenario)
+    region = DeliveryNavigationRegion()
+    backend = _InteractionBackend()
+    task = SandboxTask(id="delivery-option-cap", goal="完成一单并返店")
+
+    def verify(t, run_dir, *, python_exe=None):
+        return {
+            "tests_green": env.solved,
+            "solve_status": "solved" if env.solved else "tests_fail",
+            "pytest": None,
+            "gold_diff": t.gold_diff,
+        }
+
+    run_dir = make_run_dir()
+    try:
+        with scoped_env(env):
+            trajectory = asyncio.run(run_agent(
+                backend,
+                "mock",
+                task,
+                run_dir=run_dir,
+                arm="none",
+                max_steps=6,
+                max_env_actions=60,
+                system_prompt=build_env_system_prompt(env, task.goal, navigation=True),
+                verify_fn=verify,
+                option_region=region,
+                option_autorun_actions=16,
+                option_continuous=True,
+                option_initial_activation=False,
+                max_option_activations=1,
+            ))
+    finally:
+        cleanup_run_dir(run_dir)
+
+    assert trajectory.automatic_region_activations == 1
+    assert len(trajectory.option_activations) == 1
+    assert env.solved is False
 
 
 def test_navigation_prompt_exposes_delegate_without_oracle_truth():

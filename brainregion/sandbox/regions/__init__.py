@@ -12,7 +12,7 @@ from .strategy_region import StrategyRegion, EchoStrategy, build_strategy_region
 from .topo_region import TopologicalRegion
 from .path_region import PathTraceRegion
 from .navigation_region import GroundedNavigationRegion, NavigationRegion
-from .delivery_navigation_region import DeliveryNavigationRegion
+from .delivery_navigation_region import DeliveryNavigationInterfaceRegion, DeliveryNavigationRegion
 from .verification_region import VerificationOptionRegion
 from .evidence_region import EvidenceRegion, EvidenceRequest
 
@@ -27,6 +27,7 @@ __all__ = [
     "NavigationRegion",
     "GroundedNavigationRegion",
     "DeliveryNavigationRegion",
+    "DeliveryNavigationInterfaceRegion",
     "VerificationOptionRegion",
     "EvidenceRegion",
     "EvidenceRequest",
