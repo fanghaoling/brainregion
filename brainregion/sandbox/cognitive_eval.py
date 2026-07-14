@@ -35,6 +35,7 @@ COGNITIVE_EVAL_ARMS: tuple[CognitiveEvalArm, ...] = (
     CognitiveEvalArm(ARM_COMBINED, native_thinking=True, external_scaffold=True),
 )
 _ARM_BY_NAME = {arm.name: arm for arm in COGNITIVE_EVAL_ARMS}
+_SCAFFOLD_MODES = frozenset({"runtime_checkpoint", "model_managed"})
 _METRICS = (
     "solved",
     "protocol_completed",
@@ -93,6 +94,8 @@ async def run_cognitive_scaffold_eval(
     transcript_token_cap: int = 24000,
     consecutive_error_limit: int = 3,
     effort: str | None = None,
+    scaffold_mode: str = "runtime_checkpoint",
+    checkpoint_period: int = 3,
     run_id: str = "",
     bootstrap_samples: int | None = None,
 ) -> dict[str, Any]:
@@ -102,6 +105,14 @@ async def run_cognitive_scaffold_eval(
         raise ValueError("cognitive eval task ids must be unique")
     if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats <= 0:
         raise ValueError("repeats must be a positive integer")
+    if scaffold_mode not in _SCAFFOLD_MODES:
+        raise ValueError(f"unknown cognitive scaffold mode: {scaffold_mode!r}")
+    if (
+        isinstance(checkpoint_period, bool)
+        or not isinstance(checkpoint_period, int)
+        or checkpoint_period <= 0
+    ):
+        raise ValueError("checkpoint_period must be a positive integer")
     selected_arms = _selected_arms(arms)
     run_id = run_id or f"cognitive-{int(time.time() * 1000)}"
     cases: list[dict[str, Any]] = []
@@ -130,6 +141,8 @@ async def run_cognitive_scaffold_eval(
                         thinking=arm.native_thinking,
                         effort=effort if arm.native_thinking else None,
                         cognitive_scaffold=arm.external_scaffold,
+                        cognitive_scaffold_mode=scaffold_mode,
+                        cognitive_checkpoint_period=checkpoint_period,
                     )
                     actual_model_calls += trajectory.n_steps
                     actual_cost_usd += float(trajectory.total_main_cost_usd)
@@ -150,6 +163,7 @@ async def run_cognitive_scaffold_eval(
                             "arm": arm.name,
                             "native_thinking": arm.native_thinking,
                             "external_scaffold": arm.external_scaffold,
+                            "scaffold_mode": scaffold_mode if arm.external_scaffold else None,
                             "solved": trajectory.tests_green,
                             "protocol_completed": trajectory.done,
                             "termination_reason": trajectory.termination_reason,
@@ -178,6 +192,7 @@ async def run_cognitive_scaffold_eval(
                             "arm": arm.name,
                             "native_thinking": arm.native_thinking,
                             "external_scaffold": arm.external_scaffold,
+                            "scaffold_mode": scaffold_mode if arm.external_scaffold else None,
                             "solved": False,
                             "protocol_completed": False,
                             "termination_reason": "runner_error",
@@ -210,6 +225,8 @@ async def run_cognitive_scaffold_eval(
         "model": model,
         "endpoint_id": endpoint_id,
         "effort": effort,
+        "scaffold_mode": scaffold_mode,
+        "checkpoint_period": checkpoint_period,
         "thinking_control": classify_thinking_control(model),
         "max_steps": max_steps,
         "actual_model_calls": actual_model_calls,
@@ -246,6 +263,11 @@ def summarize_cognitive_records(
             int((record.get("cognitive_scaffold") or {}).get("update_failures") or 0)
             for record in valid
         )
+        runtime_checkpoint_counts = [
+            int((record.get("cognitive_scaffold") or {}).get("checkpoint_count") or 0)
+            for record in valid
+            if (record.get("cognitive_scaffold") or {}).get("mode") == "runtime_checkpoint"
+        ]
         per_arm[arm] = {
             "n_runs": len(arm_records),
             "n_valid_runs": len(valid),
@@ -258,6 +280,11 @@ def summarize_cognitive_records(
             "mean_cost_usd": _mean(valid, "cost_usd"),
             "mean_repeated_target_rate": _mean(valid, "repeated_target_rate"),
             "scaffold_update_success_rate": (updates - failures) / updates if updates else None,
+            "mean_checkpoint_count": (
+                sum(runtime_checkpoint_counts) / len(runtime_checkpoint_counts)
+                if runtime_checkpoint_counts
+                else None
+            ),
             "infrastructure_failures": len(arm_records) - len(valid),
         }
 
@@ -335,6 +362,8 @@ def render_cognitive_eval_summary(report: dict[str, Any]) -> str:
         f"native_thinking_observed={report.get('native_thinking_observed')} "
         f"telemetry={report.get('thinking_telemetry_status')} "
         f"control={((report.get('execution') or {}).get('thinking_control') or {}).get('mode')} "
+        f"scaffold={((report.get('execution') or {}).get('scaffold_mode'))} "
+        f"period={((report.get('execution') or {}).get('checkpoint_period'))} "
         f"actual_cost=${float((report.get('execution') or {}).get('actual_cost_usd') or 0):.4f}",
     ]
     for arm, summary in (report.get("per_arm") or {}).items():
@@ -342,7 +371,8 @@ def render_cognitive_eval_summary(report: dict[str, Any]) -> str:
             f"  {arm}: solve={summary.get('solve_rate')} completed={summary.get('protocol_completion_rate')} "
             f"steps={summary.get('mean_steps')} tokens={summary.get('mean_main_total_tokens')} "
             f"reasoning={summary.get('mean_reasoning_tokens')} cost=${float(summary.get('mean_cost_usd') or 0):.4f} "
-            f"scaffold_updates={summary.get('scaffold_update_success_rate')}"
+            f"scaffold_updates={summary.get('scaffold_update_success_rate')} "
+            f"checkpoints={summary.get('mean_checkpoint_count')}"
         )
     for name, effect in (report.get("effects") or {}).items():
         point = ((effect.get("deltas") or {}).get("solved") or {}).get("point")

@@ -29,13 +29,21 @@ class _MatrixBackend:
         self.calls: list[dict] = []
 
     async def complete_messages(self, messages, **kwargs):
-        scaffold = "cognitive_update" in messages[0]["content"]
+        system_prompt = messages[0]["content"]
+        runtime_scaffold = "Runtime 认知 checkpoint" in system_prompt
+        model_managed_scaffold = "思考脚手架已启用" in system_prompt
+        scaffold = runtime_scaffold or model_managed_scaffold
+        checkpoint = any(
+            str(message.get("content", "")).startswith("<runtime_cognitive_checkpoint>")
+            for message in messages
+        )
         turn = sum(message["role"] == "assistant" for message in messages)
         self.calls.append(
             {
                 "thinking": kwargs.get("thinking"),
                 "effort": kwargs.get("effort"),
                 "scaffold": scaffold,
+                "checkpoint": checkpoint,
                 "turn": turn,
             }
         )
@@ -55,7 +63,7 @@ class _MatrixBackend:
                     "dry_run": False,
                 },
             }
-            if scaffold:
+            if model_managed_scaffold:
                 content["cognitive_update"] = {
                     "current_subgoal": "Correct the inclusive endpoint.",
                     "hypotheses_upsert": [
@@ -74,7 +82,7 @@ class _MatrixBackend:
                 "tool": "workspace_run_check",
                 "args": {"argv": [sys.executable, "-m", "pytest", "-q"]},
             }
-            if scaffold:
+            if model_managed_scaffold:
                 content["cognitive_update"] = {
                     "hypotheses_upsert": [
                         {
@@ -99,7 +107,7 @@ class _MatrixBackend:
                 "done": True,
                 "answer": "Fixed and verified.",
             }
-            if scaffold:
+            if model_managed_scaffold or checkpoint:
                 content["cognitive_update"] = {
                     "verification_gap": "",
                     "blocker": "",
@@ -142,6 +150,7 @@ def test_cognitive_eval_runs_matched_matrix_without_private_state_in_report():
             max_steps=3,
             max_cost_usd=1.0,
             effort="medium",
+            checkpoint_period=2,
             bootstrap_samples=20,
         )
     )
@@ -155,6 +164,8 @@ def test_cognitive_eval_runs_matched_matrix_without_private_state_in_report():
     assert report["n_runs"] == 4
     assert report["execution"]["actual_model_calls"] == 12
     assert report["execution"]["effort"] == "medium"
+    assert report["execution"]["scaffold_mode"] == "runtime_checkpoint"
+    assert report["execution"]["checkpoint_period"] == 2
     assert report["native_thinking_requested"] is True
     assert report["native_thinking_observed"] is True
     assert report["control_reasoning_observed"] is False
@@ -164,6 +175,9 @@ def test_cognitive_eval_runs_matched_matrix_without_private_state_in_report():
     assert report["per_arm"][ARM_EXTERNAL_SCAFFOLD]["scaffold_update_success_rate"] == 1.0
     assert report["per_arm"][ARM_COMBINED]["scaffold_update_success_rate"] == 1.0
     assert report["per_arm"][ARM_PLAIN]["scaffold_update_success_rate"] is None
+    assert report["per_arm"][ARM_EXTERNAL_SCAFFOLD]["mean_checkpoint_count"] == 1.0
+    assert report["per_arm"][ARM_COMBINED]["mean_checkpoint_count"] == 1.0
+    assert report["per_arm"][ARM_PLAIN]["mean_checkpoint_count"] is None
     assert {(call["thinking"], call["scaffold"]) for call in backend.calls} == {
         (False, False),
         (True, False),
@@ -172,6 +186,7 @@ def test_cognitive_eval_runs_matched_matrix_without_private_state_in_report():
     }
     assert all(call["effort"] == "medium" for call in backend.calls if call["thinking"])
     assert all(call["effort"] is None for call in backend.calls if not call["thinking"])
+    assert sum(call["checkpoint"] for call in backend.calls) == 2
     rendered = json.dumps(report, ensure_ascii=False)
     assert "current_subgoal" not in rendered
     assert "evidence_refs" not in rendered
@@ -226,6 +241,11 @@ def test_cognitive_eval_rejects_unknown_or_duplicate_arms():
         asyncio.run(run_cognitive_scaffold_eval(backend, "main", [task], arms=["unknown"]))
     with pytest.raises(ValueError, match="cannot contain duplicates"):
         asyncio.run(run_cognitive_scaffold_eval(backend, "main", [task], arms=[ARM_PLAIN, ARM_PLAIN]))
+    with pytest.raises(ValueError, match="unknown cognitive scaffold mode"):
+        asyncio.run(run_cognitive_scaffold_eval(backend, "main", [task], scaffold_mode="unknown"))
+    with pytest.raises(ValueError, match="checkpoint_period must be a positive integer"):
+        asyncio.run(run_cognitive_scaffold_eval(backend, "main", [task], checkpoint_period=0))
+    assert backend.calls == []
 
 
 def test_cognitive_eval_cli_contract():
@@ -244,8 +264,12 @@ def test_cognitive_eval_cli_contract():
     assert args.sandbox_command == "cognitive-eval"
     assert args.arms == "plain,native_thinking,external_scaffold,combined"
     assert args.effort == "medium"
+    assert args.scaffold_mode == "runtime_checkpoint"
+    assert args.checkpoint_period == 3
 
     run_args = build_parser().parse_args(
         ["sandbox", "run", "--task", "off_by_one", "--cognitive-scaffold"]
     )
     assert run_args.cognitive_scaffold is True
+    assert run_args.cognitive_mode == "runtime_checkpoint"
+    assert run_args.checkpoint_period == 3

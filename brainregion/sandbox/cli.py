@@ -154,6 +154,10 @@ def _agent_kwargs(args: argparse.Namespace, dd: dict[str, Any], endpoint_id: str
         "brain_verify": bool(getattr(args, "brain_verify", False)),
         "brain_delegate": bool(getattr(args, "brain_delegate", False)),
         "cognitive_scaffold": bool(getattr(args, "cognitive_scaffold", False)),
+        "cognitive_scaffold_mode": str(
+            getattr(args, "cognitive_mode", "runtime_checkpoint")
+        ),
+        "cognitive_checkpoint_period": int(getattr(args, "checkpoint_period", 3)),
     }
 
 
@@ -462,6 +466,8 @@ async def run_cognitive_eval(args: argparse.Namespace) -> dict[str, Any]:
             transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
             consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
             effort=args.effort,
+            scaffold_mode=args.scaffold_mode,
+            checkpoint_period=int(args.checkpoint_period),
             bootstrap_samples=args.bootstrap_samples,
         )
     except ValueError as exc:

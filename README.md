@@ -469,11 +469,16 @@ silently counted as rejecting expert advice.
 
 ### Cognitive Scaffold Pilot
 
-The sandbox can persist a compact `MainCognitiveState` across model turns. It stores only bounded task state: the
-current subgoal, evidence-linked facts, revisable hypotheses, prior attempts, blockers, the next action, and the
-remaining verification gap. It does not request, store, or expose chain-of-thought. Facts must cite an available
-`goal`, completed `step:N`, or activated `expert:ASSIGNMENT_ID`; invalid updates are observed but never block the
-requested workspace tool.
+The default `runtime_checkpoint` scaffold derives objective progress from completed tool events and asks the model
+for a compact strategic update only at a checkpoint. A checkpoint is triggered after the configured event period, or
+earlier by signals such as a tool error, failed verification, or repeated target. Normal turns receive no persisted
+state block and do not emit `cognitive_update`, so the scaffold does not continuously replay its own summary into the
+main context. The strategic update contains only bounded subgoals, revisable hypotheses, blockers, next action, and
+verification gap. It does not request, store, or expose chain-of-thought.
+
+The earlier `model_managed` mode remains available for controlled comparisons. It asks the model to maintain objective
+facts and attempts every turn, with evidence references to `goal`, completed `step:N`, or activated
+`expert:ASSIGNMENT_ID`. Invalid updates are observed but never block the requested workspace tool.
 
 Enable it for a manual fixture run:
 
@@ -481,7 +486,9 @@ Enable it for a manual fixture run:
 brain-region sandbox run `
   --task off_by_one `
   --main-brain modelbridge_anthropic/claude-sonnet-5 `
-  --cognitive-scaffold
+  --cognitive-scaffold `
+  --cognitive-mode runtime_checkpoint `
+  --checkpoint-period 3
 ```
 
 Compare provider-native thinking and the external scaffold with a matched 2x2 experiment:
@@ -490,6 +497,8 @@ Compare provider-native thinking and the external scaffold with a matched 2x2 ex
 brain-region sandbox cognitive-eval `
   --tasks tenant_cache_scope,settings_precedence `
   --main-brain modelbridge_anthropic/claude-sonnet-5 `
+  --scaffold-mode runtime_checkpoint `
+  --checkpoint-period 3 `
   --effort medium `
   --repeats 2
 ```
@@ -497,6 +506,8 @@ brain-region sandbox cognitive-eval `
 The four arms are `plain`, `native_thinking`, `external_scaffold`, and `combined`. Every arm receives the same task and
 model but runs in a fresh fixture directory. Reports compare objective solve/completion rates, steps, repeated targets,
 input/total/reasoning tokens, cost, scaffold update validity, paired main effects, and the factorial interaction.
+The execution block records `scaffold_mode` and `checkpoint_period`, while each scaffold arm reports its mean
+checkpoint count so experiments using the two implementations cannot be silently mixed.
 `native_thinking_requested` confirms that the backend received `thinking=True`; `native_thinking_observed` is stricter
 and requires nonzero reasoning-token telemetry. Some gateways do not expose reasoning tokens, so a false observed flag
 is inconclusive rather than proof that provider-side thinking was disabled. `thinking_telemetry_status` also detects

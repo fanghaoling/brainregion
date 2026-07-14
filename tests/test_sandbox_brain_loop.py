@@ -76,6 +76,26 @@ def test_loop_accept_first_iteration(monkeypatch):
     assert len(traj.iterations) == 1                              # 不进 it2
 
 
+def test_loop_threads_runtime_checkpoint_options_to_inner_agent(monkeypatch):
+    calls = _patch_seq(monkeypatch, [_traj(tests_green=True, action="accept")])
+
+    asyncio.run(
+        run_cognitive_loop(
+            None,
+            "m",
+            _task(),
+            run_dir=".",
+            cognitive_scaffold=True,
+            cognitive_scaffold_mode="runtime_checkpoint",
+            cognitive_checkpoint_period=4,
+        )
+    )
+
+    assert calls[0]["cognitive_scaffold"] is True
+    assert calls[0]["cognitive_scaffold_mode"] == "runtime_checkpoint"
+    assert calls[0]["cognitive_checkpoint_period"] == 4
+
+
 def test_loop_max_iterations(monkeypatch):
     _patch_always(monkeypatch, _traj(tests_green=False, action="redelegate", subgoal="x"))
     traj = asyncio.run(run_cognitive_loop(None, "m", _task(), run_dir=".", max_iterations=2, max_cost_usd=1.0))
@@ -463,6 +483,35 @@ def test_run_expert_brain_loop_calls_cognitive_loop(monkeypatch):
     # run_cognitive_loop 不吃 brain_verify/brain_delegate(强制 True)→ 不在 kw
     assert "brain_verify" not in called["loop"]
     assert "brain_delegate" not in called["loop"]
+
+
+def test_run_expert_brain_loop_threads_runtime_checkpoint_options(monkeypatch):
+    called = {}
+
+    async def fake_loop(*a, **kw):
+        called.update(kw)
+        return Trajectory(task_id="t", arm="none")
+
+    monkeypatch.setattr(sandbox_cli, "run_cognitive_loop", fake_loop)
+    asyncio.run(
+        sandbox_cli._run_expert(
+            _fake_args(
+                brain_loop=True,
+                cognitive_scaffold=True,
+                cognitive_mode="runtime_checkpoint",
+                checkpoint_period=4,
+            ),
+            None,
+            "m",
+            _task(),
+            ".",
+            {},
+            None,
+        )
+    )
+    assert called["cognitive_scaffold"] is True
+    assert called["cognitive_scaffold_mode"] == "runtime_checkpoint"
+    assert called["cognitive_checkpoint_period"] == 4
 
 
 def test_run_expert_brain_loop_threads_python_exe(monkeypatch):

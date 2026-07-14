@@ -214,6 +214,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="启用证据关联的外部认知状态；不记录或请求思维链",
     )
+    p_sb_run.add_argument(
+        "--cognitive-mode",
+        default="runtime_checkpoint",
+        choices=["runtime_checkpoint", "model_managed"],
+        help="认知状态模式(runtime_checkpoint=运行时维护客观状态并按需检查点；默认)",
+    )
+    p_sb_run.add_argument(
+        "--checkpoint-period",
+        type=int,
+        default=3,
+        help="runtime_checkpoint 的最长周期步数(默认 3；错误和验证失败可提前触发)",
+    )
     p_sb_run.add_argument("--keep", action="store_true", help="失败时保留 run_dir 供检视")
     # --- worktree 模式(真实仓库任务)---
     p_sb_run.add_argument("--worktree", action="store_true",
@@ -302,6 +314,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         choices=["low", "medium", "high", "xhigh", "max"],
         help="Native-thinking effort; applied only to native_thinking and combined arms",
+    )
+    p_sb_cognitive.add_argument(
+        "--scaffold-mode",
+        default="runtime_checkpoint",
+        choices=["runtime_checkpoint", "model_managed"],
+        help="External-scaffold implementation used by scaffold arms",
+    )
+    p_sb_cognitive.add_argument(
+        "--checkpoint-period",
+        type=int,
+        default=3,
+        help="Maximum objective-event interval between runtime checkpoints",
     )
     p_sb_cognitive.add_argument("--out", default=None, help="Report directory")
 
