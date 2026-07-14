@@ -294,6 +294,127 @@ def test_transient_failure_is_retried():
 }
 
 
+_ORDER_FILES = {
+    "orders/__init__.py": "",
+    "orders/models.py": """from dataclasses import dataclass
+
+
+@dataclass(frozen=True)
+class Order:
+    request_id: str
+    sku: str
+    quantity: int
+    receipt: str
+""",
+    "orders/inventory.py": """class Inventory:
+    def __init__(self, stock):
+        self._stock = dict(stock)
+        self.reserve_calls = []
+        self.release_calls = []
+
+    def reserve(self, sku, quantity):
+        if quantity <= 0:
+            raise ValueError("quantity must be positive")
+        if self._stock.get(sku, 0) < quantity:
+            raise ValueError("insufficient stock")
+        self._stock[sku] -= quantity
+        self.reserve_calls.append((sku, quantity))
+
+    def release(self, sku, quantity):
+        self._stock[sku] = self._stock.get(sku, 0) + quantity
+        self.release_calls.append((sku, quantity))
+
+    def available(self, sku):
+        return self._stock.get(sku, 0)
+""",
+    "orders/payments.py": """class PaymentError(Exception):
+    pass
+
+
+class ScriptedGateway:
+    def __init__(self, outcomes):
+        self._outcomes = list(outcomes)
+        self.charge_calls = []
+
+    def charge(self, request_id, amount):
+        self.charge_calls.append((request_id, amount))
+        outcome = self._outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+""",
+    "orders/service.py": """from .models import Order
+
+
+class OrderService:
+    def __init__(self, inventory, payments):
+        self._inventory = inventory
+        self._payments = payments
+        self._orders = {}
+
+    def place_order(self, request_id, sku, quantity):
+        self._inventory.reserve(sku, quantity)
+        receipt = self._payments.charge(request_id, quantity * 10)
+        order = Order(request_id, sku, quantity, receipt)
+        self._orders[request_id] = order
+        return order
+""",
+}
+
+_ORDER_TESTS = {
+    "test_order_service.py": """import pytest
+
+from orders.inventory import Inventory
+from orders.payments import PaymentError, ScriptedGateway
+from orders.service import OrderService
+
+
+def test_same_request_reuses_committed_order_without_side_effects():
+    inventory = Inventory({"book": 5})
+    payments = ScriptedGateway(["receipt-1", "must-not-charge-again"])
+    service = OrderService(inventory, payments)
+
+    first = service.place_order("req-1", "book", 2)
+    second = service.place_order("req-1", "book", 2)
+
+    assert second is first
+    assert inventory.available("book") == 3
+    assert inventory.reserve_calls == [("book", 2)]
+    assert payments.charge_calls == [("req-1", 20)]
+
+
+def test_reusing_request_id_with_different_payload_is_rejected():
+    inventory = Inventory({"book": 5})
+    payments = ScriptedGateway(["receipt-1", "must-not-charge-again"])
+    service = OrderService(inventory, payments)
+    service.place_order("req-1", "book", 1)
+
+    with pytest.raises(ValueError, match="request_id"):
+        service.place_order("req-1", "book", 2)
+
+    assert inventory.available("book") == 4
+    assert len(payments.charge_calls) == 1
+
+
+def test_payment_failure_releases_stock_and_retry_can_succeed():
+    inventory = Inventory({"book": 5})
+    payments = ScriptedGateway([PaymentError("declined"), "receipt-2"])
+    service = OrderService(inventory, payments)
+
+    with pytest.raises(PaymentError, match="declined"):
+        service.place_order("req-2", "book", 2)
+
+    assert inventory.available("book") == 5
+    assert inventory.release_calls == [("book", 2)]
+
+    order = service.place_order("req-2", "book", 2)
+    assert order.receipt == "receipt-2"
+    assert inventory.available("book") == 3
+    assert len(payments.charge_calls) == 2
+""",
+}
+
+
 DELEGATION_CALIBRATION_FIXTURES: list[SandboxTask] = [
     SandboxTask(
         id="tenant_cache_scope",
@@ -342,6 +463,26 @@ DELEGATION_CALIBRATION_FIXTURES: list[SandboxTask] = [
         gold_diff="Retry only TransientError rather than every RequestError.",
         gold_regions=["debugging", "review"],
         notes="The exception hierarchy distinguishes retryable transport failures from permanent authentication failures.",
+    ),
+    SandboxTask(
+        id="order_idempotency_rollback",
+        goal=(
+            "OrderService.place_order must be safely retryable: the same request ID and payload must reuse the "
+            "committed order without reserving or charging again, conflicting payloads must be rejected, and a "
+            "payment failure must restore inventory so the request can be retried. Preserve the public APIs and "
+            "make the tests pass."
+        ),
+        files=_ORDER_FILES,
+        tests=_ORDER_TESTS,
+        gold_diff=(
+            "Check committed requests before side effects, reject idempotency conflicts, and release reserved "
+            "inventory when PaymentError is raised."
+        ),
+        gold_regions=["debugging", "reliability", "review"],
+        notes=(
+            "Medium calibration task with three coupled invariants: idempotent replay, conflict detection, and "
+            "transactional compensation after a downstream failure."
+        ),
     ),
 ]
 

@@ -43,6 +43,39 @@ _GOLD_REPLACEMENTS = {
             ("except RequestError:", "except TransientError:"),
         ),
     ),
+    "order_idempotency_rollback": (
+        "orders/service.py",
+        (
+            (
+                "from .models import Order",
+                "from .models import Order\nfrom .payments import PaymentError",
+            ),
+            (
+                '''    def place_order(self, request_id, sku, quantity):
+        self._inventory.reserve(sku, quantity)
+        receipt = self._payments.charge(request_id, quantity * 10)
+        order = Order(request_id, sku, quantity, receipt)
+        self._orders[request_id] = order
+        return order''',
+                '''    def place_order(self, request_id, sku, quantity):
+        existing = self._orders.get(request_id)
+        if existing is not None:
+            if existing.sku != sku or existing.quantity != quantity:
+                raise ValueError("request_id already used with a different payload")
+            return existing
+
+        self._inventory.reserve(sku, quantity)
+        try:
+            receipt = self._payments.charge(request_id, quantity * 10)
+        except PaymentError:
+            self._inventory.release(sku, quantity)
+            raise
+        order = Order(request_id, sku, quantity, receipt)
+        self._orders[request_id] = order
+        return order''',
+            ),
+        ),
+    ),
 }
 
 
@@ -55,6 +88,7 @@ def test_calibration_fixtures_are_discoverable_but_not_in_default_suite():
         "settings_precedence",
         "event_bus_snapshot",
         "retry_error_scope",
+        "order_idempotency_rollback",
     ]
     assert set(calibration_ids).isdisjoint(default_ids)
     assert set(calibration_ids).issubset(list_fixture_ids())

@@ -18,6 +18,8 @@ from brainregion.sandbox.isolation import (
 from brainregion.sandbox.phase_effort_eval import (
     ARM_FIXED_OFF,
     ARM_PHASE_ACTIVE,
+    _failure_metrics,
+    classify_empirical_difficulty,
     run_phase_effort_eval,
 )
 from brainregion.workspace import read_text
@@ -137,6 +139,10 @@ def test_phase_effort_eval_runs_rotated_matched_pairs_without_private_content():
         "control_wins": 0,
         "ties": 2,
     }
+    assert report["difficulty_mix"] == {"costly_success": 1}
+    assert report["recommended_task_ids"] == ["off_by_one"]
+    assert report["task_difficulty"][0]["evidence_status"] == "calibrated"
+    assert report["task_difficulty"][0]["difficulty_depends_on_treatment"] is False
     assert all(case["protocol_completed"] for case in report["cases"])
     assert all(case["contains_reasoning"] is False for case in report["cases"])
     assert all(case["effort_routing"]["control_scope"] == "backend_request" for case in report["cases"])
@@ -227,3 +233,39 @@ def test_phase_effort_eval_cli_contract():
     assert args.max_total_cost_usd == 0.32
     assert args.tool_result_lifecycle == "full"
     assert args.tool_result_live_reads == 3
+
+
+@pytest.mark.parametrize(
+    ("solve_rate", "protocol_rate", "effects", "checks", "step_fraction", "expected"),
+    [
+        (1.0, 1.0, 1.0, 1.0, 0.5, "easy"),
+        (1.0, 1.0, 1.0, 1.0, 0.9, "costly_success"),
+        (1.0, 0.0, 1.0, 1.0, 0.5, "costly_success"),
+        (0.5, 0.5, 1.0, 1.0, 0.5, "sweet_spot"),
+        (0.0, 0.0, 1.0, 0.0, 0.5, "hard"),
+        (0.0, 0.0, 0.0, 0.0, 0.5, "blocked"),
+        (None, None, None, None, None, "insufficient"),
+    ],
+)
+def test_empirical_difficulty_uses_only_control_outcomes(
+    solve_rate, protocol_rate, effects, checks, step_fraction, expected
+):
+    assert classify_empirical_difficulty(
+        solve_rate=solve_rate,
+        protocol_completion_rate=protocol_rate,
+        mean_workspace_effects=effects,
+        mean_main_check_calls=checks,
+        mean_step_budget_fraction=step_fraction,
+    ) == expected
+
+
+def test_model_errors_invalidate_infrastructure_but_parse_errors_remain_behavioral():
+    metrics = _failure_metrics(
+        [
+            {"reason": "model_error"},
+            {"reason": "recovery_evidence_collected"},
+            {"reason": "parse_error"},
+        ]
+    )
+
+    assert metrics == {"model_error_events": 1, "parse_error_events": 1}

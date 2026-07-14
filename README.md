@@ -550,6 +550,15 @@ controls. Reports separate objective solve and protocol completion, token/cost d
 entries and recovery span. A global cap stops only between complete matched pairs. Reports remain `INCONCLUSIVE` when
 there are fewer than two independent task units, provider thinking is only request-level telemetry, the planned matrix
 is cost-capped, or a matched pair fails infrastructure checks.
+Any provider `model_error` event invalidates the whole pair even when a later retry recovers; parse errors remain model
+behavior and are retained. This prevents transient gateway failures from being mislabeled as task difficulty.
+
+Task difficulty is reported in two independent views. `structural_difficulty` is computed before execution from
+fixture metadata; `empirical_band` uses only the `fixed_off` arm, so treatment failures cannot redefine a task as hard.
+At least two control observations are required before a task can be recommended for the next matrix. The most useful
+tasks are `sweet_spot` (partial control success) and `costly_success` (usually solved but often misses the completion
+protocol or consumes at least 80% of its step/cost budget); uniformly easy and completely blocked tasks are retained
+as floor and ceiling controls.
 
 ### Functional Region Workbench Pilot
 

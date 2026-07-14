@@ -14,6 +14,7 @@ from brainregion.runtime import normalize_usage
 from .cognitive_eval import classify_thinking_control
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
 from .loop import run_agent
+from .phase_control import assess_task_difficulty
 from .task import SandboxTask
 
 ARM_FIXED_OFF = "fixed_off"
@@ -40,6 +41,8 @@ _METRICS = (
     "main_total_tokens",
     "reasoning_tokens",
     "cost_usd",
+    "step_budget_fraction",
+    "cost_budget_fraction",
     "wall_time_s",
     "workspace_effects",
     "main_check_calls",
@@ -75,6 +78,44 @@ def _recovery_metrics(transitions: list[dict[str, Any]]) -> dict[str, Any]:
         "resolved_recovery_rate": len(spans) / entries if entries else None,
         "mean_recovery_steps": sum(spans) / len(spans) if spans else None,
     }
+
+
+def _failure_metrics(transitions: list[dict[str, Any]]) -> dict[str, int]:
+    reasons = [str(transition.get("reason") or "") for transition in transitions]
+    return {
+        "model_error_events": reasons.count("model_error"),
+        "parse_error_events": reasons.count("parse_error"),
+    }
+
+
+def classify_empirical_difficulty(
+    *,
+    solve_rate: float | None,
+    protocol_completion_rate: float | None,
+    mean_workspace_effects: float | None,
+    mean_main_check_calls: float | None,
+    mean_step_budget_fraction: float | None = None,
+    mean_cost_budget_fraction: float | None = None,
+) -> str:
+    """Classify task difficulty from the fixed-off arm only."""
+
+    if solve_rate is None or protocol_completion_rate is None:
+        return "insufficient"
+    if solve_rate >= 0.8:
+        budget_pressure = max(
+            float(mean_step_budget_fraction or 0.0),
+            float(mean_cost_budget_fraction or 0.0),
+        )
+        return (
+            "easy"
+            if protocol_completion_rate >= 0.8 and budget_pressure < 0.8
+            else "costly_success"
+        )
+    if solve_rate >= 0.2:
+        return "sweet_spot"
+    if (mean_workspace_effects or 0.0) > 0 or (mean_main_check_calls or 0.0) > 0:
+        return "hard"
+    return "blocked"
 
 
 async def run_phase_effort_eval(
@@ -132,6 +173,7 @@ async def run_phase_effort_eval(
     for task_index, task in enumerate(tasks):
         if cost_capped:
             break
+        structural_difficulty = assess_task_difficulty(task).to_dict()
         for repeat in range(repeats):
             if max_total_cost_usd is not None:
                 remaining = max_total_cost_usd - actual_cost_usd
@@ -195,6 +237,7 @@ async def run_phase_effort_eval(
                     )
                     transitions = list(phase_control.get("transitions") or [])
                     recovery = _recovery_metrics(transitions)
+                    failures = _failure_metrics(transitions)
                     decisions = list(routing.get("decisions") or [])
                     cases.append(
                         {
@@ -202,11 +245,15 @@ async def run_phase_effort_eval(
                             "repeat": repeat,
                             "arm": arm.name,
                             "routing_mode": "active" if arm.active else "shadow",
+                            "structural_difficulty": structural_difficulty,
                             "solved": trajectory.tests_green,
                             "protocol_completed": trajectory.done,
                             "termination_reason": trajectory.termination_reason,
-                            "infrastructure_error": trajectory.termination_reason
-                            == "model_error",
+                            "infrastructure_error": (
+                                trajectory.termination_reason == "model_error"
+                                or failures["model_error_events"] > 0
+                            ),
+                            "infrastructure_degraded": failures["model_error_events"] > 0,
                             "steps": trajectory.n_steps,
                             "workspace_effects": trajectory.workspace_effects,
                             "main_check_calls": operation_counts.get("workspace_run_check", 0),
@@ -219,8 +266,17 @@ async def run_phase_effort_eval(
                             "main_total_tokens": usage["total_tokens"],
                             "reasoning_tokens": usage["reasoning_tokens"],
                             "cost_usd": float(trajectory.total_main_cost_usd),
+                            "step_budget_fraction": (
+                                trajectory.n_steps / max_steps if max_steps > 0 else None
+                            ),
+                            "cost_budget_fraction": (
+                                float(trajectory.total_main_cost_usd) / pair_run_cap
+                                if pair_run_cap > 0
+                                else None
+                            ),
                             "wall_time_s": wall_time_s,
                             **recovery,
+                            **failures,
                             "recommended_thinking_calls": int(
                                 routing.get("recommended_thinking_calls") or 0
                             ),
@@ -254,6 +310,7 @@ async def run_phase_effort_eval(
                             task.id,
                             repeat,
                             arm,
+                            structural_difficulty=structural_difficulty,
                             wall_time_s=time.perf_counter() - started,
                             error=exc,
                         )
@@ -342,6 +399,8 @@ def summarize_phase_effort_records(
             "mean_main_total_tokens": _mean(valid, "main_total_tokens"),
             "mean_reasoning_tokens": _mean(valid, "reasoning_tokens"),
             "mean_cost_usd": _mean(valid, "cost_usd"),
+            "mean_step_budget_fraction": _mean(valid, "step_budget_fraction"),
+            "mean_cost_budget_fraction": _mean(valid, "cost_budget_fraction"),
             "mean_wall_time_s": _mean(valid, "wall_time_s"),
             "mean_workspace_effects": _mean(valid, "workspace_effects"),
             "mean_main_check_calls": _mean(valid, "main_check_calls"),
@@ -370,6 +429,11 @@ def summarize_phase_effort_records(
         for metric in _METRICS
     }
     matched_pairs = _matched_pairs(records)
+    task_difficulty = _summarize_task_difficulty(records)
+    difficulty_mix: dict[str, int] = {}
+    for row in task_difficulty:
+        band = str(row["empirical_band"])
+        difficulty_mix[band] = difficulty_mix.get(band, 0) + 1
     active_records = [
         pair[ARM_PHASE_ACTIVE]
         for pair in matched_pairs
@@ -401,6 +465,13 @@ def summarize_phase_effort_records(
             "solve": _pair_outcomes(matched_pairs, "solved"),
             "protocol_completed": _pair_outcomes(matched_pairs, "protocol_completed"),
         },
+        "task_difficulty": task_difficulty,
+        "difficulty_mix": difficulty_mix,
+        "recommended_task_ids": [
+            row["task_id"]
+            for row in task_difficulty
+            if row["recommended_for_next_eval"]
+        ],
         "active_thinking_requested": any(
             int(record.get("effective_thinking_calls") or 0) > 0
             for record in active_records
@@ -449,6 +520,11 @@ def render_phase_effort_eval_summary(report: dict[str, Any]) -> str:
     )
     if report.get("status_reasons"):
         lines.append(f"  inconclusive_reasons={','.join(report['status_reasons'])}")
+    for row in report.get("task_difficulty") or []:
+        lines.append(
+            f"  difficulty/{row['task_id']}: empirical={row['empirical_band']} "
+            f"structural={row['structural_band']} evidence={row['evidence_status']}"
+        )
     return "\n".join(lines)
 
 
@@ -480,6 +556,65 @@ def _paired_task_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 for metric in _METRICS
             }
         rows.append(row)
+    return rows
+
+
+def _summarize_task_difficulty(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    grouped: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        if record.get("arm") != ARM_FIXED_OFF or record.get("infrastructure_error"):
+            continue
+        grouped.setdefault(str(record["task_id"]), []).append(record)
+
+    rows: list[dict[str, Any]] = []
+    for task_id, control_records in grouped.items():
+        solve_rate = _mean(control_records, "solved")
+        protocol_rate = _mean(control_records, "protocol_completed")
+        workspace_effects = _mean(control_records, "workspace_effects")
+        check_calls = _mean(control_records, "main_check_calls")
+        step_budget_fraction = _mean(control_records, "step_budget_fraction")
+        cost_budget_fraction = _mean(control_records, "cost_budget_fraction")
+        structural = dict(control_records[0].get("structural_difficulty") or {})
+        structural_score = structural.get("score")
+        if structural_score is None:
+            structural_band = "unknown"
+        elif float(structural_score) < 0.25:
+            structural_band = "low"
+        elif float(structural_score) < 0.50:
+            structural_band = "medium"
+        else:
+            structural_band = "high"
+        empirical_band = classify_empirical_difficulty(
+            solve_rate=solve_rate,
+            protocol_completion_rate=protocol_rate,
+            mean_workspace_effects=workspace_effects,
+            mean_main_check_calls=check_calls,
+            mean_step_budget_fraction=step_budget_fraction,
+            mean_cost_budget_fraction=cost_budget_fraction,
+        )
+        observations = len(control_records)
+        rows.append(
+            {
+                "task_id": task_id,
+                "control_observations": observations,
+                "evidence_status": "calibrated" if observations >= 2 else "pilot_only",
+                "structural_band": structural_band,
+                "structural_difficulty": structural,
+                "empirical_band": empirical_band,
+                "control_solve_rate": solve_rate,
+                "control_protocol_completion_rate": protocol_rate,
+                "control_mean_steps": _mean(control_records, "steps"),
+                "control_mean_step_budget_fraction": step_budget_fraction,
+                "control_mean_cost_budget_fraction": cost_budget_fraction,
+                "control_mean_workspace_effects": workspace_effects,
+                "control_mean_main_check_calls": check_calls,
+                "recommended_for_next_eval": (
+                    observations >= 2
+                    and empirical_band in {"sweet_spot", "costly_success"}
+                ),
+                "difficulty_depends_on_treatment": False,
+            }
+        )
     return rows
 
 
@@ -526,6 +661,7 @@ def _runner_error_case(
     repeat: int,
     arm: PhaseEffortEvalArm,
     *,
+    structural_difficulty: dict[str, Any],
     wall_time_s: float,
     error: Exception,
 ) -> dict[str, Any]:
@@ -534,10 +670,12 @@ def _runner_error_case(
         "repeat": repeat,
         "arm": arm.name,
         "routing_mode": "active" if arm.active else "shadow",
+        "structural_difficulty": structural_difficulty,
         "solved": False,
         "protocol_completed": False,
         "termination_reason": "runner_error",
         "infrastructure_error": True,
+        "infrastructure_degraded": True,
         "steps": 0,
         "workspace_effects": 0,
         "main_check_calls": 0,
@@ -548,11 +686,15 @@ def _runner_error_case(
         "main_total_tokens": 0,
         "reasoning_tokens": 0,
         "cost_usd": 0.0,
+        "step_budget_fraction": None,
+        "cost_budget_fraction": None,
         "wall_time_s": wall_time_s,
         "recovery_entries": 0,
         "resolved_recoveries": 0,
         "resolved_recovery_rate": None,
         "mean_recovery_steps": None,
+        "model_error_events": 0,
+        "parse_error_events": 0,
         "recommended_thinking_calls": 0,
         "effective_thinking_calls": 0,
         "applied_change_calls": 0,
@@ -575,6 +717,7 @@ __all__ = [
     "ARM_PHASE_ACTIVE",
     "PHASE_EFFORT_EVAL_ARMS",
     "PhaseEffortEvalArm",
+    "classify_empirical_difficulty",
     "render_phase_effort_eval_summary",
     "run_phase_effort_eval",
     "summarize_phase_effort_records",
