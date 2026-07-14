@@ -632,6 +632,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_delivery_eval.add_argument("--max-tokens", type=int, default=None)
     p_sb_delivery_eval.add_argument("--thinking", default="off", choices=["off", "on"])
     p_sb_delivery_eval.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])
+    p_sb_delivery_eval.add_argument(
+        "--resume-report",
+        default=None,
+        help="复用兼容旧报告中的完整 config/repeat 三元组，只运行缺失部分",
+    )
     p_sb_delivery_eval.add_argument("--out", default=None, help="报告输出目录(默认 .brain-region/sandbox/)")
 
     p_ins = sub.add_parser(

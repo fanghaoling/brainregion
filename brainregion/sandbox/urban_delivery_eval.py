@@ -5,6 +5,7 @@ import csv
 from dataclasses import dataclass
 import json
 import logging
+import math
 from pathlib import Path
 import time
 from typing import Any
@@ -37,6 +38,12 @@ class DeliveryEvalConfig:
             f"{self.size}x{self.size}_seed{self.seed}_"
             f"orders{self.orders}_vehicles{self.vehicles}_vis{self.visibility_radius}"
         )
+
+    @property
+    def main_turn_cap(self) -> int:
+        if self.max_main_turns is not None:
+            return int(self.max_main_turns)
+        return max(self.max_env_actions * 2, self.max_env_actions + 20)
 
 
 @dataclass(frozen=True)
@@ -74,6 +81,130 @@ _DELIVERY_DELTA_METRICS: dict[str, str] = {
 }
 
 
+@dataclass(frozen=True)
+class DeliveryResumeState:
+    source_run_id: str | None
+    runs: tuple[dict[str, Any], ...]
+    completed_keys: frozenset[tuple[str, int]]
+    reused_cost_usd: float
+    discarded_groups: int
+    discarded_orphan_runs: int
+    compatibility_assumptions: tuple[str, ...]
+
+
+def prepare_delivery_resume(
+    report: dict[str, Any],
+    *,
+    model: str,
+    configs: list[DeliveryEvalConfig],
+    repeats: int,
+    temperature: float,
+    thinking: bool | None,
+    effort: str | None,
+    endpoint_id: str | None,
+    max_tokens: int,
+    option_actions: int,
+) -> DeliveryResumeState:
+    """Validate a prior report and retain only complete requested triplets."""
+    if not isinstance(report, dict):
+        raise ValueError("resume report must be a JSON object")
+    expected_arms = [arm.name for arm in DELIVERY_EVAL_ARMS]
+    if report.get("arms") != expected_arms:
+        raise ValueError(f"resume arms mismatch: expected {expected_arms!r}")
+
+    expected = {
+        "model": model,
+        "repeats": repeats,
+        "thinking": thinking,
+        "effort": effort,
+        "endpoint_id": endpoint_id,
+        "max_tokens": max_tokens,
+    }
+    for key, value in expected.items():
+        if report.get(key) != value:
+            raise ValueError(
+                f"resume {key} mismatch: report={report.get(key)!r}, requested={value!r}"
+            )
+    try:
+        prior_temperature = float(report.get("temperature"))
+    except (TypeError, ValueError) as exc:
+        raise ValueError("resume temperature is missing or invalid") from exc
+    if not math.isclose(prior_temperature, temperature, rel_tol=0.0, abs_tol=1e-12):
+        raise ValueError(
+            f"resume temperature mismatch: report={prior_temperature!r}, requested={temperature!r}"
+        )
+
+    assumptions: list[str] = []
+    prior_option_actions = report.get("option_actions")
+    if prior_option_actions is None:
+        if option_actions != 16:
+            raise ValueError(
+                "legacy resume report has no option_actions; only historical default 16 is compatible"
+            )
+        assumptions.append("legacy_missing_option_actions_assumed_16")
+    elif prior_option_actions != option_actions:
+        raise ValueError(
+            f"resume option_actions mismatch: report={prior_option_actions!r}, requested={option_actions!r}"
+        )
+
+    by_label = {config.label: config for config in configs}
+    report_configs = report.get("configs")
+    if not isinstance(report_configs, list) or any(label not in by_label for label in report_configs):
+        raise ValueError("resume configs must be a subset of the requested configs")
+    raw_runs = report.get("runs")
+    if not isinstance(raw_runs, list):
+        raise ValueError("resume runs must be an array")
+
+    grouped: dict[tuple[str, int], dict[str, dict[str, Any]]] = {}
+    for raw in raw_runs:
+        if not isinstance(raw, dict):
+            raise ValueError("resume runs must contain JSON objects")
+        label = raw.get("config")
+        arm = raw.get("arm")
+        repeat = raw.get("repeat")
+        if label not in by_label or arm not in expected_arms:
+            raise ValueError("resume run references an unrequested config or unknown arm")
+        if isinstance(repeat, bool) or not isinstance(repeat, int) or not (0 <= repeat < repeats):
+            raise ValueError(f"resume run has invalid repeat: {repeat!r}")
+        config = by_label[label]
+        if raw.get("env_action_budget") != config.max_env_actions:
+            raise ValueError(f"resume env_action_budget mismatch for {label}")
+        if raw.get("main_turn_cap") != config.main_turn_cap:
+            raise ValueError(f"resume main_turn_cap mismatch for {label}")
+        bucket = grouped.setdefault((label, repeat), {})
+        if arm in bucket:
+            raise ValueError(f"resume contains duplicate run for {(label, repeat, arm)!r}")
+        bucket[arm] = raw
+
+    ordered_runs: list[dict[str, Any]] = []
+    completed_keys: set[tuple[str, int]] = set()
+    discarded_groups = 0
+    for config in configs:
+        for repeat in range(repeats):
+            key = (config.label, repeat)
+            bucket = grouped.get(key)
+            if not bucket:
+                continue
+            if set(bucket) != set(expected_arms):
+                discarded_groups += 1
+                continue
+            completed_keys.add(key)
+            for arm in expected_arms:
+                reused = dict(bucket[arm])
+                reused["resume_origin"] = "reused"
+                ordered_runs.append(reused)
+
+    return DeliveryResumeState(
+        source_run_id=str(report.get("run_id")) if report.get("run_id") else None,
+        runs=tuple(ordered_runs),
+        completed_keys=frozenset(completed_keys),
+        reused_cost_usd=sum(float(run.get("cost") or 0.0) for run in ordered_runs),
+        discarded_groups=discarded_groups,
+        discarded_orphan_runs=len(report.get("orphan_runs") or []),
+        compatibility_assumptions=tuple(assumptions),
+    )
+
+
 def build_delivery_env(config: DeliveryEvalConfig) -> UrbanDeliveryEnv:
     scenario = generate_urban_delivery_scenario(
         seed=config.seed,
@@ -108,11 +239,7 @@ async def _run_delivery_episode(
         navigation_region = None
     goal = "按顺序完成全部配送订单，并在最后一单后返回商铺 S"
     task = SandboxTask(id=f"delivery-{config.label}", goal=goal)
-    main_turn_cap = (
-        int(config.max_main_turns)
-        if config.max_main_turns is not None
-        else max(config.max_env_actions * 2, config.max_env_actions + 20)
-    )
+    main_turn_cap = config.main_turn_cap
 
     def verify(t, run_dir, *, python_exe=None):
         return {
@@ -298,7 +425,20 @@ def aggregate_delivery_report(
     effort: str | None,
     endpoint_id: str | None,
     max_tokens: int,
+    option_actions: int = 16,
+    resumed_from: str | None = None,
+    reused_runs_count: int = 0,
+    new_runs_count: int | None = None,
+    reused_cost_usd: float = 0.0,
+    incremental_cost_usd: float | None = None,
+    resume_discarded_groups: int = 0,
+    resume_discarded_orphan_runs: int = 0,
+    resume_compatibility_assumptions: tuple[str, ...] = (),
 ) -> dict[str, Any]:
+    if incremental_cost_usd is None:
+        incremental_cost_usd = cost_total
+    if new_runs_count is None:
+        new_runs_count = len(runs)
     per_config: dict[str, dict[str, dict[str, Any]]] = {}
     for config in configs:
         per_config[config.label] = {
@@ -357,6 +497,7 @@ def aggregate_delivery_report(
         "effort": effort,
         "endpoint_id": endpoint_id,
         "max_tokens": max_tokens,
+        "option_actions": option_actions,
         "treatment_contract": (
             "navigation_region reads only public observation and owns movement actions; "
             "main brain retains pickup, deliver, and done decisions"
@@ -379,11 +520,21 @@ def aggregate_delivery_report(
         "per_config": [{label: values} for label, values in per_config.items()],
         "pairwise": pairwise,
         "descriptive_deltas": descriptive_deltas,
+        "resume": {
+            "source_run_id": resumed_from,
+            "reused_runs": reused_runs_count,
+            "new_runs": new_runs_count,
+            "discarded_groups": resume_discarded_groups,
+            "discarded_orphan_runs": resume_discarded_orphan_runs,
+            "compatibility_assumptions": list(resume_compatibility_assumptions),
+        },
+        "reused_cost_usd": round(reused_cost_usd, 6),
+        "incremental_cost_usd": round(incremental_cost_usd, 6),
         "cost_budget_usd": round(max_cost_usd, 6),
         "cost_total": round(cost_total, 6),
         "budget_semantics": "call_boundary_soft_cap",
-        "budget_overrun_usd": round(max(0.0, cost_total - max_cost_usd), 6),
-        "within_budget": cost_total <= max_cost_usd,
+        "budget_overrun_usd": round(max(0.0, incremental_cost_usd - max_cost_usd), 6),
+        "within_budget": incremental_cost_usd <= max_cost_usd,
         "cost_capped": cost_capped,
         "incomplete_pairs": bool(orphan_runs),
         "orphan_runs": orphan_runs,
@@ -404,6 +555,7 @@ async def run_delivery_eval(
     thinking: bool | None = None,
     effort: str | None = None,
     option_actions: int = 16,
+    resume_report: dict[str, Any] | None = None,
     log_progress: bool = True,
 ) -> dict[str, Any]:
     if repeats < 1:
@@ -411,23 +563,42 @@ async def run_delivery_eval(
     if not (1 <= option_actions <= 16):
         raise ValueError("option_actions must be in 1..16")
     run_id = f"delivery-eval-{int(time.time() * 1000)}"
-    runs: list[dict[str, Any]] = []
+    resume = (
+        prepare_delivery_resume(
+            resume_report,
+            model=model,
+            configs=configs,
+            repeats=repeats,
+            temperature=temperature,
+            thinking=thinking,
+            effort=effort,
+            endpoint_id=endpoint_id,
+            max_tokens=max_tokens,
+            option_actions=option_actions,
+        )
+        if resume_report is not None
+        else DeliveryResumeState(None, (), frozenset(), 0.0, 0, 0, ())
+    )
+    runs: list[dict[str, Any]] = [dict(run) for run in resume.runs]
     orphan_runs: list[dict[str, Any]] = []
-    cost_total = 0.0
+    incremental_cost = 0.0
+    new_runs_count = 0
     cost_capped = False
 
     for config_index, config in enumerate(configs):
         if cost_capped:
             break
         for repeat in range(repeats):
-            if cost_total >= max_cost_usd:
+            if (config.label, repeat) in resume.completed_keys:
+                continue
+            if incremental_cost >= max_cost_usd:
                 cost_capped = True
                 break
             offset = (config_index + repeat) % len(DELIVERY_EVAL_ARMS)
             ordered_arms = DELIVERY_EVAL_ARMS[offset:] + DELIVERY_EVAL_ARMS[:offset]
             pair_runs: list[dict[str, Any]] = []
             for arm in ordered_arms:
-                if cost_total >= max_cost_usd:
+                if incremental_cost >= max_cost_usd:
                     cost_capped = True
                     break
                 summary = await _run_delivery_episode(
@@ -435,7 +606,7 @@ async def run_delivery_eval(
                     model,
                     config,
                     arm,
-                    max_cost_usd=max(0.0, max_cost_usd - cost_total),
+                    max_cost_usd=max(0.0, max_cost_usd - incremental_cost),
                     temperature=temperature,
                     max_tokens=max_tokens,
                     endpoint_id=endpoint_id,
@@ -445,8 +616,9 @@ async def run_delivery_eval(
                 )
                 summary["repeat"] = repeat
                 summary["arm_order"] = [candidate.name for candidate in ordered_arms]
+                summary["resume_origin"] = "new"
                 pair_runs.append(summary)
-                cost_total += summary["cost"]
+                incremental_cost += summary["cost"]
                 if log_progress:
                     logger.info(
                         "[delivery-eval] %s r%d %s solved=%s efficiency=%s main_turns=%d delegated=%d cost=%.4f",
@@ -461,11 +633,13 @@ async def run_delivery_eval(
                     )
             if len(pair_runs) == len(DELIVERY_EVAL_ARMS):
                 runs.extend(pair_runs)
+                new_runs_count += len(pair_runs)
             else:
                 orphan_runs.extend(pair_runs)
                 break
 
-    cost_capped = cost_capped or cost_total >= max_cost_usd
+    cost_capped = cost_capped or incremental_cost >= max_cost_usd
+    combined_cost = resume.reused_cost_usd + incremental_cost
     return aggregate_delivery_report(
         run_id=run_id,
         model=model,
@@ -473,7 +647,7 @@ async def run_delivery_eval(
         repeats=repeats,
         runs=runs,
         orphan_runs=orphan_runs,
-        cost_total=cost_total,
+        cost_total=combined_cost,
         max_cost_usd=max_cost_usd,
         cost_capped=cost_capped,
         temperature=temperature,
@@ -481,6 +655,15 @@ async def run_delivery_eval(
         effort=effort,
         endpoint_id=endpoint_id,
         max_tokens=max_tokens,
+        option_actions=option_actions,
+        resumed_from=resume.source_run_id,
+        reused_runs_count=len(resume.runs),
+        new_runs_count=new_runs_count,
+        reused_cost_usd=resume.reused_cost_usd,
+        incremental_cost_usd=incremental_cost,
+        resume_discarded_groups=resume.discarded_groups,
+        resume_discarded_orphan_runs=resume.discarded_orphan_runs,
+        resume_compatibility_assumptions=resume.compatibility_assumptions,
     )
 
 
@@ -491,7 +674,7 @@ def write_delivery_report(report: dict[str, Any], out_dir: str | Path | None = N
     csv_path = out / f"{report['run_id']}.csv"
     json_path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     columns = [
-        "config", "repeat", "arm", "solved", "termination", "main_turns", "env_actions",
+        "config", "repeat", "arm", "resume_origin", "solved", "termination", "main_turns", "env_actions",
         "main_env_actions", "delegated_actions", "delegated_action_share", "blocked_actions",
         "automatic_region_activations", "explicit_navigation_calls", "navigation_replans",
         "delivered_orders", "returned_orders", "completion_fraction",
@@ -540,9 +723,16 @@ def render_delivery_summary(report: dict[str, Any]) -> str:
             )
     lines.append(
         f"\n完整 config={report['n_complete_configs']}, signal={report['signal_regime']}, "
-        f"cost=${report['cost_total']:.4f}/${report['cost_budget_usd']:.4f}, "
+        f"cost total=${report['cost_total']:.4f}, new=${report['incremental_cost_usd']:.4f}/"
+        f"${report['cost_budget_usd']:.4f}, reused=${report['reused_cost_usd']:.4f}, "
         f"overrun=${report['budget_overrun_usd']:.4f}, incomplete_pairs={report['incomplete_pairs']}"
     )
+    resume = report.get("resume") or {}
+    if resume.get("source_run_id"):
+        lines.append(
+            f"resume={resume['source_run_id']}, reused_runs={resume['reused_runs']}, "
+            f"new_runs={resume['new_runs']}, discarded_groups={resume['discarded_groups']}"
+        )
     return "\n".join(lines)
 
 
@@ -555,8 +745,10 @@ __all__ = [
     "DELIVERY_EVAL_COMPARISONS",
     "DeliveryEvalArm",
     "DeliveryEvalConfig",
+    "DeliveryResumeState",
     "aggregate_delivery_report",
     "build_delivery_env",
+    "prepare_delivery_resume",
     "render_delivery_summary",
     "run_delivery_eval",
     "write_delivery_report",

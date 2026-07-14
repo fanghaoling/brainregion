@@ -1009,19 +1009,37 @@ async def run_delivery_eval(args: argparse.Namespace) -> dict[str, Any]:
     if len(configs) < 2:
         logger.warning("delivery configs<2 → bootstrap CI 退化；仅作 smoke/pilot")
 
-    report = await run_harness(
-        backend,
-        model,
-        configs,
-        repeats=int(args.repeats),
-        max_cost_usd=float(args.max_cost_usd or dd.get("sandbox_max_cost_usd", 2.0)),
-        temperature=float(dd.get("sandbox_temperature", 0.0)),
-        max_tokens=int(args.max_tokens or 2048),
-        endpoint_id=endpoint_id,
-        thinking=_thinking_arg(args),
-        effort=args.effort,
-        option_actions=int(args.option_actions),
-    )
+    resume_report = None
+    if args.resume_report:
+        resume_path = Path(args.resume_report).expanduser().resolve()
+        if not resume_path.is_file():
+            raise SystemExit(f"--resume-report 文件不存在: {resume_path}")
+        try:
+            resume_report = json.loads(resume_path.read_text(encoding="utf-8-sig"))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"--resume-report 读取失败: {exc}") from exc
+        if not isinstance(resume_report, dict):
+            raise SystemExit("--resume-report 须为 JSON object")
+
+    try:
+        report = await run_harness(
+            backend,
+            model,
+            configs,
+            repeats=int(args.repeats),
+            max_cost_usd=float(args.max_cost_usd or dd.get("sandbox_max_cost_usd", 2.0)),
+            temperature=float(dd.get("sandbox_temperature", 0.0)),
+            max_tokens=int(args.max_tokens or 2048),
+            endpoint_id=endpoint_id,
+            thinking=_thinking_arg(args),
+            effort=args.effort,
+            option_actions=int(args.option_actions),
+            resume_report=resume_report,
+        )
+    except ValueError as exc:
+        if resume_report is None:
+            raise
+        raise SystemExit(f"--resume-report 不兼容: {exc}") from exc
     json_path, csv_path = write_delivery_report(report, args.out)
     print(render_delivery_summary(report))
     print(f"\n报告 JSON: {json_path}\nper-run CSV: {csv_path}")

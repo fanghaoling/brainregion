@@ -436,6 +436,19 @@ brain-region --config brain_region_config.json --env-file .env sandbox delivery-
   --main-brain buzz_anthropic/claude-sonnet-5 --sizes 9 --seeds 0,1 --repeats 2
 ```
 
+扩展实验时可复用旧报告，避免再次支付已经完成的三元组：
+
+```powershell
+brain-region --config brain_region_config.json --env-file .env sandbox delivery-eval `
+  --main-brain buzz_anthropic/claude-sonnet-5 --sizes 9 --seeds 0,1 --orders 1 --vehicles 1 `
+  --max-env-actions 80 --max-main-turns 100 --max-tokens 1024 --repeats 1 `
+  --resume-report .brain-region/sandbox/delivery-eval-<prior-run>.json
+```
+
+续跑会严格校验模型、endpoint、采样/思考设置、token 与 option 预算、重复次数、臂集合和场景动作上限。
+只有完整的 `(config, repeat)` 三元组会被复用；缺臂组和旧 orphan 不进入配对统计。新预算只约束新增调用，
+报告分别列出复用成本、新增成本和合计成本。
+
 三条匹配评测臂分别是 `main_only`、`navigation_interface` 和 `navigation_region`。界面对照臂与真实脑区
 接收相同公开观察、提示/工具契约和交互事件唤醒，但永远不产生或执行移动。报告分别计算
 `navigation_interface - main_only`（界面暴露效应）与 `navigation_region - navigation_interface`

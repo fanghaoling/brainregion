@@ -13,6 +13,7 @@ from brainregion.sandbox.urban_delivery_eval import (
     DeliveryEvalConfig,
     aggregate_delivery_report,
     build_delivery_env,
+    prepare_delivery_resume,
     render_delivery_summary,
     run_delivery_eval,
     write_delivery_report,
@@ -23,12 +24,16 @@ def _run(config, arm, **overrides):
     base = {
         "config": config.label,
         "arm": arm,
+        "repeat": 0,
+        "arm_order": ["main_only", "navigation_interface", "navigation_region"],
         "solved": arm == "navigation_region",
         "completion_fraction": 1.0 if arm == "navigation_region" else 0.5,
         "efficiency": 0.9 if arm == "navigation_region" else None,
         "elapsed_time": 40.0 if arm == "navigation_region" else 60.0,
         "main_turns": 8 if arm == "navigation_region" else 20,
+        "main_turn_cap": config.main_turn_cap,
         "env_actions": 36,
+        "env_action_budget": config.max_env_actions,
         "main_env_actions": 4 if arm == "navigation_region" else 36,
         "delegated_actions": 32 if arm == "navigation_region" else 0,
         "delegated_action_share": 32 / 36 if arm == "navigation_region" else 0.0,
@@ -190,11 +195,124 @@ def test_delivery_eval_cli_argparse():
         "sandbox", "delivery-eval", "--main-brain", "sonnet", "--sizes", "9,13",
         "--seeds", "1,2", "--orders", "3", "--vehicles", "2", "--repeats", "4",
         "--max-env-actions", "160", "--option-actions", "12",
+        "--resume-report", "prior.json",
     ])
     assert args.sandbox_command == "delivery-eval"
     assert args.sizes == "9,13" and args.seeds == "1,2"
     assert args.orders == 3 and args.vehicles == 2 and args.repeats == 4
     assert args.max_env_actions == 160 and args.option_actions == 12
+    assert args.resume_report == "prior.json"
+
+
+def test_resume_reuses_complete_triplet_and_only_runs_missing_config(monkeypatch):
+    existing = DeliveryEvalConfig(seed=0)
+    missing = DeliveryEvalConfig(seed=1)
+    prior_runs = [
+        _run(existing, arm)
+        for arm in ("main_only", "navigation_interface", "navigation_region")
+    ]
+    prior = _aggregate([existing], prior_runs)
+    calls = []
+
+    async def fake_episode(backend, model, cfg, arm, **kwargs):
+        calls.append((cfg.label, arm.name))
+        return _run(cfg, arm.name, cost=0.01)
+
+    monkeypatch.setattr(
+        "brainregion.sandbox.urban_delivery_eval._run_delivery_episode",
+        fake_episode,
+    )
+    report = asyncio.run(run_delivery_eval(
+        object(),
+        "mock",
+        [existing, missing],
+        repeats=1,
+        max_cost_usd=1.0,
+        max_tokens=100,
+        thinking=False,
+        resume_report=prior,
+        log_progress=False,
+    ))
+
+    assert {label for label, _ in calls} == {missing.label}
+    assert len(calls) == 3
+    assert report["n_complete_configs"] == 2
+    assert report["resume"]["source_run_id"] == "delivery-test"
+    assert report["resume"]["reused_runs"] == 3
+    assert report["resume"]["new_runs"] == 3
+    assert report["reused_cost_usd"] == pytest.approx(0.06)
+    assert report["incremental_cost_usd"] == pytest.approx(0.03)
+    assert report["cost_total"] == pytest.approx(0.09)
+    assert {run["resume_origin"] for run in report["runs"]} == {"reused", "new"}
+
+
+def test_resume_rejects_incompatible_model_and_nondefault_legacy_option_budget():
+    config = DeliveryEvalConfig(seed=0)
+    runs = [_run(config, arm) for arm in ("main_only", "navigation_interface", "navigation_region")]
+    prior = _aggregate([config], runs)
+
+    with pytest.raises(ValueError, match="model mismatch"):
+        prepare_delivery_resume(
+            {**prior, "model": "other"},
+            model="mock",
+            configs=[config],
+            repeats=1,
+            temperature=0.0,
+            thinking=False,
+            effort=None,
+            endpoint_id=None,
+            max_tokens=100,
+            option_actions=16,
+        )
+
+    legacy = dict(prior)
+    legacy.pop("option_actions")
+    with pytest.raises(ValueError, match="historical default 16"):
+        prepare_delivery_resume(
+            legacy,
+            model="mock",
+            configs=[config],
+            repeats=1,
+            temperature=0.0,
+            thinking=False,
+            effort=None,
+            endpoint_id=None,
+            max_tokens=100,
+            option_actions=8,
+        )
+
+
+def test_resume_discards_partial_group_instead_of_mixing_arms(monkeypatch):
+    config = DeliveryEvalConfig(seed=0)
+    prior = _aggregate([config], [
+        _run(config, "main_only"),
+        _run(config, "navigation_interface"),
+    ])
+    calls = []
+
+    async def fake_episode(backend, model, cfg, arm, **kwargs):
+        calls.append(arm.name)
+        return _run(cfg, arm.name, cost=0.0)
+
+    monkeypatch.setattr(
+        "brainregion.sandbox.urban_delivery_eval._run_delivery_episode",
+        fake_episode,
+    )
+    report = asyncio.run(run_delivery_eval(
+        object(),
+        "mock",
+        [config],
+        repeats=1,
+        max_cost_usd=1.0,
+        max_tokens=100,
+        thinking=False,
+        resume_report=prior,
+        log_progress=False,
+    ))
+
+    assert set(calls) == {"main_only", "navigation_interface", "navigation_region"}
+    assert report["resume"]["reused_runs"] == 0
+    assert report["resume"]["discarded_groups"] == 1
 
 
 class _PairedScriptBackend:

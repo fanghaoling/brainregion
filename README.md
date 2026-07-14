@@ -562,6 +562,20 @@ brain-region sandbox delivery-eval `
   --repeats 2
 ```
 
+Continue an interrupted or expanded experiment without paying for completed triplets again:
+
+```powershell
+brain-region --config brain_region_config.json --env-file .env sandbox delivery-eval `
+  --main-brain buzz_anthropic/claude-sonnet-5 --sizes 9 --seeds 0,1 --orders 1 --vehicles 1 `
+  --max-env-actions 80 --max-main-turns 100 --max-tokens 1024 --repeats 1 `
+  --resume-report .brain-region/sandbox/delivery-eval-<prior-run>.json
+```
+
+Resume validates the model, endpoint, sampling/thinking settings, token and option budgets, repetitions, arm set, and
+per-config action limits. Only complete `(config, repeat)` triplets are reused; partial groups and old orphan runs never
+enter a matched comparison. The new budget applies only to new calls, while reports separate reused, incremental, and
+combined cost.
+
 The matched arms are `main_only`, `navigation_interface`, and `navigation_region`. The interface control receives the
 same public observation, prompt/tool contract, and interaction-triggered activations as the real Region, but never
 emits or executes a movement. Reports separate `navigation_interface - main_only` (interface exposure) from
