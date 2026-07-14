@@ -223,7 +223,7 @@ def _emit_phase_transition(
         logger.warning("sandbox.phase.transition emit failed (ignored)", exc_info=True)
 
 
-def _emit_effort_shadow(
+def _emit_effort_routing(
     decision: EffortRoutingDecision,
     *,
     task_id: str,
@@ -232,8 +232,13 @@ def _emit_effort_shadow(
     endpoint_id: str | None,
 ) -> None:
     try:
+        event_type = (
+            "sandbox.effort.applied"
+            if decision.mode == "active"
+            else "sandbox.effort.shadow"
+        )
         emit_event(
-            "sandbox.effort.shadow",
+            event_type,
             payload={
                 "task_id": task_id,
                 "arm": arm,
@@ -243,7 +248,7 @@ def _emit_effort_shadow(
             },
         )
     except Exception:  # noqa: BLE001 - observability must never break the control loop
-        logger.warning("sandbox.effort.shadow emit failed (ignored)", exc_info=True)
+        logger.warning("sandbox effort routing emit failed (ignored)", exc_info=True)
 
 
 @dataclass
@@ -1444,6 +1449,7 @@ async def run_agent(
     thinking: bool | None = None,
     effort: str | None = None,
     effort_routing_shadow: bool = False,
+    effort_routing_active: bool = False,
     brain_verify: bool = False,
     brain_delegate: bool = False,
     directive: str = "",
@@ -1514,10 +1520,16 @@ async def run_agent(
         or cognitive_checkpoint_period <= 0
     ):
         raise ValueError("cognitive_checkpoint_period must be a positive integer")
+    if effort_routing_shadow and effort_routing_active:
+        raise ValueError("effort routing shadow and active modes are mutually exclusive")
     traj = Trajectory(task_id=task.id, arm=arm, gold_diff=task.gold_diff)
     phase_controller = PhaseController.for_task(task)
     traj.phase_controller = phase_controller
-    effort_shadow = PhaseEffortShadow() if effort_routing_shadow else None
+    effort_shadow = (
+        PhaseEffortShadow(mode="active" if effort_routing_active else "shadow")
+        if effort_routing_shadow or effort_routing_active
+        else None
+    )
     traj.effort_routing_shadow = effort_shadow
     _emit_phase_status(
         phase_controller,
@@ -2050,17 +2062,27 @@ async def run_agent(
                     actual_thinking=thinking,
                     actual_effort=effort,
                 )
-                _emit_effort_shadow(
+                _emit_effort_routing(
                     effort_shadow_decision,
                     task_id=task.id,
                     arm=arm,
                     model=model,
                     endpoint_id=endpoint_id,
                 )
+            call_thinking = (
+                effort_shadow_decision.actual_thinking
+                if effort_shadow_decision is not None
+                else thinking
+            )
+            call_effort = (
+                effort_shadow_decision.actual_effort
+                if effort_shadow_decision is not None
+                else effort
+            )
             captured_input = capture_input_attribution(messages)
             resp = await backend.complete_messages(
                 provider_messages(messages), model=model, temperature=temperature, max_tokens=max_tokens,
-                endpoint_id=endpoint_id, thinking=thinking, effort=effort,
+                endpoint_id=endpoint_id, thinking=call_thinking, effort=call_effort,
             )
             step_main_cost = float(resp.cost_usd or 0.0)
             step_main_cost_source = getattr(resp, "cost_source", None)
@@ -2580,6 +2602,7 @@ async def run_cognitive_loop(
     thinking: bool | None = None,
     effort: str | None = None,
     effort_routing_shadow: bool = False,
+    effort_routing_active: bool = False,
     cognitive_scaffold: bool = False,
     cognitive_scaffold_mode: str = "model_managed",
     cognitive_checkpoint_period: int = 3,
@@ -2627,6 +2650,7 @@ async def run_cognitive_loop(
         consecutive_error_limit=consecutive_error_limit, python_exe=python_exe,
         endpoint_id=endpoint_id, thinking=thinking, effort=effort,
         effort_routing_shadow=effort_routing_shadow,
+        effort_routing_active=effort_routing_active,
         cognitive_scaffold=cognitive_scaffold,
         cognitive_scaffold_mode=cognitive_scaffold_mode,
         cognitive_checkpoint_period=cognitive_checkpoint_period,

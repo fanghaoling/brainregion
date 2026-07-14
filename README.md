@@ -493,7 +493,7 @@ brain-region sandbox run `
   --tool-result-live-reads 3
 ```
 
-### Phase Effort Routing Shadow
+### Phase Effort Routing
 
 The sandbox runtime can record a counterfactual same-model effort policy without changing any provider call. The
 deterministic phase controller recommends `thinking` and `effort` for each main-model turn: understanding and planning
@@ -502,8 +502,8 @@ deterministic tools, and recovery can request strong effort when observable stag
 actual and recommended controls, whether they differ, the public phase, and the content-free difficulty score. It does
 not retain prompts, outputs, or model reasoning.
 
-Shadow routing is off by default and is available on `sandbox run` (including worktree mode) and single-episode
-`sandbox env`:
+Routing is off by default and is available on `sandbox run` (including worktree mode) and single-episode `sandbox
+env`. Start with shadow mode to calibrate the policy without changing provider calls:
 
 ```powershell
 brain-region sandbox run `
@@ -513,9 +513,25 @@ brain-region sandbox run `
   --effort-routing-shadow
 ```
 
-Inspect `trajectory.effort_routing_shadow` or the `sandbox.effort.shadow` SSE/JSONL events. The policy reports
-`changes_model_routing=false`; it is calibration telemetry, not dynamic execution. Existing matched evaluations keep
-their previous protocol unless a dedicated routing experiment is added later.
+Inspect `trajectory.effort_routing_shadow` or the `sandbox.effort.shadow` SSE/JSONL events. The artifact field keeps its
+original name for compatibility and now includes `mode=shadow|active`. Each decision distinguishes `configured`,
+`recommended`, and `effective` controls. The legacy `actual` field aliases `effective`.
+
+After reviewing a shadow trace, active mode can apply the recommendation to the next call while retaining the same
+model and endpoint:
+
+```powershell
+brain-region sandbox run `
+  --task off_by_one `
+  --main-brain buzz_anthropic/claude-sonnet-5 `
+  --thinking off `
+  --effort-routing-active
+```
+
+Active routing is explicit and mutually exclusive with shadow mode. It emits `sandbox.effort.applied`, reports
+`changes_inference_controls=true`, and still reports `changes_model_routing=false`. Existing matched evaluations and
+all default runs keep their previous fixed controls. `control_scope=backend_request` means the trace proves which
+parameters BrainRegion sent; provider-side thinking is not claimed unless separate response telemetry confirms it.
 
 ### Functional Region Workbench Pilot
 

@@ -78,27 +78,61 @@ def test_shadow_trace_compares_controls_without_content():
     assert recover.would_change is True
 
     snapshot = shadow.snapshot()
+    assert snapshot["mode"] == "shadow"
     assert snapshot["decision_count"] == 3
     assert snapshot["would_change_calls"] == 2
+    assert snapshot["applied_change_calls"] == 0
     assert snapshot["agreement_calls"] == 1
     assert snapshot["by_phase"]["recover"]["recommended_tiers"] == {"strong": 1}
     assert snapshot["changes_model_routing"] is False
+    assert snapshot["changes_inference_controls"] is False
     assert snapshot["contains_reasoning"] is False
     assert snapshot["contains_content"] is False
+
+
+def test_active_routing_applies_recommended_controls_and_keeps_configured_values():
+    router = PhaseEffortShadow(mode="active")
+
+    decision = router.observe(
+        step=0,
+        phase=CognitivePhase.RECOVER,
+        difficulty=_difficulty(stagnation=1.0),
+        actual_thinking=False,
+        actual_effort=None,
+    )
+
+    assert decision.to_dict()["configured"] == {"thinking": False, "effort": None}
+    assert decision.to_dict()["effective"] == {"thinking": True, "effort": "high"}
+    assert decision.to_dict()["actual"] == {"thinking": True, "effort": "high"}
+    assert decision.to_dict()["control_scope"] == "backend_request"
+    assert decision.to_dict()["recommendation_applied"] is True
+    assert decision.to_dict()["controls_changed"] is True
+    snapshot = router.snapshot()
+    assert snapshot["mode"] == "active"
+    assert snapshot["policy"] == "same_model_phase_effort_active_v1"
+    assert snapshot["applied_change_calls"] == 1
+    assert snapshot["changes_model_routing"] is False
+    assert snapshot["changes_inference_controls"] is True
+    assert snapshot["provider_execution_telemetry"] == "not_collected"
 
 
 def test_disabled_shadow_metrics_are_explicit_and_empty():
     assert disabled_effort_shadow_metrics() == {
         "enabled": False,
+        "mode": "off",
         "policy": "same_model_phase_effort_shadow_v1",
         "decision_count": 0,
         "would_change_calls": 0,
+        "applied_change_calls": 0,
         "agreement_calls": 0,
         "recommended_thinking_calls": 0,
         "actual_thinking_calls": 0,
         "by_phase": {},
         "decisions": [],
         "changes_model_routing": False,
+        "changes_inference_controls": False,
+        "control_scope": "backend_request",
+        "provider_execution_telemetry": "not_collected",
         "contains_reasoning": False,
         "contains_content": False,
     }
@@ -185,10 +219,75 @@ def test_run_agent_shadow_observes_recovery_but_preserves_backend_controls(monke
         "thinking": False,
         "effort": None,
     }
+    assert trajectory.steps[1].effort_routing_shadow["configured"] == {
+        "thinking": False,
+        "effort": None,
+    }
     shadow_events = [fields["payload"] for event_type, fields in events if event_type == "sandbox.effort.shadow"]
     assert len(shadow_events) == 2
     assert shadow_events[-1]["phase"] == "recover"
     assert shadow_events[-1]["model"] == "mock"
+
+
+def test_run_agent_active_routing_changes_controls_without_switching_model(monkeypatch):
+    import brainregion.sandbox.loop as loop_module
+
+    task = get_fixture("off_by_one")
+    run_dir = make_run_dir(prefix="brainregion-effort-active-")
+    materialize_fixture(task, Path(run_dir))
+    backend = _Backend(
+        [
+            "not-json",
+            json.dumps({"thought": "stop", "done": True, "answer": "not repaired"}),
+        ]
+    )
+    events: list[tuple[str, dict]] = []
+
+    def capture_event(event_type: str, **fields):
+        events.append((event_type, fields))
+        return {"type": event_type, **fields}
+
+    monkeypatch.setattr(loop_module, "emit_event", capture_event)
+    try:
+        trajectory = asyncio.run(
+            run_agent(
+                backend,
+                "mock",
+                task,
+                run_dir=run_dir,
+                max_steps=2,
+                thinking=False,
+                effort=None,
+                effort_routing_active=True,
+                verify_fn=lambda *_args, **_kwargs: {"tests_green": False},
+            )
+        )
+    finally:
+        cleanup_run_dir(run_dir)
+
+    assert [call["model"] for call in backend.kwargs] == ["mock", "mock"]
+    assert [(call["thinking"], call["effort"]) for call in backend.kwargs] == [
+        (True, "medium"),
+        (True, "high"),
+    ]
+    snapshot = trajectory.to_dict()["effort_routing_shadow"]
+    assert snapshot["mode"] == "active"
+    assert snapshot["applied_change_calls"] == 2
+    assert snapshot["changes_model_routing"] is False
+    assert trajectory.steps[0].effort_routing_shadow["configured"] == {
+        "thinking": False,
+        "effort": None,
+    }
+    assert trajectory.steps[0].effort_routing_shadow["actual"] == {
+        "thinking": True,
+        "effort": "medium",
+    }
+    applied_events = [
+        fields["payload"]
+        for event_type, fields in events
+        if event_type == "sandbox.effort.applied"
+    ]
+    assert [event["actual"]["effort"] for event in applied_events] == ["medium", "high"]
 
 
 def test_cli_shadow_flag_is_opt_in_for_run_and_env():
@@ -201,8 +300,22 @@ def test_cli_shadow_flag_is_opt_in_for_run_and_env():
     env_enabled = parser.parse_args(
         ["sandbox", "env", "--main-brain", "mock", "--effort-routing-shadow"]
     )
+    run_active = parser.parse_args(
+        ["sandbox", "run", "--main-brain", "mock", "--effort-routing-active"]
+    )
+    env_active = parser.parse_args(
+        ["sandbox", "env", "--main-brain", "mock", "--effort-routing-active"]
+    )
 
     assert run_default.effort_routing_shadow is False
+    assert run_default.effort_routing_active is False
     assert run_enabled.effort_routing_shadow is True
+    assert run_enabled.effort_routing_active is False
     assert env_default.effort_routing_shadow is False
+    assert env_default.effort_routing_active is False
     assert env_enabled.effort_routing_shadow is True
+    assert env_enabled.effort_routing_active is False
+    assert run_active.effort_routing_active is True
+    assert run_active.effort_routing_shadow is False
+    assert env_active.effort_routing_active is True
+    assert env_active.effort_routing_shadow is False

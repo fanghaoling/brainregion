@@ -243,10 +243,16 @@ def build_parser() -> argparse.ArgumentParser:
                           help="Provider 原生思考模式(off=关,默认;on=开;Claude 可配 --effort)")
     p_sb_run.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"],
                           help="思考开时的强度(--thinking on 才生效;deepseek: low/medium→high,xhigh→max)")
-    p_sb_run.add_argument(
+    p_sb_run_effort_routing = p_sb_run.add_mutually_exclusive_group()
+    p_sb_run_effort_routing.add_argument(
         "--effort-routing-shadow",
         action="store_true",
         help="只记录按任务阶段建议的 thinking/effort，不改变真实模型调用",
+    )
+    p_sb_run_effort_routing.add_argument(
+        "--effort-routing-active",
+        action="store_true",
+        help="实验性：按任务阶段动态应用同一模型的 thinking/effort；默认关闭",
     )
     p_sb_run.add_argument(
         "--cognitive-scaffold",
@@ -523,10 +529,16 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_env.add_argument("--thinking", default="off", choices=["off", "on"],
                           help="DeepSeek 思考模式(off=关=便宜快非推理,默认;on=开+--effort)")
     p_sb_env.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])
-    p_sb_env.add_argument(
+    p_sb_env_effort_routing = p_sb_env.add_mutually_exclusive_group()
+    p_sb_env_effort_routing.add_argument(
         "--effort-routing-shadow",
         action="store_true",
         help="只记录按任务阶段建议的 thinking/effort，不改变真实模型调用",
+    )
+    p_sb_env_effort_routing.add_argument(
+        "--effort-routing-active",
+        action="store_true",
+        help="实验性：按任务阶段动态应用同一模型的 thinking/effort；默认关闭",
     )
     p_sb_env.add_argument("--debug", action="store_true",
                           help="开调试窗(后台 serve_debug_dashboard,SSE 实时看 env.step 事件)")

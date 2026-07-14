@@ -166,6 +166,9 @@ def _agent_kwargs(args: argparse.Namespace, dd: dict[str, Any], endpoint_id: str
         "effort_routing_shadow": bool(
             getattr(args, "effort_routing_shadow", False)
         ),
+        "effort_routing_active": bool(
+            getattr(args, "effort_routing_active", False)
+        ),
         "brain_verify": bool(getattr(args, "brain_verify", False)),
         "brain_delegate": bool(getattr(args, "brain_delegate", False)),
         "cognitive_scaffold": bool(getattr(args, "cognitive_scaffold", False)),
@@ -791,6 +794,9 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
                     endpoint_id=endpoint_id, thinking=_thinking_arg(args), effort=args.effort,
                     effort_routing_shadow=bool(
                         getattr(args, "effort_routing_shadow", False)
+                    ),
+                    effort_routing_active=bool(
+                        getattr(args, "effort_routing_active", False)
                     ),
                     system_prompt=build_env_system_prompt(
                         env, goal_text, memory=memory, strategy=strategy_region_on,
