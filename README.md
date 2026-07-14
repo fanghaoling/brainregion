@@ -493,6 +493,30 @@ brain-region sandbox run `
   --tool-result-live-reads 3
 ```
 
+### Phase Effort Routing Shadow
+
+The sandbox runtime can record a counterfactual same-model effort policy without changing any provider call. The
+deterministic phase controller recommends `thinking` and `effort` for each main-model turn: understanding and planning
+use standard effort, repetitive execution and synthesis use economy effort, objective verification prefers
+deterministic tools, and recovery can request strong effort when observable stagnation rises. The trace stores the
+actual and recommended controls, whether they differ, the public phase, and the content-free difficulty score. It does
+not retain prompts, outputs, or model reasoning.
+
+Shadow routing is off by default and is available on `sandbox run` (including worktree mode) and single-episode
+`sandbox env`:
+
+```powershell
+brain-region sandbox run `
+  --task off_by_one `
+  --main-brain buzz_anthropic/claude-sonnet-5 `
+  --thinking off `
+  --effort-routing-shadow
+```
+
+Inspect `trajectory.effort_routing_shadow` or the `sandbox.effort.shadow` SSE/JSONL events. The policy reports
+`changes_model_routing=false`; it is calibration telemetry, not dynamic execution. Existing matched evaluations keep
+their previous protocol unless a dedicated routing experiment is added later.
+
 ### Functional Region Workbench Pilot
 
 The code sandbox can split grounded tool work from repair decisions without adding persona-style model experts.

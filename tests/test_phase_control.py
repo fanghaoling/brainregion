@@ -213,6 +213,8 @@ def test_run_agent_records_phase_trajectory_and_transition_events(monkeypatch):
     assert trajectory.tests_green is True
     assert phase_control["phase"] == "synthesize"
     assert phase_control["changes_model_routing"] is False
+    assert trajectory.to_dict()["effort_routing_shadow"]["enabled"] is False
+    assert not any(event_type == "sandbox.effort.shadow" for event_type, _fields in events)
     assert [item["to"] for item in phase_control["transitions"]] == [
         "plan",
         "execute",

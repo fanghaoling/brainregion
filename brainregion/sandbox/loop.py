@@ -39,6 +39,11 @@ from brainregion.workspace.files import scoped_workspace_root
 from .task import SandboxTask, WorktreeTask
 from .verify import verify_solution
 from .cognitive_state import MainCognitiveState, RuntimeCognitiveState
+from .effort_routing import (
+    EffortRoutingDecision,
+    PhaseEffortShadow,
+    disabled_effort_shadow_metrics,
+)
 from .input_attribution import (
     attributed_message,
     capture_input_attribution,
@@ -218,6 +223,29 @@ def _emit_phase_transition(
         logger.warning("sandbox.phase.transition emit failed (ignored)", exc_info=True)
 
 
+def _emit_effort_shadow(
+    decision: EffortRoutingDecision,
+    *,
+    task_id: str,
+    arm: str,
+    model: str,
+    endpoint_id: str | None,
+) -> None:
+    try:
+        emit_event(
+            "sandbox.effort.shadow",
+            payload={
+                "task_id": task_id,
+                "arm": arm,
+                "model": model,
+                "endpoint_id": endpoint_id,
+                **decision.to_dict(),
+            },
+        )
+    except Exception:  # noqa: BLE001 - observability must never break the control loop
+        logger.warning("sandbox.effort.shadow emit failed (ignored)", exc_info=True)
+
+
 @dataclass
 class ToolCall:
     thought: str
@@ -288,6 +316,7 @@ class StepRecord:
     cognitive_update_error: str | None = None
     phase_at_call: str = ""
     phase_after: str = ""
+    effort_routing_shadow: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -413,6 +442,7 @@ class Trajectory:
     advisory_injections: list[dict[str, Any]] = field(default_factory=list)
     cognitive_state: MainCognitiveState | RuntimeCognitiveState | None = None
     phase_controller: PhaseController | None = None
+    effort_routing_shadow: PhaseEffortShadow | None = None
     tool_result_lifecycle: dict[str, Any] = field(default_factory=dict)
     region_workbench: dict[str, Any] = field(
         default_factory=lambda: {
@@ -517,6 +547,11 @@ class Trajectory:
                 if self.phase_controller
                 else {"enabled": False, "changes_model_routing": False, "contains_reasoning": False}
             ),
+            "effort_routing_shadow": (
+                self.effort_routing_shadow.snapshot()
+                if self.effort_routing_shadow
+                else disabled_effort_shadow_metrics()
+            ),
             "tool_result_lifecycle": dict(self.tool_result_lifecycle),
             "region_workbench": dict(self.region_workbench),
             "iterations": ([it.to_dict() for it in self.iterations]
@@ -544,6 +579,7 @@ class Trajectory:
                     "cognitive_update_error": s.cognitive_update_error,
                     "phase_at_call": s.phase_at_call,
                     "phase_after": s.phase_after,
+                    "effort_routing_shadow": dict(s.effort_routing_shadow),
                     "status_injected": s.status_injected,
                 }
                 for s in self.steps
@@ -1407,6 +1443,7 @@ async def run_agent(
     endpoint_id: str | None = None,
     thinking: bool | None = None,
     effort: str | None = None,
+    effort_routing_shadow: bool = False,
     brain_verify: bool = False,
     brain_delegate: bool = False,
     directive: str = "",
@@ -1480,6 +1517,8 @@ async def run_agent(
     traj = Trajectory(task_id=task.id, arm=arm, gold_diff=task.gold_diff)
     phase_controller = PhaseController.for_task(task)
     traj.phase_controller = phase_controller
+    effort_shadow = PhaseEffortShadow() if effort_routing_shadow else None
+    traj.effort_routing_shadow = effort_shadow
     _emit_phase_status(
         phase_controller,
         task_id=task.id,
@@ -2002,6 +2041,22 @@ async def run_agent(
             result_lifecycle.apply(messages, next_step=step)
             messages = _trim_transcript(messages, cap_chars)
             phase_at_call = phase_controller.phase.value
+            effort_shadow_decision = None
+            if effort_shadow is not None:
+                effort_shadow_decision = effort_shadow.observe(
+                    step=step,
+                    phase=phase_controller.phase,
+                    difficulty=phase_controller.difficulty,
+                    actual_thinking=thinking,
+                    actual_effort=effort,
+                )
+                _emit_effort_shadow(
+                    effort_shadow_decision,
+                    task_id=task.id,
+                    arm=arm,
+                    model=model,
+                    endpoint_id=endpoint_id,
+                )
             captured_input = capture_input_attribution(messages)
             resp = await backend.complete_messages(
                 provider_messages(messages), model=model, temperature=temperature, max_tokens=max_tokens,
@@ -2046,6 +2101,9 @@ async def run_agent(
                     main_usage=step_main_usage, main_cost_source=step_main_cost_source,
                     main_input_attribution=step_main_input_attribution,
                     phase_at_call=phase_at_call, phase_after=phase_controller.phase.value,
+                    effort_routing_shadow=(
+                        effort_shadow_decision.to_dict() if effort_shadow_decision else {}
+                    ),
                 ))
                 emit_event(
                     "sandbox.step",
@@ -2091,6 +2149,9 @@ async def run_agent(
                     main_usage=step_main_usage, main_cost_source=step_main_cost_source,
                     main_input_attribution=step_main_input_attribution,
                     phase_at_call=phase_at_call, phase_after=phase_controller.phase.value,
+                    effort_routing_shadow=(
+                        effort_shadow_decision.to_dict() if effort_shadow_decision else {}
+                    ),
                 ))
                 emit_event(
                     "sandbox.step",
@@ -2171,6 +2232,9 @@ async def run_agent(
                     cognitive_update_error=cognitive_update_error,
                     phase_at_call=phase_at_call,
                     phase_after=phase_controller.phase.value,
+                    effort_routing_shadow=(
+                        effort_shadow_decision.to_dict() if effort_shadow_decision else {}
+                    ),
                 ))
                 traj.done = True
                 traj.termination_reason = "done"
@@ -2350,6 +2414,9 @@ async def run_agent(
                 cognitive_update_error=cognitive_update_error,
                 phase_at_call=phase_at_call,
                 phase_after=phase_controller.phase.value,
+                effort_routing_shadow=(
+                    effort_shadow_decision.to_dict() if effort_shadow_decision else {}
+                ),
             )
             traj.steps.append(step_record)
             if isinstance(traj.cognitive_state, RuntimeCognitiveState):
@@ -2512,6 +2579,7 @@ async def run_cognitive_loop(
     orthogonal_endpoint_id: str | None = None,
     thinking: bool | None = None,
     effort: str | None = None,
+    effort_routing_shadow: bool = False,
     cognitive_scaffold: bool = False,
     cognitive_scaffold_mode: str = "model_managed",
     cognitive_checkpoint_period: int = 3,
@@ -2558,6 +2626,7 @@ async def run_cognitive_loop(
         max_tokens=max_tokens, transcript_token_cap=transcript_token_cap,
         consecutive_error_limit=consecutive_error_limit, python_exe=python_exe,
         endpoint_id=endpoint_id, thinking=thinking, effort=effort,
+        effort_routing_shadow=effort_routing_shadow,
         cognitive_scaffold=cognitive_scaffold,
         cognitive_scaffold_mode=cognitive_scaffold_mode,
         cognitive_checkpoint_period=cognitive_checkpoint_period,

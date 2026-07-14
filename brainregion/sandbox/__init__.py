@@ -15,6 +15,13 @@ from __future__ import annotations
 
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
 from .loop import Trajectory, run_agent
+from .effort_routing import (
+    EffortControls,
+    EffortRoutingDecision,
+    PhaseEffortShadow,
+    controls_for_tier,
+    disabled_effort_shadow_metrics,
+)
 from .option_runtime import ActivationRecord, CognitiveScheduler, OptionRegion, OptionResult
 from .phase_control import (
     CognitivePhase,
@@ -48,6 +55,11 @@ __all__ = [
     "make_run_dir",
     "cleanup_run_dir",
     "run_agent",
+    "EffortControls",
+    "EffortRoutingDecision",
+    "PhaseEffortShadow",
+    "controls_for_tier",
+    "disabled_effort_shadow_metrics",
     "OptionRegion",
     "OptionResult",
     "ActivationRecord",

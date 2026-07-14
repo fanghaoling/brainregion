@@ -27,6 +27,7 @@ from .delegation_eval import (
     run_fixture_delegation_eval,
 )
 from .delegation_trigger import DelegationTriggerPolicy
+from .effort_routing import disabled_effort_shadow_metrics
 from .delegation_shadow import (
     render_shadow_gate_summary,
     replay_shadow_report,
@@ -162,6 +163,9 @@ def _agent_kwargs(args: argparse.Namespace, dd: dict[str, Any], endpoint_id: str
         "endpoint_id": endpoint_id,
         "thinking": _thinking_arg(args),
         "effort": args.effort,
+        "effort_routing_shadow": bool(
+            getattr(args, "effort_routing_shadow", False)
+        ),
         "brain_verify": bool(getattr(args, "brain_verify", False)),
         "brain_delegate": bool(getattr(args, "brain_delegate", False)),
         "cognitive_scaffold": bool(getattr(args, "cognitive_scaffold", False)),
@@ -785,6 +789,9 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
                     consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
                     transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
                     endpoint_id=endpoint_id, thinking=_thinking_arg(args), effort=args.effort,
+                    effort_routing_shadow=bool(
+                        getattr(args, "effort_routing_shadow", False)
+                    ),
                     system_prompt=build_env_system_prompt(
                         env, goal_text, memory=memory, strategy=strategy_region_on,
                         registry=registry_mode,   # Phase 4.3 脑区注册表块(none/cap/full)
@@ -827,6 +834,14 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         "total_usage": merge_usage(traj.total_main_usage, traj.total_arm_usage),
         "main_cost_sources": list(traj.main_cost_sources),
         "region_cost_sources": list(traj.arm_cost_sources),
+        "phase_control": (
+            traj.phase_controller.snapshot() if traj.phase_controller else {"enabled": False}
+        ),
+        "effort_routing_shadow": (
+            traj.effort_routing_shadow.snapshot()
+            if traj.effort_routing_shadow
+            else disabled_effort_shadow_metrics()
+        ),
         "replay": str(replay_path),
     }
     if isinstance(env, UrbanDeliveryEnv):

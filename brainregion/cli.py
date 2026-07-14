@@ -244,6 +244,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_run.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"],
                           help="思考开时的强度(--thinking on 才生效;deepseek: low/medium→high,xhigh→max)")
     p_sb_run.add_argument(
+        "--effort-routing-shadow",
+        action="store_true",
+        help="只记录按任务阶段建议的 thinking/effort，不改变真实模型调用",
+    )
+    p_sb_run.add_argument(
         "--cognitive-scaffold",
         action="store_true",
         help="启用证据关联的外部认知状态；不记录或请求思维链",
@@ -518,6 +523,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_env.add_argument("--thinking", default="off", choices=["off", "on"],
                           help="DeepSeek 思考模式(off=关=便宜快非推理,默认;on=开+--effort)")
     p_sb_env.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])
+    p_sb_env.add_argument(
+        "--effort-routing-shadow",
+        action="store_true",
+        help="只记录按任务阶段建议的 thinking/effort，不改变真实模型调用",
+    )
     p_sb_env.add_argument("--debug", action="store_true",
                           help="开调试窗(后台 serve_debug_dashboard,SSE 实时看 env.step 事件)")
     # --- Phase B fog(部分可观)---
