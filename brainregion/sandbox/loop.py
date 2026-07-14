@@ -54,6 +54,7 @@ from .option_runtime import (
     OptionResult,
     select_region_observation,
 )
+from .phase_control import PhaseController, PhaseTransition
 from .tool_result_lifecycle import ToolResultLifecycle, tool_result_message
 from .regions.evidence_region import EvidenceRegion
 
@@ -178,6 +179,45 @@ def _emit_option_activation(record: dict[str, Any] | None = None, *, error: str 
         logger.warning("sandbox.option.activation emit failed (ignored)", exc_info=True)
 
 
+def _emit_phase_status(
+    controller: PhaseController,
+    *,
+    task_id: str,
+    arm: str,
+    reason: str,
+) -> None:
+    """Best-effort phase telemetry; never affect task execution."""
+    try:
+        emit_event(
+            "sandbox.phase.status",
+            payload={
+                "task_id": task_id,
+                "arm": arm,
+                "reason": reason,
+                **controller.snapshot(),
+            },
+        )
+    except Exception:  # noqa: BLE001 - observability must never break the control loop
+        logger.warning("sandbox.phase.status emit failed (ignored)", exc_info=True)
+
+
+def _emit_phase_transition(
+    transition: PhaseTransition | None,
+    *,
+    task_id: str,
+    arm: str,
+) -> None:
+    if transition is None:
+        return
+    try:
+        emit_event(
+            "sandbox.phase.transition",
+            payload={"task_id": task_id, "arm": arm, **transition.to_dict()},
+        )
+    except Exception:  # noqa: BLE001 - observability must never break the control loop
+        logger.warning("sandbox.phase.transition emit failed (ignored)", exc_info=True)
+
+
 @dataclass
 class ToolCall:
     thought: str
@@ -246,6 +286,8 @@ class StepRecord:
     verification_passed: bool | None = None
     cognitive_update_applied: bool = False
     cognitive_update_error: str | None = None
+    phase_at_call: str = ""
+    phase_after: str = ""
 
 
 @dataclass(frozen=True)
@@ -370,6 +412,7 @@ class Trajectory:
     adopted_assignment_ids: tuple[str, ...] = ()
     advisory_injections: list[dict[str, Any]] = field(default_factory=list)
     cognitive_state: MainCognitiveState | RuntimeCognitiveState | None = None
+    phase_controller: PhaseController | None = None
     tool_result_lifecycle: dict[str, Any] = field(default_factory=dict)
     region_workbench: dict[str, Any] = field(
         default_factory=lambda: {
@@ -469,6 +512,11 @@ class Trajectory:
                 if self.cognitive_state
                 else {"enabled": False, "contains_state_content": False, "contains_reasoning": False}
             ),
+            "phase_control": (
+                self.phase_controller.snapshot()
+                if self.phase_controller
+                else {"enabled": False, "changes_model_routing": False, "contains_reasoning": False}
+            ),
             "tool_result_lifecycle": dict(self.tool_result_lifecycle),
             "region_workbench": dict(self.region_workbench),
             "iterations": ([it.to_dict() for it in self.iterations]
@@ -494,6 +542,8 @@ class Trajectory:
                     "arm_cost_sources": list(s.arm_cost_sources),
                     "cognitive_update_applied": s.cognitive_update_applied,
                     "cognitive_update_error": s.cognitive_update_error,
+                    "phase_at_call": s.phase_at_call,
+                    "phase_after": s.phase_after,
                     "status_injected": s.status_injected,
                 }
                 for s in self.steps
@@ -1428,6 +1478,14 @@ async def run_agent(
     ):
         raise ValueError("cognitive_checkpoint_period must be a positive integer")
     traj = Trajectory(task_id=task.id, arm=arm, gold_diff=task.gold_diff)
+    phase_controller = PhaseController.for_task(task)
+    traj.phase_controller = phase_controller
+    _emit_phase_status(
+        phase_controller,
+        task_id=task.id,
+        arm=arm,
+        reason="task_received",
+    )
     result_lifecycle = ToolResultLifecycle(
         mode=tool_result_lifecycle,  # type: ignore[arg-type]
         live_read_results=tool_result_live_reads,
@@ -1597,10 +1655,39 @@ async def run_agent(
             trigger: str,
             inject_execution: bool = True,
         ) -> OptionResult:
+            phase_step = len(traj.steps)
+            if option.region == "verification":
+                phase_operation = "region:verification"
+            elif option.region == "evidence":
+                phase_operation = "region:evidence"
+            else:
+                phase_operation = "region:option"
+            _emit_phase_transition(
+                phase_controller.before_operation(
+                    step=phase_step,
+                    operation=phase_operation,
+                ),
+                task_id=task.id,
+                arm=arm,
+            )
             traj.automatic_region_activations += 1
             record = ActivationRecord.from_result(option, trigger=trigger).to_dict()
             traj.option_activations.append(record)
             _emit_option_activation(record)
+            _emit_phase_transition(
+                phase_controller.after_operation(
+                    step=phase_step,
+                    operation=phase_operation,
+                    error=False,
+                    verification_passed=(
+                        traj.last_verification_passed
+                        if option.region == "verification"
+                        else None
+                    ),
+                ),
+                task_id=task.id,
+                arm=arm,
+            )
             if inject_execution:
                 messages.append(
                     attributed_message(
@@ -1914,6 +2001,7 @@ async def run_agent(
 
             result_lifecycle.apply(messages, next_step=step)
             messages = _trim_transcript(messages, cap_chars)
+            phase_at_call = phase_controller.phase.value
             captured_input = capture_input_attribution(messages)
             resp = await backend.complete_messages(
                 provider_messages(messages), model=model, temperature=temperature, max_tokens=max_tokens,
@@ -1946,14 +2034,31 @@ async def run_agent(
 
             if not resp.ok or not resp.content:
                 consecutive_errors += 1
+                _emit_phase_transition(
+                    phase_controller.observe_model_failure(step=step, reason="model_error"),
+                    task_id=task.id,
+                    arm=arm,
+                )
                 traj.steps.append(StepRecord(
                     index=step, thought="", tool=None, args={}, done=False,
                     result_chars=0, result_preview="", error=resp.error or "empty model output",
                     main_cost_usd=step_main_cost, arm_cost_usd=0.0, status_injected=status_injected,
                     main_usage=step_main_usage, main_cost_source=step_main_cost_source,
                     main_input_attribution=step_main_input_attribution,
+                    phase_at_call=phase_at_call, phase_after=phase_controller.phase.value,
                 ))
-                emit_event("sandbox.step", payload={"task_id": task.id, "arm": arm, "step": step, "model_error": resp.error})
+                emit_event(
+                    "sandbox.step",
+                    payload={
+                        "task_id": task.id,
+                        "arm": arm,
+                        "step": step,
+                        "model_error": resp.error,
+                        "phase": phase_controller.phase.value,
+                        "recommended_tier": phase_controller.tier.value,
+                        "difficulty_score": round(phase_controller.difficulty.score, 3),
+                    },
+                )
                 if consecutive_errors >= consecutive_error_limit:
                     traj.termination_reason = "model_error"
                     break
@@ -1974,14 +2079,31 @@ async def run_agent(
             call, parse_err = parse_tool_call(resp.content)
             if parse_err is not None:
                 consecutive_errors += 1
+                _emit_phase_transition(
+                    phase_controller.observe_model_failure(step=step, reason="parse_error"),
+                    task_id=task.id,
+                    arm=arm,
+                )
                 traj.steps.append(StepRecord(
                     index=step, thought="", tool=None, args={}, done=False,
                     result_chars=0, result_preview="", error=parse_err,
                     main_cost_usd=step_main_cost, arm_cost_usd=0.0, status_injected=status_injected,
                     main_usage=step_main_usage, main_cost_source=step_main_cost_source,
                     main_input_attribution=step_main_input_attribution,
+                    phase_at_call=phase_at_call, phase_after=phase_controller.phase.value,
                 ))
-                emit_event("sandbox.step", payload={"task_id": task.id, "arm": arm, "step": step, "parse_error": parse_err})
+                emit_event(
+                    "sandbox.step",
+                    payload={
+                        "task_id": task.id,
+                        "arm": arm,
+                        "step": step,
+                        "parse_error": parse_err,
+                        "phase": phase_controller.phase.value,
+                        "recommended_tier": phase_controller.tier.value,
+                        "difficulty_score": round(phase_controller.difficulty.score, 3),
+                    },
+                )
                 if consecutive_errors >= consecutive_error_limit:
                     traj.termination_reason = "parse_error"
                     break
@@ -2034,6 +2156,11 @@ async def run_agent(
                     )
 
             if call.done:
+                _emit_phase_transition(
+                    phase_controller.observe_completion(step=step),
+                    task_id=task.id,
+                    arm=arm,
+                )
                 traj.steps.append(StepRecord(
                     index=step, thought=call.thought, tool=None, args={}, done=True,
                     result_chars=0, result_preview=call.answer[:300], error=None,
@@ -2042,14 +2169,32 @@ async def run_agent(
                     main_input_attribution=step_main_input_attribution,
                     cognitive_update_applied=cognitive_update_applied,
                     cognitive_update_error=cognitive_update_error,
+                    phase_at_call=phase_at_call,
+                    phase_after=phase_controller.phase.value,
                 ))
                 traj.done = True
                 traj.termination_reason = "done"
                 traj.adopted_assignment_ids = call.adopted_assignment_ids
-                emit_event("sandbox.step", payload={"task_id": task.id, "arm": arm, "step": step, "done": True})
+                emit_event(
+                    "sandbox.step",
+                    payload={
+                        "task_id": task.id,
+                        "arm": arm,
+                        "step": step,
+                        "done": True,
+                        "phase": phase_controller.phase.value,
+                        "recommended_tier": phase_controller.tier.value,
+                        "difficulty_score": round(phase_controller.difficulty.score, 3),
+                    },
+                )
                 break
 
             # Phase D.2 记忆脑区(有状态):recall → region.reason(相对视野);合法 act 后 region.update(dead-reckon)。
+            _emit_phase_transition(
+                phase_controller.before_operation(step=step, operation=call.tool or "model_turn"),
+                task_id=task.id,
+                arm=arm,
+            )
             target_kind, target_fingerprint = _progress_target(call)
             target_is_new = target_fingerprint not in _seen_progress_targets
             _seen_progress_targets.add(target_fingerprint)
@@ -2170,6 +2315,21 @@ async def run_agent(
                 )
             consecutive_errors = 0  # 成功(或可执行)解析 → 重置(连续错误是针对 parse/模型失败)
             preview = (result_str or exec_err or "")[:300]
+            verification_passed = (
+                bool(check_info.get("ok")) if call.tool == "workspace_run_check" and check_info else None
+            )
+            _emit_phase_transition(
+                phase_controller.after_operation(
+                    step=step,
+                    operation=call.tool or "model_turn",
+                    error=bool(exec_err),
+                    workspace_effect=patch_applied,
+                    verification_passed=verification_passed,
+                    target_is_new=target_is_new,
+                ),
+                task_id=task.id,
+                arm=arm,
+            )
             step_record = StepRecord(
                 index=step, thought=call.thought, tool=call.tool, args=call.args, done=False,
                 result_chars=len(result_str), result_preview=preview, error=exec_err,
@@ -2185,11 +2345,11 @@ async def run_agent(
                 target_fingerprint=target_fingerprint,
                 target_is_new=target_is_new,
                 workspace_effect=patch_applied,
-                verification_passed=(
-                    bool(check_info.get("ok")) if call.tool == "workspace_run_check" and check_info else None
-                ),
+                verification_passed=verification_passed,
                 cognitive_update_applied=cognitive_update_applied,
                 cognitive_update_error=cognitive_update_error,
+                phase_at_call=phase_at_call,
+                phase_after=phase_controller.phase.value,
             )
             traj.steps.append(step_record)
             if isinstance(traj.cognitive_state, RuntimeCognitiveState):
@@ -2206,7 +2366,16 @@ async def run_agent(
                 )
             emit_event(
                 "sandbox.step",
-                payload={"task_id": task.id, "arm": arm, "step": step, "tool": call.tool, "error": exec_err},
+                payload={
+                    "task_id": task.id,
+                    "arm": arm,
+                    "step": step,
+                    "tool": call.tool,
+                    "error": exec_err,
+                    "phase": phase_controller.phase.value,
+                    "recommended_tier": phase_controller.tier.value,
+                    "difficulty_score": round(phase_controller.difficulty.score, 3),
+                },
             )
             messages.append(
                 attributed_message("assistant", resp.content, "model_transcript")
@@ -2260,6 +2429,20 @@ async def run_agent(
         else:
             verification = verify_solution(task, run_dir, python_exe=python_exe)
         traj.tests_green = verification["tests_green"]
+        _emit_phase_transition(
+            phase_controller.observe_final_verification(
+                step=len(traj.steps),
+                passed=bool(traj.tests_green),
+            ),
+            task_id=task.id,
+            arm=arm,
+        )
+        _emit_phase_status(
+            phase_controller,
+            task_id=task.id,
+            arm=arm,
+            reason="run_verified",
+        )
         if traj.tests_green:
             traj.solve_status = "solved"
         elif traj.termination_reason == "budget_exceeded":
