@@ -751,10 +751,13 @@ cat plan.md | uv run brain-region plan -
 uv run brain-region plan --text "# Plan" --dimensions planner feasibility
 uv run brain-region code src/a.py src/b.py --output sarif --output-file review.sarif
 uv run brain-region doc docs/rfc.md --type rfc --output markdown
+uv run brain-region --config brain_region_config.json --env-file .env sandbox delivery-eval --main-brain buzz_anthropic/claude-sonnet-5
 ```
 
 Common options:
 
+- `--config`: explicitly load a local JSON config; this startup option must appear before a subcommand such as `plan` or `sandbox`.
+- `--env-file`: explicitly load API keys without overriding existing process variables; it must also appear before the subcommand.
 - `--panel`: model list or endpoint shortcuts.
 - `--dimensions`: reviewer dimensions.
 - `--adapter`: `auto`, `generic`, or another installed domain adapter.
@@ -781,6 +784,10 @@ Typical local config path:
 ```text
 <path-to-brain-region-mcp>/brain_region_config.json
 ```
+
+The CLI does not implicitly trust a same-named file in the current working directory. Pass it through the top-level
+`--config`/`--env-file` options, or keep using `BRAIN_REGION_CONFIG` and process environment variables. For the MCP
+server, declare the config path in the client's `env` block.
 
 `brain_region_config.json` can hold defaults such as:
 

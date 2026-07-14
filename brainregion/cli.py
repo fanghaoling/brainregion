@@ -15,8 +15,26 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
+import os
 import sys
 from pathlib import Path
+
+
+def _apply_cli_bootstrap(args: argparse.Namespace) -> None:
+    """Apply explicit startup files before importing model-facing modules."""
+    if args.env_file:
+        env_path = Path(args.env_file).expanduser().resolve()
+        if not env_path.is_file():
+            raise SystemExit(f"env file not found: {env_path}")
+        from dotenv import load_dotenv
+
+        load_dotenv(env_path, override=False, encoding="utf-8-sig")
+
+    if args.config:
+        config_path = Path(args.config).expanduser().resolve()
+        if not config_path.is_file():
+            raise SystemExit(f"config file not found: {config_path}")
+        os.environ["BRAIN_REGION_CONFIG"] = str(config_path)
 
 def _read_text_input(args) -> str:
     """plan/doc 输入优先级：--text > 文件路径 > stdin(-)。"""
@@ -54,6 +72,18 @@ def _add_review_args(p: argparse.ArgumentParser) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="BrainRegion（脑区）AI 协作 CLI")
+    parser.add_argument(
+        "--config",
+        default=None,
+        metavar="PATH",
+        help="显式加载 BrainRegion JSON 配置（须放在子命令之前）",
+    )
+    parser.add_argument(
+        "--env-file",
+        default=None,
+        metavar="PATH",
+        help="显式加载 API key 环境文件且不覆盖已有环境变量（须放在子命令之前）",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_plan = sub.add_parser("plan", help="审方案/计划（markdown）")
@@ -1072,6 +1102,7 @@ def main() -> None:
     except Exception:  # noqa: BLE001 — stdout 不可重配（如被捕获）时静默
         pass
     args = build_parser().parse_args()
+    _apply_cli_bootstrap(args)
     if args.command in {"eval", "calibrate", "routing", "outcome", "capability"}:
         from brainregion.eval import cli as eval_cli
 

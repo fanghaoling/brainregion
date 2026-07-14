@@ -32,6 +32,10 @@ $CODEX_HOME/brain_region_config.json
 ~/.config/brain-region/config.json
 ```
 
+The CLI also accepts `--config PATH` before the subcommand; it sets `BRAIN_REGION_CONFIG` for that process.
+`--env-file PATH` loads environment variables before config resolution without overriding variables already supplied by
+the caller. Both require explicit paths, and the CLI does not auto-load a same-named config from the current directory.
+
 Project-local config is still supported through the historical project-root environment variable:
 
 ```text

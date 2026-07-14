@@ -286,10 +286,13 @@ cat plan.md | uv run brain-region plan -
 uv run brain-region plan --text "# Plan" --dimensions planner feasibility
 uv run brain-region code src/a.py src/b.py --output sarif --output-file review.sarif
 uv run brain-region doc docs/rfc.md --type rfc --output markdown
+uv run brain-region --config brain_region_config.json --env-file .env sandbox delivery-eval --main-brain buzz_anthropic/claude-sonnet-5
 ```
 
 常用参数：
 
+- `--config`：显式加载本地 JSON 配置；这是顶层启动参数，必须放在 `plan`、`sandbox` 等子命令之前。
+- `--env-file`：显式加载 API key 文件且不覆盖进程中已有的环境变量；同样必须放在子命令之前。
 - `--panel`：模型列表或 endpoint 快捷写法。
 - `--dimensions`：审查维度。
 - `--adapter`：`auto`、`generic` 或已安装的领域 adapter。
@@ -316,6 +319,9 @@ builtin < global config < project config < env < explicit tool args
 ```text
 <path-to-brain-region-mcp>/brain_region_config.json
 ```
+
+CLI 不会隐式信任当前工作目录里的同名文件。可通过顶层 `--config`/`--env-file` 传入，或继续使用
+`BRAIN_REGION_CONFIG` 和进程环境变量；MCP server 仍建议在 client 配置的 `env` 中声明路径。
 
 `brain_region_config.json` 可以放这些默认值：
 

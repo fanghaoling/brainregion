@@ -32,6 +32,10 @@ $CODEX_HOME/brain_region_config.json
 ~/.config/brain-region/config.json
 ```
 
+CLI 也可在子命令之前传 `--config PATH`，其效果等同于为本次进程设置
+`BRAIN_REGION_CONFIG`。`--env-file PATH` 会在配置解析前加载环境变量，且不会覆盖调用者已经设置的变量。
+两者都要求显式路径；CLI 不会自动采用当前工作目录里的同名文件。
+
 项目本地配置仍支持通过历史兼容的项目根目录变量加载：
 
 ```text
