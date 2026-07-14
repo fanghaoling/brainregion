@@ -10,9 +10,6 @@
 """
 from __future__ import annotations
 
-from html import escape
-
-
 def build_env_scene_html() -> str:
     return """<!DOCTYPE html>
 <html lang="zh-CN">

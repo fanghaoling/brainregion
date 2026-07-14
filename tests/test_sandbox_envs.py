@@ -133,7 +133,7 @@ def test_reset_clears_state_and_frames():
     env.step("right")
     env.step("down")
     assert len(env.frames) == 3  # 初始 + 2 move
-    obs = env.reset()
+    env.reset()
     assert env._agent == (0, 0)
     assert env.solved is False
     assert env.total_reward == 0.0
@@ -403,8 +403,6 @@ def test_walls_compose_with_fog_and_memory():
 
 def _floor_graph_acyclic(env: GridWorld) -> bool:
     """floor 诱导图(4-邻接)是否无环 = 是否 forest。union-find 验完美迷宫 = spanning tree。"""
-    from collections import deque
-
     floors = set(c for c in ((x, y) for y in range(env.size) for x in range(env.size))
                  if c not in env.walls)
     parent = {c: c for c in floors}
