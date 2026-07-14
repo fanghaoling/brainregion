@@ -12,6 +12,7 @@ from brainregion.eval.stats import bootstrap_statistic, seed_for
 from brainregion.runtime import normalize_usage
 
 from .cognitive_eval import classify_thinking_control
+from .effort_routing import EffortActivationPolicy
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
 from .loop import run_agent
 from .phase_control import assess_task_difficulty
@@ -134,6 +135,7 @@ async def run_phase_effort_eval(
     consecutive_error_limit: int = 3,
     tool_result_lifecycle: str = "full",
     tool_result_live_reads: int = 3,
+    active_policy: EffortActivationPolicy = "phase",
     run_id: str = "",
     bootstrap_samples: int | None = None,
 ) -> dict[str, Any]:
@@ -153,6 +155,10 @@ async def run_phase_effort_eval(
         raise ValueError("max_total_cost_usd must be positive and finite")
     if tool_result_lifecycle not in {"full", "compact"}:
         raise ValueError(f"unknown tool result lifecycle mode: {tool_result_lifecycle!r}")
+    if active_policy not in {"phase", "recovery_only"}:
+        raise ValueError(
+            "active policy must be 'phase' or 'recovery_only'"
+        )
     if (
         isinstance(tool_result_live_reads, bool)
         or not isinstance(tool_result_live_reads, int)
@@ -210,6 +216,7 @@ async def run_phase_effort_eval(
                         effort=None,
                         effort_routing_shadow=not arm.active,
                         effort_routing_active=arm.active,
+                        effort_routing_policy=active_policy,
                         tool_result_lifecycle=tool_result_lifecycle,
                         tool_result_live_reads=tool_result_live_reads,
                     )
@@ -245,6 +252,7 @@ async def run_phase_effort_eval(
                             "repeat": repeat,
                             "arm": arm.name,
                             "routing_mode": "active" if arm.active else "shadow",
+                            "activation_policy": active_policy,
                             "structural_difficulty": structural_difficulty,
                             "solved": trajectory.tests_green,
                             "protocol_completed": trajectory.done,
@@ -313,6 +321,7 @@ async def run_phase_effort_eval(
                             structural_difficulty=structural_difficulty,
                             wall_time_s=time.perf_counter() - started,
                             error=exc,
+                            activation_policy=active_policy,
                         )
                     )
                 finally:
@@ -337,6 +346,7 @@ async def run_phase_effort_eval(
         "configured_thinking": False,
         "configured_effort": None,
         "thinking_control": classify_thinking_control(model),
+        "active_policy": active_policy,
         "tool_result_lifecycle": tool_result_lifecycle,
         "tool_result_live_reads": tool_result_live_reads,
         "max_steps": max_steps,
@@ -664,12 +674,14 @@ def _runner_error_case(
     structural_difficulty: dict[str, Any],
     wall_time_s: float,
     error: Exception,
+    activation_policy: EffortActivationPolicy = "phase",
 ) -> dict[str, Any]:
     return {
         "task_id": task_id,
         "repeat": repeat,
         "arm": arm.name,
         "routing_mode": "active" if arm.active else "shadow",
+        "activation_policy": activation_policy,
         "structural_difficulty": structural_difficulty,
         "solved": False,
         "protocol_completed": False,

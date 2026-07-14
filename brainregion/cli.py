@@ -255,6 +255,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="实验性：按任务阶段动态应用同一模型的 thinking/effort；默认关闭",
     )
     p_sb_run.add_argument(
+        "--effort-routing-policy",
+        default="phase",
+        choices=["phase", "recovery_only"],
+        help="active 激活范围：全阶段策略或仅失败恢复阶段",
+    )
+    p_sb_run.add_argument(
         "--cognitive-scaffold",
         action="store_true",
         help="启用证据关联的外部认知状态；不记录或请求思维链",
@@ -420,6 +426,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_phase_effort.add_argument("--max-tokens", type=int, default=None)
     p_sb_phase_effort.add_argument("--bootstrap-samples", type=int, default=None)
     p_sb_phase_effort.add_argument(
+        "--active-policy",
+        default="phase",
+        choices=["phase", "recovery_only"],
+        help="实验臂的 effort 激活范围",
+    )
+    p_sb_phase_effort.add_argument(
         "--tool-result-lifecycle",
         default="full",
         choices=["full", "compact"],
@@ -574,6 +586,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--effort-routing-active",
         action="store_true",
         help="实验性：按任务阶段动态应用同一模型的 thinking/effort；默认关闭",
+    )
+    p_sb_env.add_argument(
+        "--effort-routing-policy",
+        default="phase",
+        choices=["phase", "recovery_only"],
+        help="active 激活范围：全阶段策略或仅失败恢复阶段",
     )
     p_sb_env.add_argument("--debug", action="store_true",
                           help="开调试窗(后台 serve_debug_dashboard,SSE 实时看 env.step 事件)")

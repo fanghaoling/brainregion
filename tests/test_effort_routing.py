@@ -116,6 +116,38 @@ def test_active_routing_applies_recommended_controls_and_keeps_configured_values
     assert snapshot["provider_execution_telemetry"] == "not_collected"
 
 
+def test_recovery_only_policy_preserves_controls_until_recovery():
+    router = PhaseEffortShadow(mode="active", activation_policy="recovery_only")
+
+    understand = router.observe(
+        step=0,
+        phase=CognitivePhase.UNDERSTAND,
+        difficulty=_difficulty(),
+        actual_thinking=False,
+        actual_effort=None,
+    )
+    recover = router.observe(
+        step=1,
+        phase=CognitivePhase.RECOVER,
+        difficulty=_difficulty(stagnation=1.0),
+        actual_thinking=False,
+        actual_effort=None,
+    )
+
+    assert understand.recommended.thinking is True
+    assert understand.activation_eligible is False
+    assert understand.recommendation_applied is False
+    assert understand.actual_thinking is False
+    assert recover.activation_eligible is True
+    assert recover.recommendation_applied is True
+    assert recover.actual_effort == "high"
+    snapshot = router.snapshot()
+    assert snapshot["activation_policy"] == "recovery_only"
+    assert snapshot["policy"] == "same_model_phase_effort_active_recovery_only_v1"
+    assert snapshot["would_change_calls"] == 2
+    assert snapshot["applied_change_calls"] == 1
+
+
 def test_disabled_shadow_metrics_are_explicit_and_empty():
     assert disabled_effort_shadow_metrics() == {
         "enabled": False,
@@ -290,6 +322,56 @@ def test_run_agent_active_routing_changes_controls_without_switching_model(monke
     assert [event["actual"]["effort"] for event in applied_events] == ["medium", "high"]
 
 
+def test_run_agent_recovery_only_routing_activates_after_parse_failure(monkeypatch):
+    import brainregion.sandbox.loop as loop_module
+
+    task = get_fixture("off_by_one")
+    run_dir = make_run_dir(prefix="brainregion-effort-recovery-only-")
+    materialize_fixture(task, Path(run_dir))
+    backend = _Backend(
+        [
+            "not-json",
+            json.dumps({"thought": "stop", "done": True, "answer": "not repaired"}),
+        ]
+    )
+    events: list[tuple[str, dict]] = []
+
+    def capture_event(event_type: str, **fields):
+        events.append((event_type, fields))
+        return {"type": event_type, **fields}
+
+    monkeypatch.setattr(loop_module, "emit_event", capture_event)
+    try:
+        trajectory = asyncio.run(
+            run_agent(
+                backend,
+                "mock",
+                task,
+                run_dir=run_dir,
+                max_steps=2,
+                thinking=False,
+                effort=None,
+                effort_routing_active=True,
+                effort_routing_policy="recovery_only",
+                verify_fn=lambda *_args, **_kwargs: {"tests_green": False},
+            )
+        )
+    finally:
+        cleanup_run_dir(run_dir)
+
+    assert [(call["thinking"], call["effort"]) for call in backend.kwargs] == [
+        (False, None),
+        (True, "high"),
+    ]
+    snapshot = trajectory.to_dict()["effort_routing_shadow"]
+    assert snapshot["activation_policy"] == "recovery_only"
+    assert snapshot["applied_change_calls"] == 1
+    assert [event_type for event_type, _fields in events if event_type.startswith("sandbox.effort")] == [
+        "sandbox.effort.shadow",
+        "sandbox.effort.applied",
+    ]
+
+
 def test_cli_shadow_flag_is_opt_in_for_run_and_env():
     parser = build_parser()
     run_default = parser.parse_args(["sandbox", "run", "--main-brain", "mock"])
@@ -304,7 +386,15 @@ def test_cli_shadow_flag_is_opt_in_for_run_and_env():
         ["sandbox", "run", "--main-brain", "mock", "--effort-routing-active"]
     )
     env_active = parser.parse_args(
-        ["sandbox", "env", "--main-brain", "mock", "--effort-routing-active"]
+        [
+            "sandbox",
+            "env",
+            "--main-brain",
+            "mock",
+            "--effort-routing-active",
+            "--effort-routing-policy",
+            "recovery_only",
+        ]
     )
 
     assert run_default.effort_routing_shadow is False
@@ -317,5 +407,7 @@ def test_cli_shadow_flag_is_opt_in_for_run_and_env():
     assert env_enabled.effort_routing_active is False
     assert run_active.effort_routing_active is True
     assert run_active.effort_routing_shadow is False
+    assert run_active.effort_routing_policy == "phase"
     assert env_active.effort_routing_active is True
     assert env_active.effort_routing_shadow is False
+    assert env_active.effort_routing_policy == "recovery_only"

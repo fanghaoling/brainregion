@@ -173,6 +173,9 @@ def _agent_kwargs(args: argparse.Namespace, dd: dict[str, Any], endpoint_id: str
         "effort_routing_active": bool(
             getattr(args, "effort_routing_active", False)
         ),
+        "effort_routing_policy": str(
+            getattr(args, "effort_routing_policy", "phase")
+        ),
         "brain_verify": bool(getattr(args, "brain_verify", False)),
         "brain_delegate": bool(getattr(args, "brain_delegate", False)),
         "cognitive_scaffold": bool(getattr(args, "cognitive_scaffold", False)),
@@ -544,6 +547,7 @@ async def run_phase_effort_evaluation(args: argparse.Namespace) -> dict[str, Any
             consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
             tool_result_lifecycle=args.tool_result_lifecycle,
             tool_result_live_reads=int(args.tool_result_live_reads),
+            active_policy=args.active_policy,
             bootstrap_samples=args.bootstrap_samples,
         )
     except ValueError as exc:
@@ -843,6 +847,9 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
                     ),
                     effort_routing_active=bool(
                         getattr(args, "effort_routing_active", False)
+                    ),
+                    effort_routing_policy=str(
+                        getattr(args, "effort_routing_policy", "phase")
                     ),
                     system_prompt=build_env_system_prompt(
                         env, goal_text, memory=memory, strategy=strategy_region_on,

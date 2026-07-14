@@ -533,6 +533,11 @@ Active routing is explicit and mutually exclusive with shadow mode. It emits `sa
 all default runs keep their previous fixed controls. `control_scope=backend_request` means the trace proves which
 parameters BrainRegion sent; provider-side thinking is not claimed unless separate response telemetry confirms it.
 
+To isolate failure recovery from broad phase routing, select `--effort-routing-policy recovery_only`. Understanding,
+planning, execution, verification, and synthesis retain the configured controls; only a subsequent call made while
+the public phase is `recover` may apply stronger controls. Ineligible recommendations remain visible as
+`sandbox.effort.shadow` events, while actual recovery changes emit `sandbox.effort.applied`.
+
 Use the dedicated matched evaluation before drawing conclusions from active routing. It alternates arm order across
 task/repeat pairs, gives both arms fresh sandboxes and equal per-run budgets, and bootstraps task-level paired deltas:
 
@@ -541,12 +546,14 @@ brain-region sandbox phase-effort-eval `
   --tasks off_by_one,settings_precedence `
   --main-brain buzz_anthropic/claude-sonnet-5 `
   --repeats 2 `
+  --active-policy recovery_only `
   --max-cost-usd 0.08 `
   --max-total-cost-usd 0.32
 ```
 
-The control arm keeps `thinking=false` while running the policy in shadow mode; the treatment applies phase-active
-controls. Reports separate objective solve and protocol completion, token/cost deltas, thinking requests, recovery
+The control arm keeps `thinking=false` while running the policy in shadow mode; the treatment applies the selected
+`phase` (default) or `recovery_only` active policy. Reports separate objective solve and protocol completion,
+token/cost deltas, thinking requests, recovery
 entries and recovery span. A global cap stops only between complete matched pairs. Reports remain `INCONCLUSIVE` when
 there are fewer than two independent task units, provider thinking is only request-level telemetry, the planned matrix
 is cost-capped, or a matched pair fails infrastructure checks.

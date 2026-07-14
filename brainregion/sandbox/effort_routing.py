@@ -7,6 +7,9 @@ from typing import Any, Literal
 from .phase_control import CognitivePhase, ComputeTier, DifficultyVector, recommended_tier
 
 
+EffortActivationPolicy = Literal["phase", "recovery_only"]
+
+
 @dataclass(frozen=True)
 class EffortControls:
     thinking: bool
@@ -35,6 +38,9 @@ class EffortRoutingDecision:
     recommended_tier: ComputeTier
     recommended: EffortControls
     mode: Literal["shadow", "active"]
+    activation_policy: EffortActivationPolicy
+    activation_eligible: bool
+    recommendation_applied: bool
     configured_thinking: bool | None
     configured_effort: str | None
     actual_thinking: bool | None
@@ -55,6 +61,8 @@ class EffortRoutingDecision:
             "recommended_tier": self.recommended_tier.value,
             "recommended": self.recommended.to_dict(),
             "mode": self.mode,
+            "activation_policy": self.activation_policy,
+            "activation_eligible": self.activation_eligible,
             "configured": {
                 "thinking": self.configured_thinking,
                 "effort": self.configured_effort,
@@ -65,8 +73,8 @@ class EffortRoutingDecision:
             "actual": effective,
             "control_scope": "backend_request",
             "would_change": self.would_change,
-            "recommendation_applied": self.mode == "active",
-            "controls_changed": self.mode == "active" and self.would_change,
+            "recommendation_applied": self.recommendation_applied,
+            "controls_changed": self.recommendation_applied and self.would_change,
             "reason": self.reason,
         }
 
@@ -76,11 +84,16 @@ class PhaseEffortShadow:
     """Observe or explicitly apply phase effort decisions without switching models."""
 
     mode: Literal["shadow", "active"] = "shadow"
+    activation_policy: EffortActivationPolicy = "phase"
     decisions: list[EffortRoutingDecision] = field(default_factory=list)
 
     def __post_init__(self) -> None:
         if self.mode not in {"shadow", "active"}:
             raise ValueError("effort routing mode must be 'shadow' or 'active'")
+        if self.activation_policy not in {"phase", "recovery_only"}:
+            raise ValueError(
+                "effort activation policy must be 'phase' or 'recovery_only'"
+            )
 
     def observe(
         self,
@@ -93,7 +106,10 @@ class PhaseEffortShadow:
     ) -> EffortRoutingDecision:
         tier = recommended_tier(phase, difficulty)
         controls = controls_for_tier(tier)
-        active = self.mode == "active"
+        activation_eligible = (
+            self.activation_policy == "phase" or phase is CognitivePhase.RECOVER
+        )
+        recommendation_applied = self.mode == "active" and activation_eligible
         decision = EffortRoutingDecision(
             index=len(self.decisions),
             step=max(0, int(step)),
@@ -102,10 +118,15 @@ class PhaseEffortShadow:
             recommended_tier=tier,
             recommended=controls,
             mode=self.mode,
+            activation_policy=self.activation_policy,
+            activation_eligible=activation_eligible,
+            recommendation_applied=recommendation_applied,
             configured_thinking=actual_thinking,
             configured_effort=actual_effort,
-            actual_thinking=controls.thinking if active else actual_thinking,
-            actual_effort=controls.effort if active else actual_effort,
+            actual_thinking=(
+                controls.thinking if recommendation_applied else actual_thinking
+            ),
+            actual_effort=controls.effort if recommendation_applied else actual_effort,
             would_change=(
                 actual_thinking is not controls.thinking
                 or actual_effort != controls.effort
@@ -132,14 +153,22 @@ class PhaseEffortShadow:
             tier = decision.recommended_tier.value
             row["recommended_tiers"][tier] = row["recommended_tiers"].get(tier, 0) + 1
 
+        policy = f"same_model_phase_effort_{self.mode}_v1"
+        if self.activation_policy != "phase":
+            policy = (
+                f"same_model_phase_effort_{self.mode}_"
+                f"{self.activation_policy}_v1"
+            )
         return {
             "enabled": True,
             "mode": self.mode,
-            "policy": f"same_model_phase_effort_{self.mode}_v1",
+            "policy": policy,
+            "activation_policy": self.activation_policy,
             "decision_count": len(self.decisions),
             "would_change_calls": sum(int(item.would_change) for item in self.decisions),
             "applied_change_calls": sum(
-                int(self.mode == "active" and item.would_change) for item in self.decisions
+                int(item.recommendation_applied and item.would_change)
+                for item in self.decisions
             ),
             "agreement_calls": sum(int(not item.would_change) for item in self.decisions),
             "recommended_thinking_calls": sum(
@@ -182,6 +211,7 @@ def disabled_effort_shadow_metrics() -> dict[str, Any]:
 
 
 __all__ = [
+    "EffortActivationPolicy",
     "EffortControls",
     "EffortRoutingDecision",
     "PhaseEffortShadow",

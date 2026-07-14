@@ -40,6 +40,7 @@ from .task import SandboxTask, WorktreeTask
 from .verify import verify_solution
 from .cognitive_state import MainCognitiveState, RuntimeCognitiveState
 from .effort_routing import (
+    EffortActivationPolicy,
     EffortRoutingDecision,
     PhaseEffortShadow,
     disabled_effort_shadow_metrics,
@@ -234,7 +235,7 @@ def _emit_effort_routing(
     try:
         event_type = (
             "sandbox.effort.applied"
-            if decision.mode == "active"
+            if decision.recommendation_applied
             else "sandbox.effort.shadow"
         )
         emit_event(
@@ -1450,6 +1451,7 @@ async def run_agent(
     effort: str | None = None,
     effort_routing_shadow: bool = False,
     effort_routing_active: bool = False,
+    effort_routing_policy: EffortActivationPolicy = "phase",
     brain_verify: bool = False,
     brain_delegate: bool = False,
     directive: str = "",
@@ -1526,7 +1528,10 @@ async def run_agent(
     phase_controller = PhaseController.for_task(task)
     traj.phase_controller = phase_controller
     effort_shadow = (
-        PhaseEffortShadow(mode="active" if effort_routing_active else "shadow")
+        PhaseEffortShadow(
+            mode="active" if effort_routing_active else "shadow",
+            activation_policy=effort_routing_policy,
+        )
         if effort_routing_shadow or effort_routing_active
         else None
     )
@@ -2603,6 +2608,7 @@ async def run_cognitive_loop(
     effort: str | None = None,
     effort_routing_shadow: bool = False,
     effort_routing_active: bool = False,
+    effort_routing_policy: EffortActivationPolicy = "phase",
     cognitive_scaffold: bool = False,
     cognitive_scaffold_mode: str = "model_managed",
     cognitive_checkpoint_period: int = 3,
@@ -2651,6 +2657,7 @@ async def run_cognitive_loop(
         endpoint_id=endpoint_id, thinking=thinking, effort=effort,
         effort_routing_shadow=effort_routing_shadow,
         effort_routing_active=effort_routing_active,
+        effort_routing_policy=effort_routing_policy,
         cognitive_scaffold=cognitive_scaffold,
         cognitive_scaffold_mode=cognitive_scaffold_mode,
         cognitive_checkpoint_period=cognitive_checkpoint_period,

@@ -186,6 +186,31 @@ def test_phase_effort_eval_total_cap_stops_between_complete_pairs():
     assert all(summary["n_runs"] == 2 for summary in report["per_arm"].values())
 
 
+def test_phase_effort_eval_can_isolate_recovery_only_activation():
+    task = get_fixture("off_by_one")
+    backend = _PhaseBackend(_materialized_sha())
+
+    report = asyncio.run(
+        run_phase_effort_eval(
+            backend,
+            "claude-sonnet-5",
+            [task],
+            repeats=1,
+            max_steps=3,
+            max_cost_usd=0.02,
+            active_policy="recovery_only",
+            bootstrap_samples=10,
+        )
+    )
+
+    assert report["execution"]["active_policy"] == "recovery_only"
+    assert report["per_arm"][ARM_PHASE_ACTIVE]["mean_effective_thinking_calls"] == 0.0
+    assert all(case["activation_policy"] == "recovery_only" for case in report["cases"])
+    treatment = next(case for case in report["cases"] if case["arm"] == ARM_PHASE_ACTIVE)
+    assert treatment["effort_routing"]["activation_policy"] == "recovery_only"
+    assert treatment["effort_routing"]["applied_change_calls"] == 0
+
+
 def test_phase_effort_eval_rejects_invalid_contracts():
     task = get_fixture("off_by_one")
     duplicate = [task, task]
@@ -206,6 +231,15 @@ def test_phase_effort_eval_rejects_invalid_contracts():
                 max_total_cost_usd=0,
             )
         )
+    with pytest.raises(ValueError, match="active policy"):
+        asyncio.run(
+            run_phase_effort_eval(
+                backend,
+                "main",
+                [task],
+                active_policy="invalid",  # type: ignore[arg-type]
+            )
+        )
     assert backend.calls == []
 
 
@@ -224,6 +258,8 @@ def test_phase_effort_eval_cli_contract():
             "0.08",
             "--max-total-cost-usd",
             "0.32",
+            "--active-policy",
+            "recovery_only",
         ]
     )
 
@@ -231,8 +267,44 @@ def test_phase_effort_eval_cli_contract():
     assert args.repeats == 2
     assert args.max_cost_usd == 0.08
     assert args.max_total_cost_usd == 0.32
+    assert args.active_policy == "recovery_only"
     assert args.tool_result_lifecycle == "full"
     assert args.tool_result_live_reads == 3
+
+
+def test_phase_effort_eval_cli_handler_forwards_active_policy(monkeypatch, tmp_path):
+    import brainregion.sandbox.cli as sandbox_cli
+
+    args = build_parser().parse_args(
+        [
+            "sandbox",
+            "phase-effort-eval",
+            "--tasks",
+            "off_by_one",
+            "--main-brain",
+            "mock",
+            "--active-policy",
+            "recovery_only",
+        ]
+    )
+    captured: dict = {}
+
+    async def fake_eval(_backend, _model, _tasks, **kwargs):
+        captured.update(kwargs)
+        return {"run_id": "test"}
+
+    monkeypatch.setattr(sandbox_cli._defaults_mod, "apply", lambda: {})
+    monkeypatch.setattr(sandbox_cli, "_endpoint_ids_for_refs", lambda *_args: [])
+    monkeypatch.setattr(sandbox_cli, "_build_backend", lambda *_args, **_kwargs: (object(), object()))
+    monkeypatch.setattr(sandbox_cli, "_resolve_main_brain", lambda *_args: ("mock", "endpoint"))
+    monkeypatch.setattr(sandbox_cli, "_resolve_tasks", lambda _args: [get_fixture("off_by_one")])
+    monkeypatch.setattr(sandbox_cli, "run_phase_effort_eval", fake_eval)
+    monkeypatch.setattr(sandbox_cli, "render_phase_effort_eval_summary", lambda _report: "ok")
+    monkeypatch.setattr(sandbox_cli, "write_report", lambda _report, _out: tmp_path / "report.json")
+
+    asyncio.run(sandbox_cli.run_phase_effort_evaluation(args))
+
+    assert captured["active_policy"] == "recovery_only"
 
 
 @pytest.mark.parametrize(
