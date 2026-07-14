@@ -182,6 +182,8 @@ def test_delivery_prompt_uses_custom_rules_without_truth_leak():
     assert "pickup" in prompt and "deliver" in prompt and "最后一单也必须返回" in prompt
     assert "oracle" not in prompt.lower() and "optimal" not in prompt.lower()
     assert str(sorted(scenario.vehicles)) not in prompt
+    navigation_prompt = build_env_system_prompt(env, "完成", navigation=True)
+    assert "delegate_navigation" in navigation_prompt
     with pytest.raises(ValueError, match="尚未接入"):
         build_env_system_prompt(env, "完成", memory=True)
 

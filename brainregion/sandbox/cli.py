@@ -955,3 +955,74 @@ async def run_env_eval(args: argparse.Namespace) -> dict[str, Any]:
     print(render_env_eval_summary(report))
     print(f"\n报告 JSON: {json_path}\nper-run CSV: {csv_path}")
     return {"report": report, "json": str(json_path), "csv": str(csv_path)}
+
+
+async def run_delivery_eval(args: argparse.Namespace) -> dict[str, Any]:
+    """`brain-region sandbox delivery-eval`:配送主脑/导航执行脑区成对评测。"""
+    from .urban_delivery_eval import (
+        DeliveryEvalConfig,
+        build_delivery_env,
+        render_delivery_summary,
+        run_delivery_eval as run_harness,
+        write_delivery_report,
+    )
+
+    dd = _defaults_mod.apply()
+    model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
+    if not model_str:
+        raise SystemExit("--main-brain 必填(或配置 sandbox_main_brain)")
+    backend, registry = _build_backend(
+        dd, endpoint_ids=_endpoint_ids_for_refs(dd, [model_str]),
+    )
+    model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
+
+    sizes = [int(value) for value in args.sizes.split(",") if value.strip()]
+    seeds = [int(value) for value in args.seeds.split(",") if value.strip()]
+    if not sizes or not seeds:
+        raise SystemExit("--sizes 和 --seeds 至少各包含一个值")
+    configs = [
+        DeliveryEvalConfig(
+            size=size,
+            seed=seed,
+            orders=int(args.orders),
+            vehicles=int(args.vehicles),
+            visibility_radius=int(args.visibility_radius),
+            max_env_actions=int(args.max_env_actions),
+            max_main_turns=(int(args.max_main_turns) if args.max_main_turns is not None else None),
+        )
+        for size in sizes
+        for seed in seeds
+    ]
+    try:
+        for config in configs:
+            build_delivery_env(config)
+    except ValueError as exc:
+        raise SystemExit(f"delivery-eval 配置非法: {exc}")
+    if int(args.repeats) < 1:
+        raise SystemExit("--repeats 须为正整数")
+    if int(args.max_env_actions) < 1:
+        raise SystemExit("--max-env-actions 须为正整数")
+    if args.max_main_turns is not None and int(args.max_main_turns) < 1:
+        raise SystemExit("--max-main-turns 须为正整数")
+    if not (1 <= int(args.option_actions) <= 16):
+        raise SystemExit("--option-actions 须在 1..16")
+    if len(configs) < 2:
+        logger.warning("delivery configs<2 → bootstrap CI 退化；仅作 smoke/pilot")
+
+    report = await run_harness(
+        backend,
+        model,
+        configs,
+        repeats=int(args.repeats),
+        max_cost_usd=float(args.max_cost_usd or dd.get("sandbox_max_cost_usd", 2.0)),
+        temperature=float(dd.get("sandbox_temperature", 0.0)),
+        max_tokens=int(args.max_tokens or 2048),
+        endpoint_id=endpoint_id,
+        thinking=_thinking_arg(args),
+        effort=args.effort,
+        option_actions=int(args.option_actions),
+    )
+    json_path, csv_path = write_delivery_report(report, args.out)
+    print(render_delivery_summary(report))
+    print(f"\n报告 JSON: {json_path}\nper-run CSV: {csv_path}")
+    return {"report": report, "json": str(json_path), "csv": str(csv_path)}

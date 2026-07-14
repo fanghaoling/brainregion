@@ -579,6 +579,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_env_eval.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])
     p_sb_env_eval.add_argument("--out", default=None, help="报告输出目录(默认 .brain-region/sandbox/)")
 
+    p_sb_delivery_eval = p_sb_sub.add_parser(
+        "delivery-eval",
+        help="城区配送成对 A/B:main_only vs grounded 导航执行脑区，统计效率、动作卸载、token 与成本",
+    )
+    p_sb_delivery_eval.add_argument("--main-brain", default=None, help="主脑模型")
+    p_sb_delivery_eval.add_argument("--sizes", default="9", help="地图边长，逗号分隔(默认 9)")
+    p_sb_delivery_eval.add_argument("--seeds", default="0,1", help="场景种子，逗号分隔(默认 0,1)")
+    p_sb_delivery_eval.add_argument("--orders", type=int, default=2, help="每局订单数(1..8;默认 2)")
+    p_sb_delivery_eval.add_argument("--vehicles", type=int, default=2, help="每局车辆数(0..8;默认 2)")
+    p_sb_delivery_eval.add_argument("--visibility-radius", type=int, default=1, help="车辆发现半径(默认 1)")
+    p_sb_delivery_eval.add_argument("--max-env-actions", type=int, default=120, help="每局环境动作预算(默认 120)")
+    p_sb_delivery_eval.add_argument("--max-main-turns", type=int, default=None, help="每局主脑轮次上限")
+    p_sb_delivery_eval.add_argument("--option-actions", type=int, default=16, help="每次脑区执行动作上限(1..16)")
+    p_sb_delivery_eval.add_argument("--repeats", type=int, default=2, help="每个 config 每臂重复次数(默认 2)")
+    p_sb_delivery_eval.add_argument("--max-cost-usd", type=float, default=None, help="全局成本上限")
+    p_sb_delivery_eval.add_argument("--max-tokens", type=int, default=None)
+    p_sb_delivery_eval.add_argument("--thinking", default="off", choices=["off", "on"])
+    p_sb_delivery_eval.add_argument("--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"])
+    p_sb_delivery_eval.add_argument("--out", default=None, help="报告输出目录(默认 .brain-region/sandbox/)")
+
     p_ins = sub.add_parser(
         "inspect",
         help="只读调试窗口（v5.x）：activation/memory/run/calibration 可观测面，不调模型不写",
@@ -1125,6 +1145,8 @@ def main() -> None:
             asyncio.run(sandbox_cli.run_env(args))
         elif args.sandbox_command == "env-eval":
             asyncio.run(sandbox_cli.run_env_eval(args))
+        elif args.sandbox_command == "delivery-eval":
+            asyncio.run(sandbox_cli.run_delivery_eval(args))
         return
     if args.command == "inspect":
         run_inspect(args)

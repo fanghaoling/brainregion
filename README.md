@@ -544,6 +544,31 @@ task and repeat. A one-task pilot receives descriptive `raw_deltas`; bootstrap i
 least two matched tasks, and infrastructure failures are excluded independently for each contrast. Reports contain no
 source snapshots, tool-result bodies, trajectories, or model reasoning.
 
+### Urban Delivery Navigation Pilot
+
+The urban-delivery sandbox tests execution offload on a deterministic road network. The main brain owns order-level
+decisions (`pickup`, `deliver`, and completion), while the grounded navigation Region reads only the same public text
+observation and owns primitive movement. Hidden vehicles become visible only when they enter the configured radius or
+are encountered. A sealed oracle is used after the run to score route efficiency; its map and routes never enter model
+messages.
+
+```powershell
+brain-region sandbox delivery-eval `
+  --main-brain buzz_anthropic/claude-sonnet-5 `
+  --sizes 9 `
+  --seeds 0,1 `
+  --orders 2 `
+  --vehicles 2 `
+  --repeats 2
+```
+
+The matched arms are `main_only` and `navigation_region`. Reports include objective completion, oracle-relative
+efficiency, elapsed simulation time, main and delegated actions, vehicle-triggered replanning, main turns, tokens, and
+cost. Arm order rotates across configs and repeats; a cost-capped half-pair is retained only as an orphan diagnostic and
+is excluded from paired statistics. This first comparison estimates the whole navigation feature package, including
+its disclosed prompt contract and execution trace. A later matched-exposure control is still required to isolate
+execution-policy value from interface exposure.
+
 Compare provider-native thinking and the external scaffold with a matched 2x2 experiment:
 
 ```powershell

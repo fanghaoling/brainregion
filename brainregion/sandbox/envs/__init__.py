@@ -45,10 +45,10 @@ def build_env_system_prompt(env, goal: str, *, memory: bool = False, strategy: b
     """
     custom_builder = getattr(env, "build_system_prompt", None)
     if callable(custom_builder) and not isinstance(env, GridWorld):
-        unsupported = memory or strategy or metronome or topo or path or navigation
+        unsupported = memory or strategy or metronome or topo or path
         if unsupported:
             raise ValueError("该环境尚未接入 GridWorld 专属脑区模式")
-        return custom_builder(goal)
+        return custom_builder(goal, navigation=navigation)
     vocab = ", ".join(getattr(env, "action_vocab", ()))
     ego = bool(getattr(env, "ego_actions", False))  # Phase 4.8 ego-relative(action=forward/turn)
     metronome_note = ""

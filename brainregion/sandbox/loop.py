@@ -1383,6 +1383,7 @@ async def run_agent(
     navigation_autorun_actions: int = 0,  # Phase 4.9 region-first:主脑首轮前自动执行一次 option 并注入轨迹
     option_continuous: bool | None = None,  # 通用参数；None 时回退 navigation_continuous
     navigation_continuous: bool = False,  # Phase 4.10:主脑 act 后事件驱动再唤醒;不按每模型轮盲轮询
+    option_initial_activation: bool = True,  # False=等主脑首次环境动作后再按 continuous 唤醒
     max_option_activations: int = 10,  # 自动 option 唤醒上限(工具显式调用不计入)
     status_injector: Any = None,        # Phase 4.1 metronome:async (step, messages)->(status_str|None, cost_usd);None=现行为
     status_period: int = 3,
@@ -1462,6 +1463,7 @@ async def run_agent(
         int(navigation_autorun_actions) if option_autorun_actions is None else int(option_autorun_actions)
     )
     _option_continuous = bool(navigation_continuous) if option_continuous is None else bool(option_continuous)
+    _option_initial_activation = bool(option_initial_activation)
     _max_option_activations = max(0, int(max_option_activations))
     _effect_clock = 0
     _pending_effect: dict[str, Any] | None = None
@@ -1659,7 +1661,7 @@ async def run_agent(
 
         # Region-first:activate before the first main-model decision.
         initial_decision = scheduler.initial(
-            region_available=_option_region is not None and _env is not None,
+            region_available=_option_initial_activation and _option_region is not None and _env is not None,
             action_budget=_option_autorun_actions,
         )
         if initial_decision.activate:
