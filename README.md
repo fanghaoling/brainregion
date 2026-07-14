@@ -618,6 +618,43 @@ task and repeat. A one-task pilot receives descriptive `raw_deltas`; bootstrap i
 least two matched tasks, and infrastructure failures are excluded independently for each contrast. Reports contain no
 source snapshots, tool-result bodies, trajectories, or model reasoning.
 
+### ARC-AGI-3 Public Environment Pilot
+
+The experimental ARC adapter uses the official [`arc-agi`](https://github.com/arcprize/ARC-AGI) SDK without making
+it a BrainRegion dependency. The SDK currently requires Python 3.12+, while BrainRegion keeps Python 3.10 support.
+Install it only in an experiment environment:
+
+```powershell
+.venv\Scripts\python.exe -m pip install "arc-agi==0.9.9"
+```
+
+Run a zero-model-call, zero-action SDK smoke first. Downloads, recordings, and Matplotlib state stay under the ignored
+`.brain-region/arc-agi/` directory:
+
+```powershell
+$env:MPLCONFIGDIR = ".brain-region/arc-agi/matplotlib"
+.venv\Scripts\python.exe -m brainregion.sandbox.arc_smoke --game ls20
+```
+
+The first main-brain baseline is deliberately content-neutral and region-free. It exposes the official dynamic action
+space and exact 64x64 color-index frame, keeps only the latest visual observation in model context, and records a
+content-free interaction trace with action names, frame-change flags, frame hashes, state, and level progress:
+
+```powershell
+brain-region sandbox arc-env `
+  --game ls20 `
+  --main-brain buzz_anthropic/claude-sonnet-5 `
+  --max-steps 6 `
+  --max-cost-usd 0.05
+```
+
+Each run writes the same content-free summary to `.brain-region/arc-agi/runs/`; official frame/action recordings stay
+under `.brain-region/arc-agi/recordings/`. Neither location is tracked by Git.
+
+This command is a public-environment architecture probe, not an official ARC-AGI-3 score. It does not encode game
+rules or enable memory, strategy, navigation, or benchmark-specific hints. Add Regions only through matched arms after
+the baseline interaction trace identifies a general capability gap.
+
 ### Urban Delivery Navigation Pilot
 
 The urban-delivery sandbox tests execution offload on a deterministic road network. The main brain owns order-level

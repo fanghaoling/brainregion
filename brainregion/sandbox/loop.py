@@ -1057,7 +1057,15 @@ def dispatch_tool(call: ToolCall, *, portable_root: str = "") -> tuple[str, str 
             vocab = tuple(getattr(env, "action_vocab", ()))
             if normalized not in vocab:
                 raise ValueError(f"act: 非法 action {action!r};合法:{list(vocab)}")
-            obs, reward, terminated, info = env.step(normalized)
+            action_data = call.args.get("data")
+            if action_data is not None and not isinstance(action_data, dict):
+                raise ValueError("'data' must be an object when provided")
+            if getattr(env, "supports_action_data", False):
+                obs, reward, terminated, info = env.step(normalized, data=action_data)
+            else:
+                if action_data not in (None, {}):
+                    raise ValueError("this environment does not accept action data")
+                obs, reward, terminated, info = env.step(normalized)
             _last_act_info.set(info)  # Phase 4.8:原 dict 透传 dead-reckon(不经 JSON,opus-7)
             if "already_done" not in info:  # review opus:done 后冗余 act 不重复发 env.step 事件
                 _emit_env_step(normalized, env.render(), obs, reward, terminated, info)
@@ -2289,7 +2297,11 @@ async def run_agent(
             target_kind, target_fingerprint = _progress_target(call)
             target_is_new = target_fingerprint not in _seen_progress_targets
             _seen_progress_targets.add(target_fingerprint)
-            _act_before = _env._agent if (call.tool == "act" and _env is not None) else None
+            _act_before = (
+                getattr(_env, "_agent", None)
+                if call.tool == "act" and _env is not None
+                else None
+            )
             if call.tool in {"recall_map", "plan", "recall_topo", "recall_path", "delegate_navigation"}:
                 traj.region_tool_calls += 1
             _arm_cost_before = traj.total_arm_cost_usd

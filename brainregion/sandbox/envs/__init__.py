@@ -6,6 +6,7 @@ UrbanDeliveryEnv = 多订单取货/配送/返店环境，带动态车辆、可�
 环境可通过 ``build_system_prompt`` 自描述任务规则；observe/act/frames 继续复用同一 runner 协议。
 """
 from .gridworld import GridWorld
+from .arc_agi import ArcAgiEnv
 from .replay import render_replay_html, write_replay_html
 from .urban_delivery import (
     DeliveryOracle,
@@ -197,6 +198,7 @@ def build_env_system_prompt(env, goal: str, *, memory: bool = False, strategy: b
 
 
 __all__ = [
+    "ArcAgiEnv",
     "DeliveryOracle",
     "DeliveryOrder",
     "GridWorld",

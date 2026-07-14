@@ -605,6 +605,26 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_env.add_argument("--random-goal", action="store_true",
                           help="seeded 随机 goal(fog 下优先藏在 start 可见域外,逼探索)")
     p_sb_env.add_argument("--seed", type=int, default=None, help="场景种子(随机 goal/迷宫/配送车辆;默认 0)")
+
+    p_sb_arc_env = p_sb_sub.add_parser(
+        "arc-env",
+        help="实验性 ARC-AGI-3 公共环境基线：动态 observe/act，无专用规则或脑区",
+    )
+    p_sb_arc_env.add_argument("--game", default="ls20", help="公开 ARC-AGI-3 game id")
+    p_sb_arc_env.add_argument("--seed", type=int, default=0)
+    p_sb_arc_env.add_argument("--goal-text", default=None, help="保持通用；不要注入游戏规则")
+    p_sb_arc_env.add_argument("--main-brain", default=None, help="主执行模型引用")
+    p_sb_arc_env.add_argument("--max-steps", type=int, default=8)
+    p_sb_arc_env.add_argument("--max-cost-usd", type=float, default=0.08)
+    p_sb_arc_env.add_argument("--max-tokens", type=int, default=2048)
+    p_sb_arc_env.add_argument("--thinking", default="off", choices=["off", "on"])
+    p_sb_arc_env.add_argument(
+        "--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"]
+    )
+    p_sb_arc_env.add_argument(
+        "--tool-result-lifecycle", default="full", choices=["full", "compact"]
+    )
+    p_sb_arc_env.add_argument("--tool-result-live-reads", type=int, default=3)
     p_sb_env.add_argument("--wall-density", type=float, default=None,
                           help="随机墙密度(0..0.6,占可放格比例;启用需配 --wall-seed)")
     p_sb_env.add_argument("--wall-seed", type=int, default=None,
@@ -1261,6 +1281,8 @@ def main() -> None:
             asyncio.run(sandbox_cli.verify_brain(args))
         elif args.sandbox_command == "env":
             asyncio.run(sandbox_cli.run_env(args))
+        elif args.sandbox_command == "arc-env":
+            asyncio.run(sandbox_cli.run_arc_env(args))
         elif args.sandbox_command == "env-eval":
             asyncio.run(sandbox_cli.run_env_eval(args))
         elif args.sandbox_command == "delivery-eval":

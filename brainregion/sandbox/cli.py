@@ -43,6 +43,7 @@ from .phase_effort_eval import (
     run_phase_effort_eval,
 )
 from .envs import (
+    ArcAgiEnv,
     GridWorld,
     UrbanDeliveryEnv,
     build_env_system_prompt,
@@ -918,6 +919,100 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         except KeyboardInterrupt:
             pass
     return result
+
+
+async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
+    """Run a content-neutral main-brain baseline on a public ARC-AGI-3 game."""
+
+    dd = _defaults_mod.apply()
+    model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
+    if not model_str:
+        raise SystemExit("--main-brain is required (or configure sandbox_main_brain)")
+    if int(args.max_steps) < 1:
+        raise SystemExit("--max-steps must be positive")
+    if float(args.max_cost_usd) <= 0:
+        raise SystemExit("--max-cost-usd must be positive")
+
+    backend, registry = _build_backend(
+        dd,
+        endpoint_ids=_endpoint_ids_for_refs(dd, [model_str]),
+    )
+    model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
+    goal = args.goal_text or (
+        "Explore the unfamiliar environment, infer useful goals and action effects from observations, "
+        "and complete as many levels as possible efficiently."
+    )
+    try:
+        env = ArcAgiEnv.create(str(args.game), seed=int(args.seed))
+    except (RuntimeError, ValueError) as exc:
+        raise SystemExit(str(exc)) from exc
+
+    task = SandboxTask(id=f"arc-agi-3-{args.game}", goal=goal)
+
+    def verify(t, run_dir, *, python_exe=None):
+        del t, run_dir, python_exe
+        return {
+            "tests_green": env.solved,
+            "solve_status": "solved" if env.solved else "tests_fail",
+            "pytest": None,
+            "gold_diff": "",
+        }
+
+    run_dir = make_run_dir(prefix="brainregion-arc-agi-")
+    try:
+        with scoped_env(env):
+            trajectory = await run_agent(
+                backend,
+                model,
+                task,
+                run_dir=run_dir,
+                max_steps=int(args.max_steps),
+                max_env_actions=int(args.max_steps),
+                max_cost_usd=float(args.max_cost_usd),
+                temperature=float(dd.get("sandbox_temperature", 0.0)),
+                max_tokens=int(args.max_tokens),
+                transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
+                consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
+                endpoint_id=endpoint_id,
+                thinking=_thinking_arg(args),
+                effort=args.effort,
+                system_prompt=env.build_system_prompt(goal),
+                verify_fn=verify,
+                visual_ephemeral=True,
+                tool_result_lifecycle=args.tool_result_lifecycle,
+                tool_result_live_reads=int(args.tool_result_live_reads),
+            )
+        snapshot = env.snapshot()
+        run_id = f"arc-agi-3-{int(time.time() * 1000)}"
+        result = {
+            "run_id": run_id,
+            "mode": "arc_agi_3_public_baseline",
+            "game_id": snapshot.get("game_id"),
+            "model": model,
+            "endpoint_id": endpoint_id,
+            "solved": env.solved,
+            "state": snapshot.get("state"),
+            "levels_completed": snapshot.get("levels_completed"),
+            "win_levels": snapshot.get("win_levels"),
+            "environment_actions": sum(
+                step.get("operation") == "act" for step in trajectory.progress_trace
+            ),
+            "model_steps": trajectory.n_steps,
+            "termination": trajectory.termination_reason,
+            "cost_usd": round(trajectory.total_main_cost_usd, 6),
+            "usage": normalize_usage(trajectory.total_main_usage),
+            "workspace_effects": trajectory.workspace_effects,
+            "interaction_trace": list(env.action_trace),
+            "contains_reasoning": False,
+            "contains_frame_content": False,
+        }
+        report_path = write_report(result, Path(".brain-region") / "arc-agi" / "runs")
+        result["report"] = str(report_path)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
+    finally:
+        env.close()
+        cleanup_run_dir(run_dir)
 
 
 def _parse_arm_spec(spec: str):

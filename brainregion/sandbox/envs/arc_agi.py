@@ -1,0 +1,260 @@
+"""Optional ARC-AGI-3 adapter for BrainRegion's generic environment loop.
+
+The module deliberately avoids importing ``arc_agi`` or ``arcengine`` at import
+time. BrainRegion keeps Python 3.10 support while the official SDK currently
+requires Python 3.12 or newer.
+"""
+from __future__ import annotations
+
+import json
+import logging
+import hashlib
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any
+
+
+_BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz"
+_TERMINAL_STATES = frozenset({"WIN", "GAME_OVER"})
+
+
+def _state_name(frame: Any) -> str:
+    state = getattr(frame, "state", "NOT_PLAYED")
+    return str(getattr(state, "value", getattr(state, "name", state)))
+
+
+def _frame_rows(frame: Any) -> tuple[str, list[Any], list[int]]:
+    raw_frames = list(getattr(frame, "frame", ()) or ())
+    if not raw_frames:
+        return "none", [], []
+    raw = raw_frames[-1]
+    rows = raw.tolist() if hasattr(raw, "tolist") else raw
+    normalized = [[int(value) for value in row] for row in rows]
+    palette = sorted({value for row in normalized for value in row})
+    if all(0 <= value < len(_BASE36) for value in palette):
+        return (
+            "base36_grid",
+            ["".join(_BASE36[value] for value in row) for row in normalized],
+            palette,
+        )
+    return "integer_grid", normalized, palette
+
+
+@dataclass
+class ArcAgiEnv:
+    """Adapt an official EnvironmentWrapper without embedding game knowledge."""
+
+    wrapper: Any
+    game_id: str
+    arcade: Any | None = None
+    frames: list[str] = field(default_factory=list)
+    action_trace: list[dict[str, Any]] = field(default_factory=list)
+    total_reward: float = 0.0
+    supports_action_data: bool = True
+    visibility_radius: None = None
+    ego_actions: bool = False
+    _last_frame: Any | None = None
+    _terminated: bool = False
+
+    @classmethod
+    def create(
+        cls,
+        game_id: str,
+        *,
+        seed: int = 0,
+        root: str | Path = ".brain-region/arc-agi",
+        api_key: str = "",
+    ) -> "ArcAgiEnv":
+        """Create an SDK-backed public environment with all artifacts isolated."""
+
+        try:
+            from arc_agi import Arcade
+        except ImportError as exc:
+            raise RuntimeError(
+                "ARC-AGI-3 support requires Python 3.12+ and arc-agi==0.9.9"
+            ) from exc
+
+        base = Path(root)
+        logger = logging.getLogger("brainregion.arc_agi.sdk")
+        logger.handlers = [logging.NullHandler()]
+        logger.propagate = False
+        logger.setLevel(logging.WARNING)
+        arcade = Arcade(
+            arc_api_key=api_key,
+            environments_dir=str(base / "environment_files"),
+            recordings_dir=str(base / "recordings"),
+            logger=logger,
+        )
+        initial_frames: list[Any] = []
+        wrapper = arcade.make(
+            game_id,
+            seed=seed,
+            include_frame_data=True,
+            save_recording=True,
+            renderer=lambda _steps, frame: initial_frames.append(frame),
+        )
+        if wrapper is None:
+            arcade.close_scorecard()
+            raise RuntimeError(f"ARC-AGI-3 game could not be created: {game_id}")
+        env = cls(wrapper=wrapper, game_id=game_id, arcade=arcade)
+        if initial_frames:
+            env._set_initial_frame(initial_frames[-1])
+        else:
+            env.reset()
+        return env
+
+    @property
+    def action_vocab(self) -> tuple[str, ...]:
+        return tuple(action.name.lower() for action in self.wrapper.action_space)
+
+    @property
+    def solved(self) -> bool:
+        return _state_name(self._last_frame) == "WIN" if self._last_frame is not None else False
+
+    def _action_descriptors(self) -> list[dict[str, Any]]:
+        return [
+            {
+                "name": action.name.lower(),
+                "requires_data": bool(action.is_complex()),
+                "data_schema": {"x": "integer 0..63", "y": "integer 0..63"}
+                if action.is_complex()
+                else None,
+            }
+            for action in self.wrapper.action_space
+        ]
+
+    def _snapshot(self) -> dict[str, Any]:
+        if self._last_frame is None:
+            return {
+                "game_id": self.game_id,
+                "state": "NOT_PLAYED",
+                "available_actions": [],
+                "frame_encoding": "none",
+                "frame": [],
+            }
+        encoding, rows, palette = _frame_rows(self._last_frame)
+        return {
+            "game_id": str(getattr(self._last_frame, "game_id", "") or self.game_id),
+            "state": _state_name(self._last_frame),
+            "levels_completed": int(getattr(self._last_frame, "levels_completed", 0) or 0),
+            "win_levels": int(getattr(self._last_frame, "win_levels", 0) or 0),
+            "available_actions": self._action_descriptors(),
+            "frame_encoding": encoding,
+            "palette": palette,
+            "frame": rows,
+        }
+
+    def observation(self) -> str:
+        return json.dumps(self._snapshot(), ensure_ascii=True, separators=(",", ":"))
+
+    def snapshot(self) -> dict[str, Any]:
+        return self._snapshot()
+
+    def render(self) -> str:
+        return self.observation()
+
+    def reset(self, *, seed: int | None = None) -> str:
+        if seed is not None:
+            raise ValueError("ARC-AGI-3 seed is fixed when the SDK wrapper is created")
+        frame = self.wrapper.reset()
+        if frame is None:
+            raise RuntimeError("ARC-AGI-3 reset returned no frame")
+        return self._set_initial_frame(frame)
+
+    def _set_initial_frame(self, frame: Any) -> str:
+        self._last_frame = frame
+        self._terminated = _state_name(frame) in _TERMINAL_STATES
+        self.total_reward = 0.0
+        rendered = self.observation()
+        self.frames = [rendered]
+        self.action_trace = []
+        return rendered
+
+    def step(
+        self,
+        action: str,
+        *,
+        data: dict[str, Any] | None = None,
+    ) -> tuple[str, float, bool, dict[str, Any]]:
+        if self._terminated:
+            return self.observation(), 0.0, True, {"already_done": True}
+
+        normalized = str(action or "").strip().lower()
+        actions = {candidate.name.lower(): candidate for candidate in self.wrapper.action_space}
+        selected = actions.get(normalized)
+        if selected is None:
+            raise ValueError(
+                f"unknown ARC-AGI-3 action {action!r}; available: {sorted(actions)}"
+            )
+        payload = data or {}
+        if selected.is_complex():
+            if data is None:
+                raise ValueError(f"ARC-AGI-3 action {normalized} requires x/y data")
+            selected.validate_data(payload)
+        elif data not in (None, {}):
+            raise ValueError(f"ARC-AGI-3 action {normalized} does not accept data")
+
+        before = int(getattr(self._last_frame, "levels_completed", 0) or 0)
+        before_hash = self._frame_hash()
+        frame = self.wrapper.step(selected, data=payload if selected.is_complex() else None)
+        if frame is None:
+            raise RuntimeError("ARC-AGI-3 step returned no frame")
+        self._last_frame = frame
+        state = _state_name(frame)
+        self._terminated = state in _TERMINAL_STATES
+        completed = int(getattr(frame, "levels_completed", 0) or 0)
+        reward = float(max(0, completed - before))
+        self.total_reward += reward
+        rendered = self.observation()
+        self.frames.append(rendered)
+        after_hash = self._frame_hash()
+        self.action_trace.append(
+            {
+                "index": len(self.action_trace),
+                "action": normalized,
+                "uses_data": bool(payload),
+                "frame_changed": before_hash != after_hash,
+                "frame_hash": after_hash,
+                "state": state,
+                "levels_completed": completed,
+                "available_action_count": len(self.action_vocab),
+            }
+        )
+        return rendered, reward, self._terminated, {
+            "state": state,
+            "levels_completed": completed,
+            "win_levels": int(getattr(frame, "win_levels", 0) or 0),
+            "available_actions": list(self.action_vocab),
+        }
+
+    def _frame_hash(self) -> str:
+        if self._last_frame is None:
+            return ""
+        encoding, rows, _palette = _frame_rows(self._last_frame)
+        payload = json.dumps([encoding, rows], ensure_ascii=True, separators=(",", ":"))
+        return hashlib.sha256(payload.encode("ascii")).hexdigest()[:16]
+
+    def build_system_prompt(self, goal: str, *, navigation: bool = False) -> str:
+        if navigation:
+            raise ValueError("ARC-AGI-3 navigation region is not connected yet")
+        return (
+            "You control an unfamiliar turn-based visual environment with no provided rules. "
+            "Infer useful goals and action effects only from observations. Do not assume action meanings.\n"
+            f"Objective: {goal}\n"
+            "Reply with exactly one JSON object per turn. Observe with "
+            '{"thought":"...","tool":"observe","args":{}}. '
+            "Act with "
+            '{"thought":"...","tool":"act","args":{"action":"action1"}}. '
+            "When an available action says requires_data=true, include "
+            '"data":{"x":0,"y":0} in args. '
+            "Use only actions listed by the latest observation. Mark done only after the environment reports WIN "
+            "or when no productive experiment remains. The base36 frame is an exact color-index grid, not text."
+        )
+
+    def close(self) -> None:
+        if self.arcade is not None:
+            self.arcade.close_scorecard()
+            self.arcade = None
+
+
+__all__ = ["ArcAgiEnv"]
