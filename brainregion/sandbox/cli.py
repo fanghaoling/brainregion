@@ -38,6 +38,10 @@ from .functional_region_eval import (
     render_functional_region_eval_summary,
     run_functional_region_eval,
 )
+from .phase_effort_eval import (
+    render_phase_effort_eval_summary,
+    run_phase_effort_eval,
+)
 from .envs import (
     GridWorld,
     UrbanDeliveryEnv,
@@ -504,6 +508,48 @@ async def run_cognitive_eval(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit(str(exc)) from exc
     path = write_report(report, args.out)
     print(render_cognitive_eval_summary(report))
+    print(f"\nReport: {path}")
+    return {"report": report, "path": str(path)}
+
+
+async def run_phase_effort_evaluation(args: argparse.Namespace) -> dict[str, Any]:
+    """Run the fixed-off versus phase-active matched fixture evaluation."""
+    dd = _defaults_mod.apply()
+    model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
+    if not model_str:
+        raise SystemExit("--main-brain is required (or configure sandbox_main_brain)")
+    backend, registry = _build_backend(
+        dd,
+        endpoint_ids=_endpoint_ids_for_refs(dd, [model_str]),
+    )
+    model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
+    tasks = _resolve_tasks(args)
+    try:
+        report = await run_phase_effort_eval(
+            backend,
+            model,
+            tasks,
+            endpoint_id=endpoint_id,
+            repeats=int(args.repeats),
+            max_steps=int(args.max_steps or dd.get("sandbox_max_steps", 10)),
+            max_cost_usd=float(args.max_cost_usd or dd.get("sandbox_max_cost_usd", 0.5)),
+            max_total_cost_usd=(
+                float(args.max_total_cost_usd)
+                if args.max_total_cost_usd is not None
+                else None
+            ),
+            temperature=float(dd.get("sandbox_temperature", 0.0)),
+            max_tokens=int(args.max_tokens or 2048),
+            transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
+            consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
+            tool_result_lifecycle=args.tool_result_lifecycle,
+            tool_result_live_reads=int(args.tool_result_live_reads),
+            bootstrap_samples=args.bootstrap_samples,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    path = write_report(report, args.out)
+    print(render_phase_effort_eval_summary(report))
     print(f"\nReport: {path}")
     return {"report": report, "path": str(path)}
 

@@ -398,6 +398,41 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sb_cognitive.add_argument("--out", default=None, help="Report directory")
 
+    p_sb_phase_effort = p_sb_sub.add_parser(
+        "phase-effort-eval",
+        help="Matched fixed thinking-off versus phase-active effort routing",
+    )
+    p_sb_phase_effort.add_argument("--tasks", required=True, help="Comma-separated fixture ids")
+    p_sb_phase_effort.add_argument(
+        "--main-brain", default=None, help="Main executor model reference"
+    )
+    p_sb_phase_effort.add_argument("--repeats", type=int, default=1)
+    p_sb_phase_effort.add_argument("--max-steps", type=int, default=None)
+    p_sb_phase_effort.add_argument(
+        "--max-cost-usd", type=float, default=None, help="Equal per-arm run cost limit"
+    )
+    p_sb_phase_effort.add_argument(
+        "--max-total-cost-usd",
+        type=float,
+        default=None,
+        help="Optional experiment cap; remaining budget is split equally within each pair",
+    )
+    p_sb_phase_effort.add_argument("--max-tokens", type=int, default=None)
+    p_sb_phase_effort.add_argument("--bootstrap-samples", type=int, default=None)
+    p_sb_phase_effort.add_argument(
+        "--tool-result-lifecycle",
+        default="full",
+        choices=["full", "compact"],
+        help="Common tool-result transcript policy for both arms",
+    )
+    p_sb_phase_effort.add_argument(
+        "--tool-result-live-reads",
+        type=int,
+        default=3,
+        help="Recent full read_text results retained in compact mode",
+    )
+    p_sb_phase_effort.add_argument("--out", default=None, help="Report directory")
+
     p_sb_functional_regions = p_sb_sub.add_parser(
         "functional-region-eval",
         help="Matched main/passive/evidence/evidence+verification functional Region evaluation",
@@ -1198,6 +1233,8 @@ def main() -> None:
             asyncio.run(sandbox_cli.run_delegation_eval(args))
         elif args.sandbox_command == "cognitive-eval":
             asyncio.run(sandbox_cli.run_cognitive_eval(args))
+        elif args.sandbox_command == "phase-effort-eval":
+            asyncio.run(sandbox_cli.run_phase_effort_evaluation(args))
         elif args.sandbox_command == "functional-region-eval":
             asyncio.run(sandbox_cli.run_functional_regions_eval(args))
         elif args.sandbox_command == "tool-result-eval":

@@ -533,6 +533,24 @@ Active routing is explicit and mutually exclusive with shadow mode. It emits `sa
 all default runs keep their previous fixed controls. `control_scope=backend_request` means the trace proves which
 parameters BrainRegion sent; provider-side thinking is not claimed unless separate response telemetry confirms it.
 
+Use the dedicated matched evaluation before drawing conclusions from active routing. It alternates arm order across
+task/repeat pairs, gives both arms fresh sandboxes and equal per-run budgets, and bootstraps task-level paired deltas:
+
+```powershell
+brain-region sandbox phase-effort-eval `
+  --tasks off_by_one,settings_precedence `
+  --main-brain buzz_anthropic/claude-sonnet-5 `
+  --repeats 2 `
+  --max-cost-usd 0.08 `
+  --max-total-cost-usd 0.32
+```
+
+The control arm keeps `thinking=false` while running the policy in shadow mode; the treatment applies phase-active
+controls. Reports separate objective solve and protocol completion, token/cost deltas, thinking requests, recovery
+entries and recovery span. A global cap stops only between complete matched pairs. Reports remain `INCONCLUSIVE` when
+there are fewer than two independent task units, provider thinking is only request-level telemetry, the planned matrix
+is cost-capped, or a matched pair fails infrastructure checks.
+
 ### Functional Region Workbench Pilot
 
 The code sandbox can split grounded tool work from repair decisions without adding persona-style model experts.
