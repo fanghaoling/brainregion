@@ -237,6 +237,8 @@ class PhaseController:
             return self._transition(step, CognitivePhase.VERIFY, "verification_requested")
         if operation in _EXECUTION_OPERATIONS:
             return self._transition(step, CognitivePhase.EXECUTE, "effectful_action_selected")
+        if self.phase is CognitivePhase.PLAN and operation in _INFORMATION_OPERATIONS:
+            return self._transition(step, CognitivePhase.EXECUTE, "plan_execution_started")
         return None
 
     def after_operation(
@@ -250,11 +252,18 @@ class PhaseController:
         target_is_new: bool = True,
     ) -> PhaseTransition | None:
         self.operations += 1
-        self.steps_since_effect += 1
-        if target_is_new:
-            self.repeated_targets = max(0, self.repeated_targets - 1)
+        productive_information = (
+            operation in _INFORMATION_OPERATIONS and target_is_new and not error
+        )
+        if productive_information:
+            self.steps_since_effect = 0
         else:
-            self.repeated_targets += 1
+            self.steps_since_effect += 1
+        if operation in _INFORMATION_OPERATIONS:
+            if target_is_new:
+                self.repeated_targets = max(0, self.repeated_targets - 1)
+            else:
+                self.repeated_targets += 1
 
         if error:
             self.consecutive_errors += 1
@@ -267,10 +276,12 @@ class PhaseController:
         if verification_passed is True:
             self.failed_verification = False
             self.steps_since_effect = 0
+            self.repeated_targets = 0
             return self._transition(step, CognitivePhase.SYNTHESIZE, "verification_passed")
         if workspace_effect:
             self.failed_verification = False
             self.steps_since_effect = 0
+            self.repeated_targets = 0
             return self._transition(
                 step,
                 CognitivePhase.VERIFY,
@@ -278,6 +289,8 @@ class PhaseController:
             )
         if self.phase is CognitivePhase.UNDERSTAND and operation in _INFORMATION_OPERATIONS:
             return self._transition(step, CognitivePhase.PLAN, "initial_evidence_collected")
+        if self.phase is CognitivePhase.RECOVER and operation in _INFORMATION_OPERATIONS:
+            return self._transition(step, CognitivePhase.PLAN, "recovery_evidence_collected")
         return None
 
     def observe_model_failure(self, *, step: int, reason: str) -> PhaseTransition | None:

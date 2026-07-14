@@ -126,6 +126,60 @@ def test_repeated_failures_raise_stagnation_without_model_reasoning():
     assert snapshot["contains_reasoning"] is False
 
 
+def test_productive_investigation_leaves_plan_and_does_not_fake_stagnation():
+    task = SandboxTask(
+        id="investigation",
+        goal="Inspect several files, patch one, and verify.",
+        files={"settings.py": "VALUE = 1\n", "loader.py": "pass\n"},
+        tests={"test_settings.py": "def test_ok(): assert True\n"},
+    )
+    controller = PhaseController.for_task(task)
+
+    controller.after_operation(
+        step=0,
+        operation="search_text",
+        target_is_new=True,
+    )
+    assert controller.phase is CognitivePhase.PLAN
+
+    transition = controller.before_operation(step=1, operation="read_text")
+    assert transition is not None
+    assert transition.reason == "plan_execution_started"
+    assert transition.current is CognitivePhase.EXECUTE
+    controller.after_operation(
+        step=1,
+        operation="read_text",
+        target_is_new=True,
+    )
+    controller.after_operation(
+        step=2,
+        operation="search_text",
+        target_is_new=True,
+    )
+
+    assert controller.phase is CognitivePhase.EXECUTE
+    assert controller.stagnation == 0.0
+    assert controller.tier is ComputeTier.ECONOMY
+
+    controller.after_operation(
+        step=3,
+        operation="read_text",
+        target_is_new=False,
+    )
+    assert controller.stagnation == 0.5
+
+    controller.before_operation(step=4, operation="apply_text_patch")
+    transition = controller.after_operation(
+        step=4,
+        operation="apply_text_patch",
+        workspace_effect=True,
+        target_is_new=False,
+    )
+    assert transition is not None and transition.current is CognitivePhase.VERIFY
+    assert controller.stagnation == 0.0
+    assert controller.tier is ComputeTier.DETERMINISTIC
+
+
 class _ScriptBackend:
     def __init__(self, script: list[str]) -> None:
         self.script = script

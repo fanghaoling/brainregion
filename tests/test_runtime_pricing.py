@@ -93,6 +93,15 @@ def test_deepseek_builtin_price_estimates_openai_compatible_usage():
     assert source == "builtin"
 
 
+def test_sonnet_5_builtin_uses_current_introductory_list_price():
+    usage = {"prompt_tokens": 1_000_000, "completion_tokens": 1_000_000}
+
+    cost, source = estimate_cost_usd("anthropic/claude-sonnet-5", usage)
+
+    assert cost == 12.0
+    assert source == "builtin"
+
+
 def test_model_usage_payload_replaces_unknown_provider_zero_with_known_estimate():
     payload = model_usage_payload(
         provider="openai",
@@ -108,6 +117,22 @@ def test_model_usage_payload_replaces_unknown_provider_zero_with_known_estimate(
     expected = (1_000 * (1.0 / 7.2) + 500 * (2.0 / 7.2)) / 1_000_000
     assert payload["cost_usd"] == expected
     assert payload["cost_source"] == "builtin"
+
+
+def test_model_usage_payload_does_not_treat_unknown_provider_zero_as_free():
+    payload = model_usage_payload(
+        provider="anthropic",
+        model="future-model",
+        resolved_model="anthropic/future-model",
+        endpoint_id="relay",
+        usage={"prompt_tokens": 1_000, "completion_tokens": 500},
+        cost_usd=0.0,
+        latency_ms=10,
+        status="ok",
+    )
+
+    assert payload["cost_usd"] is None
+    assert payload["cost_source"] == "missing_price"
 
 
 def test_price_for_unknown_model_missing():

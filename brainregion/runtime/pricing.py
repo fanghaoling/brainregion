@@ -24,6 +24,9 @@ _BUILTIN_PRICES: dict[str, ModelPrice] = {
     "claude-opus-4-7": ModelPrice("claude-opus-4-7", 5.0, 25.0),
     "claude-opus-4-6": ModelPrice("claude-opus-4-6", 5.0, 25.0),
     "claude-sonnet-4-6": ModelPrice("claude-sonnet-4-6", 3.0, 15.0),
+    # Anthropic introductory list price through 2026-08-31. Override via
+    # model_prices when a relay uses different billing or after the launch window.
+    "claude-sonnet-5": ModelPrice("claude-sonnet-5", 2.0, 10.0),
     "claude-haiku-4-5": ModelPrice("claude-haiku-4-5", 1.0, 5.0),
     "claude-fable-5": ModelPrice("claude-fable-5", 10.0, 50.0),
     "gpt-4o": ModelPrice("gpt-4o", 2.5, 10.0),
@@ -142,14 +145,12 @@ def model_usage_payload(
 ) -> dict[str, Any]:
     estimated_cost, price_source = estimate_cost_usd(resolved_model or model, usage)
     provider_cost = float(cost_usd) if cost_usd is not None else None
-    # LiteLLM reports 0.0 for some OpenAI-compatible models whose price is
-    # unknown to its own registry. Prefer a known positive local estimate in
-    # that case; a genuinely free model still remains zero when its configured
-    # estimate is also zero.
-    use_provider_cost = provider_cost is not None and (
-        provider_cost > 0 or estimated_cost is None or estimated_cost <= 0
-    )
+    # LiteLLM reports 0.0 for some gateway aliases whose price is unknown to
+    # its registry. Only trust a positive provider value; otherwise prefer a
+    # local estimate. A configured zero price still remains zero with source=config.
+    use_provider_cost = provider_cost is not None and provider_cost > 0
     final_cost = provider_cost if use_provider_cost else estimated_cost
+    cost_source = "provider" if use_provider_cost else price_source
     return {
         "provider": provider,
         "model": model,
@@ -159,7 +160,7 @@ def model_usage_payload(
         "usage": normalize_usage(usage),
         "raw_usage": usage or {},
         "cost_usd": final_cost,
-        "cost_source": "provider" if use_provider_cost else price_source,
+        "cost_source": cost_source,
         "latency_ms": latency_ms,
         "status": status,
         "error": error,
