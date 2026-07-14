@@ -97,6 +97,8 @@ async def run_cognitive_scaffold_eval(
     effort: str | None = None,
     scaffold_mode: str = "runtime_checkpoint",
     checkpoint_period: int = 3,
+    tool_result_lifecycle: str = "full",
+    tool_result_live_reads: int = 3,
     run_id: str = "",
     bootstrap_samples: int | None = None,
 ) -> dict[str, Any]:
@@ -114,6 +116,14 @@ async def run_cognitive_scaffold_eval(
         or checkpoint_period <= 0
     ):
         raise ValueError("checkpoint_period must be a positive integer")
+    if tool_result_lifecycle not in {"full", "compact"}:
+        raise ValueError(f"unknown tool result lifecycle mode: {tool_result_lifecycle!r}")
+    if (
+        isinstance(tool_result_live_reads, bool)
+        or not isinstance(tool_result_live_reads, int)
+        or tool_result_live_reads < 0
+    ):
+        raise ValueError("tool_result_live_reads must be a non-negative integer")
     selected_arms = _selected_arms(arms)
     run_id = run_id or f"cognitive-{int(time.time() * 1000)}"
     cases: list[dict[str, Any]] = []
@@ -144,6 +154,8 @@ async def run_cognitive_scaffold_eval(
                         cognitive_scaffold=arm.external_scaffold,
                         cognitive_scaffold_mode=scaffold_mode,
                         cognitive_checkpoint_period=checkpoint_period,
+                        tool_result_lifecycle=tool_result_lifecycle,
+                        tool_result_live_reads=tool_result_live_reads,
                     )
                     actual_model_calls += trajectory.n_steps
                     actual_cost_usd += float(trajectory.total_main_cost_usd)
@@ -157,6 +169,7 @@ async def run_cognitive_scaffold_eval(
                         if trajectory.cognitive_state
                         else _disabled_scaffold_metrics()
                     )
+                    lifecycle_metrics = trajectory.tool_result_lifecycle
                     cases.append(
                         {
                             "task_id": task.id,
@@ -180,6 +193,7 @@ async def run_cognitive_scaffold_eval(
                             "reasoning_tokens": usage["reasoning_tokens"],
                             "cost_usd": float(trajectory.total_main_cost_usd),
                             "cognitive_scaffold": scaffold_metrics,
+                            "tool_result_lifecycle": lifecycle_metrics,
                             "progress_trace": trajectory.progress_trace,
                             "contains_state_content": False,
                             "contains_reasoning": False,
@@ -208,6 +222,10 @@ async def run_cognitive_scaffold_eval(
                             "reasoning_tokens": 0,
                             "cost_usd": 0.0,
                             "cognitive_scaffold": _disabled_scaffold_metrics(),
+                            "tool_result_lifecycle": _disabled_lifecycle_metrics(
+                                tool_result_lifecycle,
+                                tool_result_live_reads,
+                            ),
                             "progress_trace": [],
                             "error": f"runner_error: {exc}"[:500],
                             "contains_state_content": False,
@@ -230,6 +248,8 @@ async def run_cognitive_scaffold_eval(
         "effort": effort,
         "scaffold_mode": scaffold_mode,
         "checkpoint_period": checkpoint_period,
+        "tool_result_lifecycle": tool_result_lifecycle,
+        "tool_result_live_reads": tool_result_live_reads,
         "thinking_control": classify_thinking_control(model),
         "max_steps": max_steps,
         "actual_model_calls": actual_model_calls,
@@ -272,6 +292,19 @@ def summarize_cognitive_records(
             if (record.get("cognitive_scaffold") or {}).get("mode") == "runtime_checkpoint"
         ]
         input_attribution = _summarize_input_attribution(valid)
+        compacted_results = [
+            int((record.get("tool_result_lifecycle") or {}).get("compacted_results") or 0)
+            for record in valid
+        ]
+        estimated_removed = [
+            int(
+                (record.get("tool_result_lifecycle") or {}).get(
+                    "estimated_input_tokens_avoided"
+                )
+                or 0
+            )
+            for record in valid
+        ]
         per_arm[arm] = {
             "n_runs": len(arm_records),
             "n_valid_runs": len(valid),
@@ -290,6 +323,12 @@ def summarize_cognitive_records(
                 else None
             ),
             "input_attribution": input_attribution,
+            "mean_compacted_tool_results": (
+                sum(compacted_results) / len(compacted_results) if compacted_results else None
+            ),
+            "mean_estimated_tool_input_tokens_avoided": (
+                sum(estimated_removed) / len(estimated_removed) if estimated_removed else None
+            ),
             "infrastructure_failures": len(arm_records) - len(valid),
         }
 
@@ -369,6 +408,7 @@ def render_cognitive_eval_summary(report: dict[str, Any]) -> str:
         f"control={((report.get('execution') or {}).get('thinking_control') or {}).get('mode')} "
         f"scaffold={((report.get('execution') or {}).get('scaffold_mode'))} "
         f"period={((report.get('execution') or {}).get('checkpoint_period'))} "
+        f"tool_results={((report.get('execution') or {}).get('tool_result_lifecycle'))} "
         f"actual_cost=${float((report.get('execution') or {}).get('actual_cost_usd') or 0):.4f}",
     ]
     for arm, summary in (report.get("per_arm") or {}).items():
@@ -381,7 +421,9 @@ def render_cognitive_eval_summary(report: dict[str, Any]) -> str:
             f"checkpoints={summary.get('mean_checkpoint_count')} "
             f"input_mix(tool={_mean_category_tokens(input_categories, 'tool_transcript')},"
             f"checkpoint={_mean_category_tokens(input_categories, 'checkpoint')},"
-            f"model={_mean_category_tokens(input_categories, 'model_transcript')})"
+            f"model={_mean_category_tokens(input_categories, 'model_transcript')}) "
+            f"receipts={summary.get('mean_compacted_tool_results')} "
+            f"estimated_avoided={summary.get('mean_estimated_tool_input_tokens_avoided')}"
         )
     for name, effect in (report.get("effects") or {}).items():
         point = ((effect.get("deltas") or {}).get("solved") or {}).get("point")
@@ -395,6 +437,25 @@ def _disabled_scaffold_metrics() -> dict[str, Any]:
     return {
         "enabled": False,
         "contains_state_content": False,
+        "contains_reasoning": False,
+    }
+
+
+def _disabled_lifecycle_metrics(mode: str, live_read_results: int) -> dict[str, Any]:
+    return {
+        "mode": mode,
+        "enabled": mode == "compact",
+        "policy": "evidence_pinned_receipt_v1",
+        "live_read_results": live_read_results,
+        "tool_results_observed": 0,
+        "compaction_passes": 0,
+        "compacted_results": 0,
+        "active_receipts": 0,
+        "body_characters_removed": 0,
+        "body_estimated_tokens_removed": 0,
+        "estimated_input_tokens_avoided": 0,
+        "compacted_by_tool": {},
+        "contains_result_content": False,
         "contains_reasoning": False,
     }
 

@@ -14,6 +14,7 @@ from pathlib import Path
 
 import pytest
 
+from brainregion.core.context_loader import estimate_context_tokens
 from brainregion.providers.base import ModelResponse
 from brainregion.providers.litellm import LiteLLMBackend
 from brainregion.sandbox import (
@@ -307,6 +308,107 @@ def test_loop_records_per_step_and_total_model_usage():
         assert out["steps"][0]["main_input_attribution"] == attribution
     finally:
         cleanup_run_dir(run_dir)
+
+
+def test_loop_compacts_consumed_tool_results_before_provider_call():
+    class CapturingBackend(MockBackend):
+        def __init__(self, script):
+            super().__init__(script)
+            self.message_calls = []
+
+        async def complete_messages(self, messages, **kwargs):
+            self.message_calls.append(messages)
+            return await super().complete_messages(messages, **kwargs)
+
+    task, run_dir = _materialized("off_by_one")
+    backend = CapturingBackend(
+        [
+            _J({"thought": "read source", "tool": "read_text", "args": {"path": "ranges.py"}}),
+            _J({"thought": "read tests", "tool": "read_text", "args": {"path": "test_ranges.py"}}),
+            _J({"thought": "stop", "done": True, "answer": "observed"}),
+        ]
+    )
+    try:
+        trajectory = asyncio.run(
+            run_agent(
+                backend,
+                "mock",
+                task,
+                run_dir=run_dir,
+                tool_result_lifecycle="compact",
+                tool_result_live_reads=0,
+            )
+        )
+    finally:
+        cleanup_run_dir(run_dir)
+
+    assert "tool_result_receipt" not in json.dumps(backend.message_calls[1])
+    final_messages = backend.message_calls[2]
+    assert sum("tool_result_receipt" in message["content"] for message in final_messages) == 1
+    assert all(set(message) <= {"role", "content"} for message in final_messages)
+    metrics = trajectory.tool_result_lifecycle
+    assert metrics["mode"] == "compact"
+    assert metrics["compacted_results"] == 1
+    assert metrics["compacted_by_tool"] == {"read_text": 1}
+    assert metrics["body_estimated_tokens_removed"] > 0
+    assert metrics["estimated_input_tokens_avoided"] > 0
+
+
+def test_compact_lifecycle_reduces_usage_aware_backend_input_tokens():
+    class UsageAwareBackend:
+        def __init__(self, script):
+            self.script = script
+            self.index = 0
+
+        async def complete_messages(self, messages, **kwargs):
+            content = self.script[self.index]
+            self.index += 1
+            input_tokens = sum(
+                estimate_context_tokens(str(message.get("content") or ""))
+                for message in messages
+            )
+            return ModelResponse(
+                model="mock",
+                content=content,
+                usage={
+                    "input_tokens": input_tokens,
+                    "output_tokens": 1,
+                    "total_tokens": input_tokens + 1,
+                },
+            )
+
+    script = [
+        _J({"thought": "read source", "tool": "read_text", "args": {"path": "ranges.py"}}),
+        _J({"thought": "read tests", "tool": "read_text", "args": {"path": "test_ranges.py"}}),
+        _J({"thought": "stop", "done": True, "answer": "observed"}),
+    ]
+
+    def run(mode):
+        task, run_dir = _materialized("off_by_one")
+        try:
+            return asyncio.run(
+                run_agent(
+                    UsageAwareBackend(script),
+                    "mock",
+                    task,
+                    run_dir=run_dir,
+                    tool_result_lifecycle=mode,
+                    tool_result_live_reads=0,
+                )
+            )
+        finally:
+            cleanup_run_dir(run_dir)
+
+    full = run("full")
+    compact = run("compact")
+
+    assert compact.total_main_usage["input_tokens"] < full.total_main_usage["input_tokens"]
+    assert compact.main_input_attribution["categories"]["tool_transcript"][
+        "actual_input_tokens"
+    ] < full.main_input_attribution["categories"]["tool_transcript"][
+        "actual_input_tokens"
+    ]
+    assert compact.tool_result_lifecycle["compacted_results"] == 1
 
 
 def test_loop_consecutive_parse_error_early_stop():

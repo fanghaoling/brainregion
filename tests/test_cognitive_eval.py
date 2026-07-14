@@ -153,6 +153,8 @@ def test_cognitive_eval_runs_matched_matrix_without_private_state_in_report():
             max_cost_usd=1.0,
             effort="medium",
             checkpoint_period=2,
+            tool_result_lifecycle="compact",
+            tool_result_live_reads=1,
             bootstrap_samples=20,
         )
     )
@@ -168,6 +170,8 @@ def test_cognitive_eval_runs_matched_matrix_without_private_state_in_report():
     assert report["execution"]["effort"] == "medium"
     assert report["execution"]["scaffold_mode"] == "runtime_checkpoint"
     assert report["execution"]["checkpoint_period"] == 2
+    assert report["execution"]["tool_result_lifecycle"] == "compact"
+    assert report["execution"]["tool_result_live_reads"] == 1
     assert report["native_thinking_requested"] is True
     assert report["native_thinking_observed"] is True
     assert report["control_reasoning_observed"] is False
@@ -220,6 +224,10 @@ def test_cognitive_eval_runs_matched_matrix_without_private_state_in_report():
     assert "evidence_refs" not in rendered
     assert "result_preview" not in rendered
     assert all(case["contains_tool_results"] is False for case in report["cases"])
+    assert all(
+        case["tool_result_lifecycle"]["contains_result_content"] is False
+        for case in report["cases"]
+    )
 
 
 def _record(task_id: str, arm: str, solved: bool) -> dict:
@@ -273,6 +281,24 @@ def test_cognitive_eval_rejects_unknown_or_duplicate_arms():
         asyncio.run(run_cognitive_scaffold_eval(backend, "main", [task], scaffold_mode="unknown"))
     with pytest.raises(ValueError, match="checkpoint_period must be a positive integer"):
         asyncio.run(run_cognitive_scaffold_eval(backend, "main", [task], checkpoint_period=0))
+    with pytest.raises(ValueError, match="unknown tool result lifecycle mode"):
+        asyncio.run(
+            run_cognitive_scaffold_eval(
+                backend,
+                "main",
+                [task],
+                tool_result_lifecycle="unknown",
+            )
+        )
+    with pytest.raises(ValueError, match="tool_result_live_reads must be a non-negative integer"):
+        asyncio.run(
+            run_cognitive_scaffold_eval(
+                backend,
+                "main",
+                [task],
+                tool_result_live_reads=-1,
+            )
+        )
     assert backend.calls == []
 
 
@@ -294,6 +320,8 @@ def test_cognitive_eval_cli_contract():
     assert args.effort == "medium"
     assert args.scaffold_mode == "runtime_checkpoint"
     assert args.checkpoint_period == 3
+    assert args.tool_result_lifecycle == "full"
+    assert args.tool_result_live_reads == 3
 
     run_args = build_parser().parse_args(
         ["sandbox", "run", "--task", "off_by_one", "--cognitive-scaffold"]
@@ -301,3 +329,5 @@ def test_cognitive_eval_cli_contract():
     assert run_args.cognitive_scaffold is True
     assert run_args.cognitive_mode == "runtime_checkpoint"
     assert run_args.checkpoint_period == 3
+    assert run_args.tool_result_lifecycle == "full"
+    assert run_args.tool_result_live_reads == 3

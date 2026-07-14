@@ -88,12 +88,16 @@ def test_loop_threads_runtime_checkpoint_options_to_inner_agent(monkeypatch):
             cognitive_scaffold=True,
             cognitive_scaffold_mode="runtime_checkpoint",
             cognitive_checkpoint_period=4,
+            tool_result_lifecycle="compact",
+            tool_result_live_reads=2,
         )
     )
 
     assert calls[0]["cognitive_scaffold"] is True
     assert calls[0]["cognitive_scaffold_mode"] == "runtime_checkpoint"
     assert calls[0]["cognitive_checkpoint_period"] == 4
+    assert calls[0]["tool_result_lifecycle"] == "compact"
+    assert calls[0]["tool_result_live_reads"] == 2
 
 
 def test_loop_max_iterations(monkeypatch):
@@ -500,6 +504,8 @@ def test_run_expert_brain_loop_threads_runtime_checkpoint_options(monkeypatch):
                 cognitive_scaffold=True,
                 cognitive_mode="runtime_checkpoint",
                 checkpoint_period=4,
+                tool_result_lifecycle="compact",
+                tool_result_live_reads=2,
             ),
             None,
             "m",
@@ -512,6 +518,8 @@ def test_run_expert_brain_loop_threads_runtime_checkpoint_options(monkeypatch):
     assert called["cognitive_scaffold"] is True
     assert called["cognitive_scaffold_mode"] == "runtime_checkpoint"
     assert called["cognitive_checkpoint_period"] == 4
+    assert called["tool_result_lifecycle"] == "compact"
+    assert called["tool_result_live_reads"] == 2
 
 
 def test_run_expert_brain_loop_threads_python_exe(monkeypatch):

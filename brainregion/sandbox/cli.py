@@ -158,6 +158,8 @@ def _agent_kwargs(args: argparse.Namespace, dd: dict[str, Any], endpoint_id: str
             getattr(args, "cognitive_mode", "runtime_checkpoint")
         ),
         "cognitive_checkpoint_period": int(getattr(args, "checkpoint_period", 3)),
+        "tool_result_lifecycle": str(getattr(args, "tool_result_lifecycle", "full")),
+        "tool_result_live_reads": int(getattr(args, "tool_result_live_reads", 3)),
     }
 
 
@@ -468,6 +470,8 @@ async def run_cognitive_eval(args: argparse.Namespace) -> dict[str, Any]:
             effort=args.effort,
             scaffold_mode=args.scaffold_mode,
             checkpoint_period=int(args.checkpoint_period),
+            tool_result_lifecycle=args.tool_result_lifecycle,
+            tool_result_live_reads=int(args.tool_result_live_reads),
             bootstrap_samples=args.bootstrap_samples,
         )
     except ValueError as exc:

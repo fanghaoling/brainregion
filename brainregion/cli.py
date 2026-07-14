@@ -226,6 +226,18 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
         help="runtime_checkpoint 的最长周期步数(默认 3；错误和验证失败可提前触发)",
     )
+    p_sb_run.add_argument(
+        "--tool-result-lifecycle",
+        default="full",
+        choices=["full", "compact"],
+        help="工具结果上下文策略(full=完整保留；compact=证据约束 receipt 卸载)",
+    )
+    p_sb_run.add_argument(
+        "--tool-result-live-reads",
+        type=int,
+        default=3,
+        help="compact 模式保持完整的最近 read_text 结果数(默认 3)",
+    )
     p_sb_run.add_argument("--keep", action="store_true", help="失败时保留 run_dir 供检视")
     # --- worktree 模式(真实仓库任务)---
     p_sb_run.add_argument("--worktree", action="store_true",
@@ -326,6 +338,18 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=3,
         help="Maximum objective-event interval between runtime checkpoints",
+    )
+    p_sb_cognitive.add_argument(
+        "--tool-result-lifecycle",
+        default="full",
+        choices=["full", "compact"],
+        help="Tool-result transcript policy applied to every selected arm",
+    )
+    p_sb_cognitive.add_argument(
+        "--tool-result-live-reads",
+        type=int,
+        default=3,
+        help="Recent full read_text results retained in compact mode",
     )
     p_sb_cognitive.add_argument("--out", default=None, help="Report directory")
 

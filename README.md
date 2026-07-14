@@ -488,7 +488,9 @@ brain-region sandbox run `
   --main-brain modelbridge_anthropic/claude-sonnet-5 `
   --cognitive-scaffold `
   --cognitive-mode runtime_checkpoint `
-  --checkpoint-period 3
+  --checkpoint-period 3 `
+  --tool-result-lifecycle compact `
+  --tool-result-live-reads 3
 ```
 
 Compare provider-native thinking and the external scaffold with a matched 2x2 experiment:
@@ -499,6 +501,8 @@ brain-region sandbox cognitive-eval `
   --main-brain modelbridge_anthropic/claude-sonnet-5 `
   --scaffold-mode runtime_checkpoint `
   --checkpoint-period 3 `
+  --tool-result-lifecycle compact `
+  --tool-result-live-reads 3 `
   --effort medium `
   --repeats 2
 ```
@@ -523,6 +527,15 @@ real total across categories by estimated share and preserves an exact additive 
 provider input total as measured and category values as attributed estimates, not tokenizer-exact billing. Cognitive
 evaluation reports include per-arm mean category tokens and print the tool/checkpoint/model-transcript mix without
 retaining any prompt or tool-result content.
+
+Tool-result compaction is opt-in; `full` remains the compatibility default. In `compact` mode every result body is
+guaranteed one subsequent main-model turn before it can be unloaded. The runtime keeps the configured number of recent
+`read_text` results, an unverified patch, the current verification result, and recent errors pinned. Eligible older
+results are replaced by short receipts that tell the model to re-run the tool when exact evidence is required. A
+receipt is never presented as a semantic summary or substitute for source evidence, and compaction is skipped when the
+receipt would not save estimated tokens. Reports expose only the number of compacted results, active receipts,
+unloaded body size, cumulative estimated input tokens avoided on later turns, and counts by tool; they never retain
+result bodies.
 
 ## Workflow Suggestions
 

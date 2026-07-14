@@ -51,6 +51,7 @@ from .option_runtime import (
     OptionResult,
     select_region_observation,
 )
+from .tool_result_lifecycle import ToolResultLifecycle, tool_result_message
 
 logger = logging.getLogger("brainregion.sandbox.loop")
 
@@ -364,6 +365,7 @@ class Trajectory:
     adopted_assignment_ids: tuple[str, ...] = ()
     advisory_injections: list[dict[str, Any]] = field(default_factory=list)
     cognitive_state: MainCognitiveState | RuntimeCognitiveState | None = None
+    tool_result_lifecycle: dict[str, Any] = field(default_factory=dict)
     iterations: list[CognitiveIteration] | None = None
     cumulative_cost_usd: float | None = None
     accept_reason: str = ""  # termination_reason="accepted" 时的细分:normal/weak_test/orthogonal_cleared
@@ -450,6 +452,7 @@ class Trajectory:
                 if self.cognitive_state
                 else {"enabled": False, "contains_state_content": False, "contains_reasoning": False}
             ),
+            "tool_result_lifecycle": dict(self.tool_result_lifecycle),
             "iterations": ([it.to_dict() for it in self.iterations]
                            if self.iterations is not None else None),
             "cumulative_cost_usd": (round(self.cumulative_cost_usd, 6)
@@ -1146,7 +1149,16 @@ def _strip_past_visual(messages: list[dict]) -> None:
             del messages[i]
 
 
-def _append_ephemeral_result(messages: list[dict], tool: str, result_str: str, exec_err: str | None) -> None:
+def _append_ephemeral_result(
+    messages: list[dict],
+    tool: str,
+    result_str: str,
+    exec_err: str | None,
+    *,
+    step: int = 0,
+    target_kind: str = "",
+    target_fingerprint: str = "",
+) -> None:
     """ephemeral 模式下 act/observe 结果:拆 visual(outcome 持久 <tool_result> + visual 剥 <visual>)。
 
     - observe:纯视觉 → 仅 <visual>(无 outcome)。
@@ -1157,10 +1169,13 @@ def _append_ephemeral_result(messages: list[dict], tool: str, result_str: str, e
     outcome, visual = _split_visual(body)
     if outcome and outcome not in ("{}", ""):
         messages.append(
-            attributed_message(
-                "user",
+            tool_result_message(
                 f'<tool_result tool="{tool}">\n{outcome}\n</tool_result>',
-                "tool_transcript",
+                tool=tool,
+                step=step,
+                target_kind=target_kind,
+                target_fingerprint=target_fingerprint,
+                error=bool(exec_err),
             )
         )
     if visual is not None:
@@ -1195,6 +1210,8 @@ async def run_agent(
     cognitive_scaffold: bool = False,
     cognitive_scaffold_mode: str = "model_managed",
     cognitive_checkpoint_period: int = 3,
+    tool_result_lifecycle: str = "full",
+    tool_result_live_reads: int = 3,
     system_prompt: str | None = None,
     verify_fn: Callable[..., dict] | None = None,
     memory_region: Any = None,
@@ -1251,6 +1268,10 @@ async def run_agent(
     ):
         raise ValueError("cognitive_checkpoint_period must be a positive integer")
     traj = Trajectory(task_id=task.id, arm=arm, gold_diff=task.gold_diff)
+    result_lifecycle = ToolResultLifecycle(
+        mode=tool_result_lifecycle,  # type: ignore[arg-type]
+        live_read_results=tool_result_live_reads,
+    )
     if cognitive_scaffold:
         initial_strategy = MainCognitiveState(
             current_subgoal=str(task.goal)[:400],
@@ -1592,6 +1613,7 @@ async def run_agent(
                     runtime_checkpoint_reason,
                 )
 
+            result_lifecycle.apply(messages, next_step=step)
             messages = _trim_transcript(messages, cap_chars)
             captured_input = capture_input_attribution(messages)
             resp = await backend.complete_messages(
@@ -1891,10 +1913,27 @@ async def run_agent(
             # Phase 4.2 visual_ephemeral:act/observe 拆 visual(outcome 持久 <tool_result> + visual 剥 <visual>);
             # 非 ephemeral 或非视觉工具 → 标准 <tool_result>(零回归)。
             if visual_ephemeral and call.tool in ("observe", "act"):
-                _append_ephemeral_result(messages, call.tool, result_str or "", exec_err)
+                _append_ephemeral_result(
+                    messages,
+                    call.tool,
+                    result_str or "",
+                    exec_err,
+                    step=step,
+                    target_kind=target_kind,
+                    target_fingerprint=target_fingerprint,
+                )
             else:
                 fenced = f"<tool_result>\n{result_str or ('ERROR: ' + exec_err)}\n</tool_result>"
-                messages.append(attributed_message("user", fenced, "tool_transcript"))
+                messages.append(
+                    tool_result_message(
+                        fenced,
+                        tool=call.tool or "model_turn",
+                        step=step,
+                        target_kind=target_kind,
+                        target_fingerprint=target_fingerprint,
+                        error=bool(exec_err),
+                    )
+                )
             if cognitive_update_error:
                 messages.append(
                     attributed_message(
@@ -1910,6 +1949,8 @@ async def run_agent(
         else:
             traj.termination_reason = traj.termination_reason or "max_steps"
 
+        result_lifecycle.observe(messages)
+        traj.tool_result_lifecycle = result_lifecycle.public_metrics()
         traj.n_steps = len(traj.steps)
         # verify:tests-green 定 solved(客观)。预算/解析失败优先于 tests_fail 作 solve_status。
         if verify_fn is not None:  # Phase A env 注入:env-grounded verify(tests_green := env.solved)
@@ -1989,6 +2030,8 @@ async def run_cognitive_loop(
     cognitive_scaffold: bool = False,
     cognitive_scaffold_mode: str = "model_managed",
     cognitive_checkpoint_period: int = 3,
+    tool_result_lifecycle: str = "full",
+    tool_result_live_reads: int = 3,
 ) -> Trajectory:
     """§15.1 认知环外环:expert → verify → delegate →(redelegate 用 next_subgoal 重跑)→ ...
     → accept / give_up / budget / max_iterations / no_progress / error。
@@ -2033,6 +2076,8 @@ async def run_cognitive_loop(
         cognitive_scaffold=cognitive_scaffold,
         cognitive_scaffold_mode=cognitive_scaffold_mode,
         cognitive_checkpoint_period=cognitive_checkpoint_period,
+        tool_result_lifecycle=tool_result_lifecycle,
+        tool_result_live_reads=tool_result_live_reads,
     )
     for it in range(max_iterations):
         remaining = max(0.0, max_cost_usd - cumulative)  # I4: 内层传剩余预算
