@@ -33,6 +33,10 @@ from .delegation_shadow import (
 )
 from .cognitive_eval import render_cognitive_eval_summary, run_cognitive_scaffold_eval
 from .eval import render_summary, run_sandbox_eval, write_report
+from .functional_region_eval import (
+    render_functional_region_eval_summary,
+    run_functional_region_eval,
+)
 from .envs import GridWorld, build_env_system_prompt, write_replay_html
 from .fixtures import SANDBOX_FIXTURES, get_fixture, list_fixture_ids
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
@@ -487,6 +491,47 @@ async def run_cognitive_eval(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit(str(exc)) from exc
     path = write_report(report, args.out)
     print(render_cognitive_eval_summary(report))
+    print(f"\nReport: {path}")
+    return {"report": report, "path": str(path)}
+
+
+async def run_functional_regions_eval(args: argparse.Namespace) -> dict[str, Any]:
+    """Run the matched passive-context and functional-Region fixture matrix."""
+    dd = _defaults_mod.apply()
+    model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
+    if not model_str:
+        raise SystemExit("--main-brain is required (or configure sandbox_main_brain)")
+    backend, registry = _build_backend(
+        dd,
+        endpoint_ids=_endpoint_ids_for_refs(dd, [model_str]),
+    )
+    model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
+    tasks = _resolve_tasks(args)
+    selected_arms = [arm.strip() for arm in str(args.arms or "").split(",") if arm.strip()]
+    try:
+        report = await run_functional_region_eval(
+            backend,
+            model,
+            tasks,
+            endpoint_id=endpoint_id,
+            repeats=int(args.repeats),
+            arms=selected_arms or None,
+            max_steps=int(args.max_steps or dd.get("sandbox_max_steps", 10)),
+            max_cost_usd=float(args.max_cost_usd or dd.get("sandbox_max_cost_usd", 0.5)),
+            temperature=float(dd.get("sandbox_temperature", 0.0)),
+            max_tokens=int(args.max_tokens or 2048),
+            transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
+            consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
+            thinking=_thinking_arg(args) is True,
+            effort=args.effort,
+            tool_result_lifecycle=args.tool_result_lifecycle,
+            tool_result_live_reads=int(args.tool_result_live_reads),
+            bootstrap_samples=args.bootstrap_samples,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    path = write_report(report, args.out)
+    print(render_functional_region_eval_summary(report))
     print(f"\nReport: {path}")
     return {"report": report, "path": str(path)}
 

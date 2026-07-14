@@ -357,6 +357,47 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sb_cognitive.add_argument("--out", default=None, help="Report directory")
 
+    p_sb_functional_regions = p_sb_sub.add_parser(
+        "functional-region-eval",
+        help="Matched main/passive/evidence/evidence+verification functional Region evaluation",
+    )
+    p_sb_functional_regions.add_argument("--tasks", required=True, help="Comma-separated fixture ids")
+    p_sb_functional_regions.add_argument("--main-brain", default=None, help="Main executor model reference")
+    p_sb_functional_regions.add_argument(
+        "--arms",
+        default=(
+            "main_only,passive_context,evidence_region,"
+            "evidence_verification_regions"
+        ),
+        help="Comma-separated functional Region evaluation arms",
+    )
+    p_sb_functional_regions.add_argument("--repeats", type=int, default=1)
+    p_sb_functional_regions.add_argument("--max-steps", type=int, default=None)
+    p_sb_functional_regions.add_argument(
+        "--max-cost-usd", type=float, default=None, help="Per-run cost limit"
+    )
+    p_sb_functional_regions.add_argument("--max-tokens", type=int, default=None)
+    p_sb_functional_regions.add_argument("--bootstrap-samples", type=int, default=None)
+    p_sb_functional_regions.add_argument("--thinking", default="off", choices=["off", "on"])
+    p_sb_functional_regions.add_argument(
+        "--effort",
+        default=None,
+        choices=["low", "medium", "high", "xhigh", "max"],
+    )
+    p_sb_functional_regions.add_argument(
+        "--tool-result-lifecycle",
+        default="full",
+        choices=["full", "compact"],
+        help="Common tool-result transcript policy for every arm",
+    )
+    p_sb_functional_regions.add_argument(
+        "--tool-result-live-reads",
+        type=int,
+        default=3,
+        help="Recent full read_text results retained in compact mode",
+    )
+    p_sb_functional_regions.add_argument("--out", default=None, help="Report directory")
+
     p_sb_tool_results = p_sb_sub.add_parser(
         "tool-result-eval",
         help="Matched full vs compact tool-result transcript lifecycle evaluation",
@@ -1070,6 +1111,8 @@ def main() -> None:
             asyncio.run(sandbox_cli.run_delegation_eval(args))
         elif args.sandbox_command == "cognitive-eval":
             asyncio.run(sandbox_cli.run_cognitive_eval(args))
+        elif args.sandbox_command == "functional-region-eval":
+            asyncio.run(sandbox_cli.run_functional_regions_eval(args))
         elif args.sandbox_command == "tool-result-eval":
             asyncio.run(sandbox_cli.run_tool_result_lifecycle_eval(args))
         elif args.sandbox_command == "verify-brain":

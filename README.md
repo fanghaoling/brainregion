@@ -517,8 +517,32 @@ brain-region sandbox run `
 Both flags are off by default and are currently limited to the single-pass sandbox runner. Trajectory telemetry records
 content-free workbench entry/block counts, estimated loaded tokens, publishing regions, Region activations, and Region
 tool calls. It does not serialize artifact content or model reasoning. A matched `main_only` / passive-context /
-evidence / evidence-plus-verification evaluation remains a later experiment, so this pilot establishes the execution
-and handoff boundary rather than claiming a quality improvement.
+evidence / evidence-plus-verification evaluation is available for measuring the boundary; the runtime itself still
+makes no quality claim.
+
+Run the four-arm matched evaluation with:
+
+```powershell
+brain-region sandbox functional-region-eval `
+  --tasks tenant_cache_scope,settings_precedence `
+  --main-brain buzz_anthropic/claude-sonnet-5 `
+  --repeats 2 `
+  --max-steps 10
+```
+
+The arms are `main_only`, `passive_context`, `evidence_region`, and
+`evidence_verification_regions`. Passive context is prepared with the same path selection, source snapshots, system
+framing, and model-visible workbench payload as the evidence Region, but produces no Region activation or Region tool
+ownership. Random workspace entry IDs are excluded from the provider payload, so those two arms can hold the first
+model input exactly equal. The report separates four effects: grounded context value, evidence ownership with visible
+context held constant, verification delegation, and the complete pipeline versus main-only.
+
+Tool accounting includes main-model tools, Region-owned tools, and passive harness reads. Passive context is therefore
+not treated as free preprocessing. Reports also compare main input tokens, total model tokens, model cost, main reads,
+main checks, verification runs, repeated targets, protocol completion, and objective solve rate. Arm order rotates by
+task and repeat. A one-task pilot receives descriptive `raw_deltas`; bootstrap intervals remain unavailable until at
+least two matched tasks, and infrastructure failures are excluded independently for each contrast. Reports contain no
+source snapshots, tool-result bodies, trajectories, or model reasoning.
 
 Compare provider-native thinking and the external scaffold with a matched 2x2 experiment:
 
