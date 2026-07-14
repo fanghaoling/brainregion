@@ -12,6 +12,7 @@ from brainregion.eval.stats import bootstrap_statistic, seed_for
 from brainregion.runtime import normalize_usage
 
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
+from .input_attribution import merge_input_attributions
 from .loop import run_agent
 from .task import SandboxTask
 
@@ -174,6 +175,7 @@ async def run_cognitive_scaffold_eval(
                                 repeated_targets / len(target_steps) if target_steps else None
                             ),
                             "main_input_tokens": usage["input_tokens"],
+                            "main_input_attribution": trajectory.main_input_attribution,
                             "main_total_tokens": usage["total_tokens"],
                             "reasoning_tokens": usage["reasoning_tokens"],
                             "cost_usd": float(trajectory.total_main_cost_usd),
@@ -201,6 +203,7 @@ async def run_cognitive_scaffold_eval(
                             "workspace_effects": 0,
                             "repeated_target_rate": None,
                             "main_input_tokens": 0,
+                            "main_input_attribution": merge_input_attributions([]),
                             "main_total_tokens": 0,
                             "reasoning_tokens": 0,
                             "cost_usd": 0.0,
@@ -268,6 +271,7 @@ def summarize_cognitive_records(
             for record in valid
             if (record.get("cognitive_scaffold") or {}).get("mode") == "runtime_checkpoint"
         ]
+        input_attribution = _summarize_input_attribution(valid)
         per_arm[arm] = {
             "n_runs": len(arm_records),
             "n_valid_runs": len(valid),
@@ -285,6 +289,7 @@ def summarize_cognitive_records(
                 if runtime_checkpoint_counts
                 else None
             ),
+            "input_attribution": input_attribution,
             "infrastructure_failures": len(arm_records) - len(valid),
         }
 
@@ -367,12 +372,16 @@ def render_cognitive_eval_summary(report: dict[str, Any]) -> str:
         f"actual_cost=${float((report.get('execution') or {}).get('actual_cost_usd') or 0):.4f}",
     ]
     for arm, summary in (report.get("per_arm") or {}).items():
+        input_categories = (summary.get("input_attribution") or {}).get("categories") or {}
         lines.append(
             f"  {arm}: solve={summary.get('solve_rate')} completed={summary.get('protocol_completion_rate')} "
             f"steps={summary.get('mean_steps')} tokens={summary.get('mean_main_total_tokens')} "
             f"reasoning={summary.get('mean_reasoning_tokens')} cost=${float(summary.get('mean_cost_usd') or 0):.4f} "
             f"scaffold_updates={summary.get('scaffold_update_success_rate')} "
-            f"checkpoints={summary.get('mean_checkpoint_count')}"
+            f"checkpoints={summary.get('mean_checkpoint_count')} "
+            f"input_mix(tool={_mean_category_tokens(input_categories, 'tool_transcript')},"
+            f"checkpoint={_mean_category_tokens(input_categories, 'checkpoint')},"
+            f"model={_mean_category_tokens(input_categories, 'model_transcript')})"
         )
     for name, effect in (report.get("effects") or {}).items():
         point = ((effect.get("deltas") or {}).get("solved") or {}).get("point")
@@ -388,6 +397,38 @@ def _disabled_scaffold_metrics() -> dict[str, Any]:
         "contains_state_content": False,
         "contains_reasoning": False,
     }
+
+
+def _summarize_input_attribution(records: list[dict[str, Any]]) -> dict[str, Any]:
+    merged = merge_input_attributions(
+        record.get("main_input_attribution") or {} for record in records
+    )
+    n_runs = len(records)
+    categories = {}
+    for category, values in (merged.get("categories") or {}).items():
+        categories[category] = {
+            **values,
+            "mean_actual_input_tokens": (
+                values["actual_input_tokens"] / n_runs if n_runs else None
+            ),
+            "mean_estimated_input_tokens": (
+                values["estimated_tokens"] / n_runs if n_runs else None
+            ),
+        }
+    return {
+        **merged,
+        "n_runs": n_runs,
+        "mean_actual_input_tokens": (
+            merged["actual_input_tokens"] / n_runs if n_runs else None
+        ),
+        "categories": categories,
+    }
+
+
+def _mean_category_tokens(categories: dict[str, Any], category: str) -> float | None:
+    values = categories.get(category) or {}
+    value = values.get("mean_actual_input_tokens")
+    return round(float(value), 1) if value is not None else None
 
 
 def _complete_task_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:

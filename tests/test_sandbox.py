@@ -296,6 +296,15 @@ def test_loop_records_per_step_and_total_model_usage():
         assert out["main_cost_sources"] == ["builtin"]
         assert out["steps"][0]["main_usage"] == out["main_usage"]
         assert out["steps"][0]["main_cost_source"] == "builtin"
+        attribution = out["main_input_attribution"]
+        assert attribution["actual_input_tokens"] == 100
+        assert attribution["provider_reported_calls"] == 1
+        assert sum(
+            values["actual_input_tokens"]
+            for values in attribution["categories"].values()
+        ) == 100
+        assert attribution["contains_content"] is False
+        assert out["steps"][0]["main_input_attribution"] == attribution
     finally:
         cleanup_run_dir(run_dir)
 

@@ -27,8 +27,10 @@ class _MatrixBackend:
     def __init__(self, source_sha: str) -> None:
         self.source_sha = source_sha
         self.calls: list[dict] = []
+        self.provider_message_keys: list[set[str]] = []
 
     async def complete_messages(self, messages, **kwargs):
+        self.provider_message_keys.extend(set(message) for message in messages)
         system_prompt = messages[0]["content"]
         runtime_scaffold = "Runtime 认知 checkpoint" in system_prompt
         model_managed_scaffold = "思考脚手架已启用" in system_prompt
@@ -178,6 +180,28 @@ def test_cognitive_eval_runs_matched_matrix_without_private_state_in_report():
     assert report["per_arm"][ARM_EXTERNAL_SCAFFOLD]["mean_checkpoint_count"] == 1.0
     assert report["per_arm"][ARM_COMBINED]["mean_checkpoint_count"] == 1.0
     assert report["per_arm"][ARM_PLAIN]["mean_checkpoint_count"] is None
+    assert all(
+        case["main_input_attribution"]["actual_input_tokens"]
+        == case["main_input_tokens"]
+        for case in report["cases"]
+    )
+    assert all(
+        sum(
+            values["actual_input_tokens"]
+            for values in case["main_input_attribution"]["categories"].values()
+        )
+        == case["main_input_tokens"]
+        for case in report["cases"]
+    )
+    assert report["per_arm"][ARM_PLAIN]["input_attribution"][
+        "actual_input_tokens"
+    ] == 90
+    assert "checkpoint" not in report["per_arm"][ARM_PLAIN]["input_attribution"][
+        "categories"
+    ]
+    assert report["per_arm"][ARM_EXTERNAL_SCAFFOLD]["input_attribution"][
+        "categories"
+    ]["checkpoint"]["actual_input_tokens"] > 0
     assert {(call["thinking"], call["scaffold"]) for call in backend.calls} == {
         (False, False),
         (True, False),
@@ -187,6 +211,10 @@ def test_cognitive_eval_runs_matched_matrix_without_private_state_in_report():
     assert all(call["effort"] == "medium" for call in backend.calls if call["thinking"])
     assert all(call["effort"] is None for call in backend.calls if not call["thinking"])
     assert sum(call["checkpoint"] for call in backend.calls) == 2
+    assert all(
+        not any(key.startswith("_brainregion_") for key in keys)
+        for keys in backend.provider_message_keys
+    )
     rendered = json.dumps(report, ensure_ascii=False)
     assert "current_subgoal" not in rendered
     assert "evidence_refs" not in rendered

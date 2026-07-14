@@ -515,6 +515,15 @@ reasoning tokens in a nominally disabled control arm. Claude and DeepSeek curren
 contrasts; other model families are labeled unverified unless their provider contract is added. Reports contain no
 trajectories, state content, model reasoning, tool arguments, or tool-result text.
 
+Each sandbox main-model turn also records content-free input attribution. The runtime labels internal prompt sources as
+system/task instructions, scaffold, expert or memory context, Region execution, checkpoint, model/tool transcript,
+visual input, and error feedback. These labels are stripped before the provider call. Category weights use the same
+conservative text estimator as context budgeting; when the provider returns input usage, BrainRegion allocates the
+real total across categories by estimated share and preserves an exact additive total. The report therefore treats the
+provider input total as measured and category values as attributed estimates, not tokenizer-exact billing. Cognitive
+evaluation reports include per-arm mean category tokens and print the tool/checkpoint/model-transcript mix without
+retaining any prompt or tool-result content.
+
 ## Workflow Suggestions
 
 `suggest_workflow` builds on `route_regions` and returns explicit next tool-call suggestions for the main assistant or
