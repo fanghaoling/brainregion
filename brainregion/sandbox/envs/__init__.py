@@ -1,12 +1,23 @@
-"""沙盒 env:游戏/虚拟场景的客观 grounding env(Phase A,文本渲染)。
+"""沙盒 env:游戏/虚拟场景的客观 grounding 环境。
 
 GridWorld = 最简全可见网格寻路(0/1 reward)。observe/act 作 tool 接进 sandbox loop 的
 dispatch_tool(见 loop.py),不另起 driver/trajectory。frames 记录供 replay/调试窗。
-
-多脑区(视觉/运动/策略)协作 = Phase C/D;fog = Phase B;Environment Protocol = 2nd env 出现再抽(YAGNI)。
+UrbanDeliveryEnv = 多订单取货/配送/返店环境，带动态车辆、可达性验证和隐藏效率 oracle。
+环境可通过 ``build_system_prompt`` 自描述任务规则；observe/act/frames 继续复用同一 runner 协议。
 """
 from .gridworld import GridWorld
 from .replay import render_replay_html, write_replay_html
+from .urban_delivery import (
+    DeliveryOracle,
+    DeliveryOrder,
+    ScenarioValidation,
+    UrbanDeliveryEnv,
+    UrbanDeliveryScenario,
+    build_delivery_oracle,
+    generate_urban_delivery_scenario,
+    shortest_path,
+    validate_urban_delivery_scenario,
+)
 
 
 def build_env_system_prompt(env, goal: str, *, memory: bool = False, strategy: bool = False,
@@ -32,6 +43,12 @@ def build_env_system_prompt(env, goal: str, *, memory: bool = False, strategy: b
     navigation(Phase 4.9)→ +delegate_navigation 工具;导航脑区直接执行一小段原始动作并返回
     带 actor 的执行轨迹。首版仅支持 abs action,用于隔离「建议」与「卸载执行控制」的差异。
     """
+    custom_builder = getattr(env, "build_system_prompt", None)
+    if callable(custom_builder) and not isinstance(env, GridWorld):
+        unsupported = memory or strategy or metronome or topo or path or navigation
+        if unsupported:
+            raise ValueError("该环境尚未接入 GridWorld 专属脑区模式")
+        return custom_builder(goal)
     vocab = ", ".join(getattr(env, "action_vocab", ()))
     ego = bool(getattr(env, "ego_actions", False))  # Phase 4.8 ego-relative(action=forward/turn)
     metronome_note = ""
@@ -179,4 +196,18 @@ def build_env_system_prompt(env, goal: str, *, memory: bool = False, strategy: b
     )
 
 
-__all__ = ["GridWorld", "build_env_system_prompt", "render_replay_html", "write_replay_html"]
+__all__ = [
+    "DeliveryOracle",
+    "DeliveryOrder",
+    "GridWorld",
+    "ScenarioValidation",
+    "UrbanDeliveryEnv",
+    "UrbanDeliveryScenario",
+    "build_delivery_oracle",
+    "build_env_system_prompt",
+    "generate_urban_delivery_scenario",
+    "render_replay_html",
+    "shortest_path",
+    "validate_urban_delivery_scenario",
+    "write_replay_html",
+]

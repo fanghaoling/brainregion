@@ -351,6 +351,13 @@ def test_sandbox_env_cli_argparse():
     ])
     assert ns4.max_steps == 20 and ns4.max_main_turns == 90
 
+    ns5 = parser.parse_args([
+        "sandbox", "env", "--env", "urban-delivery", "--size", "13",
+        "--orders", "4", "--vehicles", "3", "--seed", "9", "--main-brain", "sonnet",
+    ])
+    assert ns5.env == "urban-delivery" and ns5.size == 13
+    assert ns5.orders == 4 and ns5.vehicles == 3 and ns5.seed == 9
+
 
 # ---------- Phase C 记忆脑区:recall_map + strict observation ----------
 

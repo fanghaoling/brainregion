@@ -37,7 +37,13 @@ from .functional_region_eval import (
     render_functional_region_eval_summary,
     run_functional_region_eval,
 )
-from .envs import GridWorld, build_env_system_prompt, write_replay_html
+from .envs import (
+    GridWorld,
+    UrbanDeliveryEnv,
+    build_env_system_prompt,
+    generate_urban_delivery_scenario,
+    write_replay_html,
+)
 from .fixtures import SANDBOX_FIXTURES, get_fixture, list_fixture_ids
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
 from .loop import run_agent, run_cognitive_loop, scoped_env, scoped_memory_mode
@@ -656,7 +662,8 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
     model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
 
     # 构造 env + 边界校验(constructor 校验 size/visibility_radius/goal/walls;非法 → 干净退出)
-    size = int(args.size)
+    env_name = str(getattr(args, "env", "gridworld") or "gridworld")
+    size = int(args.size or (13 if env_name == "urban-delivery" else 5))
     strategy_region_on = bool(getattr(args, "strategy_region", False))  # Phase D.3:策略脑区(多脑区协同)
     memory_region_on = bool(getattr(args, "memory_region", False)) or strategy_region_on  # strategy 隐含 memory
     memory = bool(getattr(args, "memory", False)) or memory_region_on  # 严格部分可观 + recall_map(--memory-region 隐含)
@@ -664,33 +671,63 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
     vis_radius = getattr(args, "visibility_radius", None)
     if vis_radius is None and fog:
         vis_radius = 2  # --fog/--memory 默认半径 2
-    goal_kw: dict[str, Any] = {"visibility_radius": vis_radius, "strict_obs": memory}
-    if bool(getattr(args, "random_goal", False)):
-        goal_kw["random_goal_seed"] = getattr(args, "seed", None) if getattr(args, "seed", None) is not None else 0
-    elif getattr(args, "goal_x", None) is not None and getattr(args, "goal_y", None) is not None:
-        goal_kw["goal"] = (int(args.goal_x), int(args.goal_y))
-    wall_seed = getattr(args, "wall_seed", None)
-    if wall_seed is not None:
-        goal_kw["random_walls_seed"] = wall_seed
-        goal_kw["wall_density"] = float(getattr(args, "wall_density", None) or 0.2)  # 默认密度 0.2
-    # Phase 4.5 迷宫地形:maze_seed 用 --seed;覆盖 random_walls。fog 由 --memory-region/--fog 控制
-    # (--maze alone = 全可见迷宫,供 --debug 看地形;--maze --memory-region = fog+strict_obs 记忆测试)。
-    if bool(getattr(args, "maze", False)):
-        goal_kw["maze_seed"] = getattr(args, "seed", None) if getattr(args, "seed", None) is not None else 0
-        goal_kw["maze_braid"] = float(getattr(args, "maze_braid", 0.2) or 0.2)
-    if bool(getattr(args, "ego_actions", False)):  # Phase 4.8 ego-relative action
-        goal_kw["ego_actions"] = True
-    try:
-        env = GridWorld(size=size, start=(0, 0), **goal_kw)
-    except ValueError as exc:
-        raise SystemExit(f"env 构造非法: {exc}")
-    goal_text = args.goal_text or (
-        "找到并到达藏在网格里的目标 G(observe 只看当前视野,recall_map 拿累积探索图;先探索拼图再过去)"
-        if memory else
-        ("找到并到达藏在网格里的目标 G(你只看得到周围,`?` 是未探索区,先探索再过去)" if fog
-         else "到达目标 G(从 @ 出发,避开墙 #,走到 G)")
-    )
-    max_steps = int(args.max_steps or dd.get("sandbox_max_steps", 10))
+    if env_name == "urban-delivery":
+        unsupported = {
+            "fog": bool(getattr(args, "fog", False)),
+            "memory": memory,
+            "maze": bool(getattr(args, "maze", False)),
+            "ego_actions": bool(getattr(args, "ego_actions", False)),
+            "random_goal": bool(getattr(args, "random_goal", False)),
+            "explicit_goal": getattr(args, "goal_x", None) is not None or getattr(args, "goal_y", None) is not None,
+            "random_walls": getattr(args, "wall_seed", None) is not None,
+            "registry": getattr(args, "registry", "none") != "none",
+            "visual_ephemeral": bool(getattr(args, "visual_ephemeral", False)),
+            "memory_dummy": bool(getattr(args, "memory_dummy", False)),
+        }
+        enabled = [name for name, value in unsupported.items() if value]
+        if enabled:
+            raise SystemExit("urban-delivery 首版尚未接入这些 GridWorld 开关: " + ", ".join(enabled))
+        try:
+            scenario = generate_urban_delivery_scenario(
+                seed=int(getattr(args, "seed", None) or 0),
+                width=size,
+                height=size,
+                order_count=int(getattr(args, "orders", 3)),
+                vehicle_count=int(getattr(args, "vehicles", 2)),
+            )
+            env = UrbanDeliveryEnv(scenario, visibility_radius=int(vis_radius if vis_radius is not None else 1))
+        except ValueError as exc:
+            raise SystemExit(f"env 构造非法: {exc}")
+        goal_text = args.goal_text or "按顺序完成全部配送订单，并在最后一单后返回商铺 S"
+        recommended_steps = int(env.oracle.optimal_total_time * 2) + 20
+        max_steps = int(args.max_steps or max(int(dd.get("sandbox_max_steps", 10)), recommended_steps))
+    else:
+        goal_kw: dict[str, Any] = {"visibility_radius": vis_radius, "strict_obs": memory}
+        if bool(getattr(args, "random_goal", False)):
+            goal_kw["random_goal_seed"] = getattr(args, "seed", None) if getattr(args, "seed", None) is not None else 0
+        elif getattr(args, "goal_x", None) is not None and getattr(args, "goal_y", None) is not None:
+            goal_kw["goal"] = (int(args.goal_x), int(args.goal_y))
+        wall_seed = getattr(args, "wall_seed", None)
+        if wall_seed is not None:
+            goal_kw["random_walls_seed"] = wall_seed
+            goal_kw["wall_density"] = float(getattr(args, "wall_density", None) or 0.2)  # 默认密度 0.2
+        # Phase 4.5 迷宫地形:maze_seed 用 --seed;覆盖 random_walls。fog 由 --memory-region/--fog 控制
+        if bool(getattr(args, "maze", False)):
+            goal_kw["maze_seed"] = getattr(args, "seed", None) if getattr(args, "seed", None) is not None else 0
+            goal_kw["maze_braid"] = float(getattr(args, "maze_braid", 0.2) or 0.2)
+        if bool(getattr(args, "ego_actions", False)):  # Phase 4.8 ego-relative action
+            goal_kw["ego_actions"] = True
+        try:
+            env = GridWorld(size=size, start=(0, 0), **goal_kw)
+        except ValueError as exc:
+            raise SystemExit(f"env 构造非法: {exc}")
+        goal_text = args.goal_text or (
+            "找到并到达藏在网格里的目标 G(observe 只看当前视野,recall_map 拿累积探索图;先探索拼图再过去)"
+            if memory else
+            ("找到并到达藏在网格里的目标 G(你只看得到周围,`?` 是未探索区,先探索再过去)" if fog
+             else "到达目标 G(从 @ 出发,避开墙 #,走到 G)")
+        )
+        max_steps = int(args.max_steps or dd.get("sandbox_max_steps", 10))
     if max_steps < 1:
         raise SystemExit("--max-steps 须为正整数")
 
@@ -709,7 +746,7 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         print(f"\n>>> 调试窗已开:场景查看 http://127.0.0.1:{debug_port}/scene (网格实时渲染 + 可回看)")
         print(f">>>          BrainRegion 面板 http://127.0.0.1:{debug_port}/ (脑区/模型调用)\n")
 
-    task = SandboxTask(id=f"env-{env.size}x{env.size}", goal=goal_text)
+    task = SandboxTask(id=f"env-{env_name}-{size}x{size}", goal=goal_text)
 
     def verify(t, run_dir, *, python_exe=None):  # env-grounded,返完整 verify_solution shape
         return {
@@ -759,15 +796,23 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         cleanup_run_dir(run_dir)
 
     run_id = f"env-{int(time.time() * 1000)}"
-    meta = {
-        "model": model, "size": env.size, "goal": goal_text,
+    meta: dict[str, Any] = {
+        "model": model, "env": env_name, "size": size, "goal": goal_text,
         "solved": env.solved, "total_reward": env.total_reward,
         "n_steps": traj.n_steps, "termination": traj.termination_reason,
-        "visibility_radius": env.visibility_radius, "goal_pos": tuple(env.goal),
-        "n_walls": len(env.walls), "memory_region": memory_region_on, "strategy_region": strategy_region_on,
+        "visibility_radius": env.visibility_radius,
+        "memory_region": memory_region_on, "strategy_region": strategy_region_on,
         "visual_ephemeral": visual_ephemeral, "registry": registry_mode,
         "memory_dummy": bool(getattr(args, "memory_dummy", False)),
     }
+    if isinstance(env, UrbanDeliveryEnv):
+        meta.update({
+            "orders": len(env.scenario.orders),
+            "vehicles": len(env.scenario.vehicles),
+            "delivery_metrics": env.metrics(),
+        })
+    else:
+        meta.update({"goal_pos": tuple(env.goal), "n_walls": len(env.walls)})
     out_dir = Path(".brain-region") / "sandbox"
     out_dir.mkdir(parents=True, exist_ok=True)
     replay_path = write_replay_html(out_dir / f"{run_id}.html", env.frames, meta)  # 显式 utf-8
@@ -784,6 +829,8 @@ async def run_env(args: argparse.Namespace) -> dict[str, Any]:
         "region_cost_sources": list(traj.arm_cost_sources),
         "replay": str(replay_path),
     }
+    if isinstance(env, UrbanDeliveryEnv):
+        result["delivery_metrics"] = env.metrics()
     print(json.dumps(result, ensure_ascii=False, indent=2))
     if getattr(args, "debug", False):
         # --debug:跑完后保持调试窗 300s 供回看(/scene 已缓存所有帧,可拖动/播放)。Ctrl+C 提前退。

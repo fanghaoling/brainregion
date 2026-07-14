@@ -470,11 +470,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_sb_env = p_sb_sub.add_parser(
         "env",
-        help="env-regime(Phase A):主脑玩 GridWorld(文本渲染),observe/act 作 tool 复用 run_agent,"
-        "0/1 reward grounding;实时调试窗 + replay 回放",
+        help="env-regime:主脑操作文本环境,observe/act 作 tool 复用 run_agent;实时调试窗 + replay 回放",
     )
-    p_sb_env.add_argument("--env", default="gridworld", choices=["gridworld"], help="env 名(Phase A 仅 gridworld)")
-    p_sb_env.add_argument("--size", type=int, default=5, help="网格边长(2..50,默认 5)")
+    p_sb_env.add_argument(
+        "--env", default="gridworld", choices=["gridworld", "urban-delivery"],
+        help="环境:gridworld 或 urban-delivery",
+    )
+    p_sb_env.add_argument("--size", type=int, default=None, help="网格边长(gridworld 默认 5;配送默认 13)")
+    p_sb_env.add_argument("--orders", type=int, default=3, help="配送订单数(urban-delivery,1..8;默认 3)")
+    p_sb_env.add_argument("--vehicles", type=int, default=2, help="临时阻挡车辆数(urban-delivery,0..8;默认 2)")
     p_sb_env.add_argument("--goal-text", default=None, help="目标描述(默认:到达目标 G;fog 下不透露位置)")
     p_sb_env.add_argument("--arm", default="none", choices=["none", "brainregion"], help="顾问臂(Phase A 默认 none)")
     p_sb_env.add_argument("--main-brain", default=None, help="主脑模型(deepseek-v4-flash / glm-5.2 等)")
@@ -495,7 +499,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_env.add_argument("--goal-y", type=int, default=None, help="显式 goal 行(默认远角)")
     p_sb_env.add_argument("--random-goal", action="store_true",
                           help="seeded 随机 goal(fog 下优先藏在 start 可见域外,逼探索)")
-    p_sb_env.add_argument("--seed", type=int, default=None, help="随机 goal 种子(--random-goal 用;默认 0)")
+    p_sb_env.add_argument("--seed", type=int, default=None, help="场景种子(随机 goal/迷宫/配送车辆;默认 0)")
     p_sb_env.add_argument("--wall-density", type=float, default=None,
                           help="随机墙密度(0..0.6,占可放格比例;启用需配 --wall-seed)")
     p_sb_env.add_argument("--wall-seed", type=int, default=None,

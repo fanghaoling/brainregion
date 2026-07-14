@@ -352,6 +352,7 @@ class Trajectory:
     env_actions: int = 0
     successful_moves: int = 0
     turn_actions: int = 0
+    interaction_actions: int = 0
     blocked_actions: int = 0
     delegated_actions: int = 0
     navigation_delegations: int = 0
@@ -442,6 +443,7 @@ class Trajectory:
             "env_actions": self.env_actions,
             "successful_moves": self.successful_moves,
             "turn_actions": self.turn_actions,
+            "interaction_actions": self.interaction_actions,
             "blocked_actions": self.blocked_actions,
             "delegated_actions": self.delegated_actions,
             "navigation_delegations": self.navigation_delegations,
@@ -506,6 +508,8 @@ def _classify_env_action(env: Any, before: tuple[int, int], info: dict, error: s
         return "already_done"
     if info.get("turned"):
         return "turned"
+    if info.get("interaction"):
+        return "interacted"
     if tuple(env._agent) != tuple(before):
         return "moved"
     return "blocked"
@@ -531,6 +535,8 @@ def _record_env_action(
         traj.delegated_actions += 1
     if status == "turned":
         traj.turn_actions += 1
+    elif status == "interacted":
+        traj.interaction_actions += 1
     elif status == "moved":
         traj.successful_moves += 1
     elif status == "blocked":
@@ -2110,7 +2116,7 @@ async def run_agent(
                 _record_env_action(
                     traj, actor="main", action=str(call.args.get("action", "")),
                     before=tuple(_act_before), after=tuple(_env._agent), status=_status,
-                    reward=1.0 if _info.get("goal") else 0.0,
+                    reward=float(getattr(_env, "_last_reward", 1.0 if _info.get("goal") else 0.0)),
                     terminated=bool(getattr(_env, "_terminated", False)), info=_info,
                 )
             # Phase 4.6 拓扑记忆:每步 act 后更新 trail(实际位置;去重 —— 原地/撞墙不重复)
