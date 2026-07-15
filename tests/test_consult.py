@@ -157,6 +157,65 @@ async def test_consult_problem_routing_metadata(monkeypatch):
     assert challenge["routing"]["consultants_source"] == "mode"
 
 
+@pytest.mark.asyncio
+async def test_consult_problem_only_resolves_selected_endpoint_credentials(monkeypatch):
+    from brainregion import server
+
+    captured: dict = {}
+
+    class _FakeEngine:
+        async def consult(self, *args, **kwargs):
+            return ConsultReport(
+                consultation_id="consult-selected-endpoint",
+                summary="ok",
+                confidence=0.5,
+                individual=[],
+                usage={"total_tokens": 0, "cost_usd": 0.0},
+                budget={"jobs_run": 0, "jobs_total": 0},
+                guard={},
+            )
+
+    monkeypatch.setenv("SELECTED_RELAY_KEY", "selected-secret")
+    monkeypatch.delenv("UNUSED_RELAY_KEY", raising=False)
+    monkeypatch.setattr(
+        server._defaults_mod,
+        "apply",
+        lambda **kwargs: {
+            "endpoints": {
+                "selected": {
+                    "provider": "anthropic",
+                    "base_url": "https://selected.example",
+                    "api_key_env": "SELECTED_RELAY_KEY",
+                    "models": ["fast-model"],
+                },
+                "unused": {
+                    "provider": "openai",
+                    "base_url": "https://unused.example/v1",
+                    "api_key_env": "UNUSED_RELAY_KEY",
+                    "models": ["offline-model"],
+                },
+            },
+            "consult_panel": ["selected/fast-model"],
+            "consult_consultants": ["debugger"],
+            "consult_max_input_chars": 1000,
+            "consult_max_cost_usd": 0.01,
+            "effort": None,
+        },
+    )
+
+    def build_engine(defaults):
+        captured.update(defaults["endpoints"])
+        server._resolve_endpoints(defaults["endpoints"])
+        return _FakeEngine()
+
+    monkeypatch.setattr(server, "_build_consult_engine", build_engine)
+
+    result = await server.consult_problem(problem="synthetic public test")
+
+    assert result["consultation_id"] == "consult-selected-endpoint"
+    assert set(captured) == {"selected"}
+
+
 def test_record_consultation_and_mark_advice():
     from brainregion.server import mark_advice
 

@@ -1435,7 +1435,20 @@ async def consult_problem(
                 continue
             context_blocks += rr.blocks
             providers_meta[name] = {"provider": rr.provider, **rr.meta}
-    engine = _build_consult_engine(dd)
+    endpoints_cfg = dd.get("endpoints") or {}
+    selected_endpoint_ids = {
+        entry["endpoint_id"]
+        for entry in panel_used
+        if entry.get("endpoint_id") is not None
+    }
+    engine_defaults = {
+        **dd,
+        "endpoints": {
+            endpoint_id: endpoints_cfg[endpoint_id]
+            for endpoint_id in selected_endpoint_ids
+        },
+    }
+    engine = _build_consult_engine(engine_defaults)
     report = await engine.consult(
         ConsultRequest(
             problem=problem,
