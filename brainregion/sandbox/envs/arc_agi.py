@@ -241,9 +241,10 @@ class ArcAgiEnv:
             "You control an unfamiliar turn-based visual environment with no provided rules. "
             "Infer useful goals and action effects only from observations. Do not assume action meanings.\n"
             f"Objective: {goal}\n"
-            "Reply with exactly one JSON object per turn. Observe with "
-            '{"thought":"...","tool":"observe","args":{}}. '
-            "Act with "
+            "The current observation is provided before your first decision. Every successful act result also "
+            "contains the next current observation. The observe tool is unnecessary in this environment; act "
+            "directly from the latest frame.\n"
+            "Reply with exactly one JSON object per turn. Act with "
             '{"thought":"...","tool":"act","args":{"action":"action1"}}. '
             "When an available action says requires_data=true, include "
             '"data":{"x":0,"y":0} in args. '

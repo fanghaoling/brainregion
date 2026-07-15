@@ -41,6 +41,23 @@ def test_search_result_gets_one_guaranteed_consumer_turn_then_receipt():
     assert metrics["contains_result_content"] is False
 
 
+def test_environment_action_result_unloads_only_in_explicit_compact_mode():
+    compact_result = _result("act", 0)
+    compact = ToolResultLifecycle(mode="compact")
+
+    compact.apply([compact_result], next_step=1)
+    assert "tool_result_receipt" not in compact_result["content"]
+    compact.apply([compact_result], next_step=2)
+    assert "tool_result_receipt" in compact_result["content"]
+    assert "must not be replayed" in compact_result["content"]
+    assert "Re-run the tool" not in compact_result["content"]
+    assert compact.public_metrics()["compacted_by_tool"] == {"act": 1}
+
+    full_result = _result("act", 0)
+    ToolResultLifecycle(mode="full").apply([full_result], next_step=10)
+    assert "tool_result_receipt" not in full_result["content"]
+
+
 def test_recent_read_working_set_stays_full_while_older_reads_unload():
     messages = [_result("read_text", step) for step in range(4)]
     lifecycle = ToolResultLifecycle(mode="compact", live_read_results=2)

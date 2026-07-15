@@ -981,9 +981,19 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
                 visual_ephemeral=True,
                 tool_result_lifecycle=args.tool_result_lifecycle,
                 tool_result_live_reads=int(args.tool_result_live_reads),
+                initial_observation=env.observation(),
             )
         snapshot = env.snapshot()
         run_id = f"arc-agi-3-{int(time.time() * 1000)}"
+        progress_trace = trajectory.progress_trace
+        operation_counts: dict[str, int] = {}
+        for progress in progress_trace:
+            operation = str(progress.get("operation") or "model_turn")
+            operation_counts[operation] = operation_counts.get(operation, 0) + 1
+        environment_actions = operation_counts.get("act", 0)
+        error_steps = sum(bool(progress.get("error")) for progress in progress_trace)
+        action_denominator = max(1, environment_actions)
+        normalized_usage = normalize_usage(trajectory.total_main_usage)
         result = {
             "run_id": run_id,
             "mode": "arc_agi_3_public_baseline",
@@ -994,13 +1004,25 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
             "state": snapshot.get("state"),
             "levels_completed": snapshot.get("levels_completed"),
             "win_levels": snapshot.get("win_levels"),
-            "environment_actions": sum(
-                step.get("operation") == "act" for step in trajectory.progress_trace
-            ),
+            "environment_actions": environment_actions,
             "model_steps": trajectory.n_steps,
+            "operation_counts": operation_counts,
+            "error_steps": error_steps,
+            "environment_action_rate": round(
+                environment_actions / max(1, trajectory.n_steps), 4
+            ),
+            "tokens_per_environment_action": round(
+                int(normalized_usage.get("total_tokens", 0)) / action_denominator,
+                2,
+            ),
+            "cost_per_environment_action_usd": round(
+                trajectory.total_main_cost_usd / action_denominator, 6
+            ),
             "termination": trajectory.termination_reason,
             "cost_usd": round(trajectory.total_main_cost_usd, 6),
-            "usage": normalize_usage(trajectory.total_main_usage),
+            "usage": normalized_usage,
+            "input_attribution": trajectory.main_input_attribution,
+            "tool_result_lifecycle": trajectory.tool_result_lifecycle,
             "workspace_effects": trajectory.workspace_effects,
             "interaction_trace": list(env.action_trace),
             "contains_reasoning": False,

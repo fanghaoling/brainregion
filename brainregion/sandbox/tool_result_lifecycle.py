@@ -20,6 +20,7 @@ _COMPACTABLE_TOOLS = frozenset(
         "list_allowed_roots",
         "apply_text_patch",
         "workspace_run_check",
+        "act",
     }
 )
 
@@ -215,11 +216,20 @@ def _records(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _receipt(record: dict[str, Any]) -> str:
+    if record["tool"] == "act":
+        summary = (
+            "This action already executed and must not be replayed to recover its earlier result. "
+            "The result body was unloaded after its guaranteed consumer turn; use the current observation."
+        )
+    else:
+        summary = (
+            "The earlier result body was unloaded after its guaranteed consumer turn. "
+            "Re-run the tool if exact evidence is needed."
+        )
     return (
         f'<tool_result_receipt tool="{record["tool"]}" step="{record["step"]}" '
         f'target_kind="{record["target_kind"]}">\n'
-        "The earlier result body was unloaded after its guaranteed consumer turn. "
-        "Re-run the tool if exact evidence is needed.\n"
+        f"{summary}\n"
         "</tool_result_receipt>"
     )
 

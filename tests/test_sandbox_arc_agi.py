@@ -82,9 +82,12 @@ class _Response:
 class _Backend:
     def __init__(self) -> None:
         self.turn = 0
+        self.first_messages = None
 
     async def complete_messages(self, messages, **kwargs):
-        del messages, kwargs
+        del kwargs
+        if self.first_messages is None:
+            self.first_messages = [dict(message) for message in messages]
         self.turn += 1
         if self.turn == 1:
             return _Response(
@@ -238,3 +241,55 @@ def test_run_agent_does_not_require_gridworld_private_position():
     assert trajectory.tests_green is True
     assert trajectory.termination_reason == "done"
     assert wrapper.calls == [(simple, None)]
+
+
+def test_arc_loop_supplies_initial_frame_before_first_model_decision():
+    simple = _Action("ACTION1")
+    wrapper = _Wrapper(_Frame(), [simple], [_Frame(state="WIN", completed=2)])
+    env = ArcAgiEnv(wrapper=wrapper, game_id="fake")
+    env.reset()
+    backend = _Backend()
+    task = SandboxTask(id="arc-initial-frame", goal="discover and finish")
+    run_dir = make_run_dir(prefix="brainregion-arc-initial-")
+    try:
+        with scoped_env(env):
+            trajectory = asyncio.run(
+                run_agent(
+                    backend,
+                    "mock",
+                    task,
+                    run_dir=run_dir,
+                    max_steps=2,
+                    system_prompt=env.build_system_prompt(task.goal),
+                    verify_fn=lambda *_args, **_kwargs: {
+                        "tests_green": env.solved,
+                        "solve_status": "solved" if env.solved else "tests_fail",
+                        "pytest": None,
+                        "gold_diff": "",
+                    },
+                    visual_ephemeral=True,
+                    initial_observation=env.observation(),
+                )
+            )
+    finally:
+        cleanup_run_dir(run_dir)
+
+    assert trajectory.progress_trace[0]["operation"] == "act"
+    assert backend.first_messages is not None
+    visual_messages = [
+        message["content"]
+        for message in backend.first_messages
+        if "<visual>" in str(message.get("content"))
+    ]
+    assert len(visual_messages) == 1
+    assert '"frame":["01","2z"]' in visual_messages[0]
+
+
+def test_arc_prompt_explains_act_result_contains_current_observation_without_observe_recipe():
+    env = ArcAgiEnv(wrapper=_Wrapper(_Frame(), [_Action("ACTION1")], []), game_id="fake")
+
+    prompt = env.build_system_prompt("discover")
+
+    assert "Every successful act result also contains the next current observation" in prompt
+    assert "The observe tool is unnecessary" in prompt
+    assert '"tool":"observe"' not in prompt

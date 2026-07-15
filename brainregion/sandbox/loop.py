@@ -1493,6 +1493,7 @@ async def run_agent(
     status_injector: Any = None,        # Phase 4.1 metronome:async (step, messages)->(status_str|None, cost_usd);None=现行为
     status_period: int = 3,
     visual_ephemeral: bool = False,     # Phase 4.2:剥历史视觉观察出 transcript(只留最新 <visual>);act 动作结果持久
+    initial_observation: str | None = None,  # env 可在首轮前提供当前观察，避免用一个模型轮次执行 observe
 ) -> Trajectory:
     """跑一个 agent loop。返回 Trajectory(含 verify 后的 solve_status)。
 
@@ -1510,6 +1511,9 @@ async def run_agent(
     max_steps 始终是主模型轮次安全上限；max_env_actions 是独立的环境原始动作预算。
     后者默认 None，保持 code-regime/旧调用行为；env-eval 显式传入后，recall/observe 不再挤占
     可执行动作额度。
+
+    ``initial_observation`` 仅作为首轮视觉消息注入，不触发工具调用或环境状态变化。默认 None
+    保持既有循环行为；环境适配器可用它消除“先花一轮 observe 才能开始”的协议开销。
     """
     import sys
 
@@ -1660,6 +1664,17 @@ async def run_agent(
             compound_message("system", system_parts),
             compound_message("user", user_parts),
         ]
+        if initial_observation is not None:
+            initial_visual = str(initial_observation).strip()
+            if not initial_visual:
+                raise ValueError("initial_observation cannot be empty")
+            messages.append(
+                attributed_message(
+                    "user",
+                    f"<visual>\n{initial_visual}\n</visual>",
+                    "visual",
+                )
+            )
         # brainregion 臂:步首 wake_gate + 注入种子经验(MVP:memory-injection,consult-in-loop defer)
         if arm == "brainregion":
             inject, wake_calls, _used = _arm_inject(task, task.goal)
