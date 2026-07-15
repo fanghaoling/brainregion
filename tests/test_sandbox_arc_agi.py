@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import pytest
 
 from brainregion.sandbox.envs.arc_agi import ArcAgiEnv
+from brainregion.sandbox.epistemic_ledger import EpistemicLedger
 from brainregion.sandbox.isolation import cleanup_run_dir, make_run_dir
 from brainregion.sandbox.loop import ToolCall, dispatch_tool, run_agent, scoped_env
 from brainregion.sandbox.task import SandboxTask
@@ -207,6 +208,7 @@ def test_arc_env_cli_is_explicit_and_bounded():
     assert args.max_steps == 6
     assert args.max_cost_usd == 0.05
     assert args.thinking == "off"
+    assert args.epistemic_ledger is False
 
 
 def test_run_agent_does_not_require_gridworld_private_position():
@@ -293,3 +295,117 @@ def test_arc_prompt_explains_act_result_contains_current_observation_without_obs
     assert "Every successful act result also contains the next current observation" in prompt
     assert "The observe tool is unnecessary" in prompt
     assert '"tool":"observe"' not in prompt
+
+
+def _epistemic_claim(hypothesis_id: str = "h1") -> dict:
+    return {
+        "hypothesis_id": hypothesis_id,
+        "rule": "action1 changes the visible arrangement",
+        "scope": "current level",
+        "replaces": "",
+        "predicts": {
+            "frame_change": "changed",
+            "level_delta": 0,
+            "state": "NOT_FINISHED",
+        },
+    }
+
+
+def test_arc_epistemic_ledger_verifies_predictions_and_exposes_bounded_working_view():
+    ledger = EpistemicLedger()
+    simple = _Action("ACTION1")
+    wrapper = _Wrapper(
+        _Frame(grid=[[0, 0], [0, 0]]),
+        [simple],
+        [
+            _Frame(grid=[[1, 0], [0, 0]]),
+            _Frame(grid=[[2, 0], [0, 0]]),
+        ],
+    )
+    env = ArcAgiEnv(wrapper=wrapper, game_id="fake", epistemic_ledger=ledger)
+    env.reset()
+
+    first_observation, _reward, _terminated, first_info = env.step(
+        "action1", epistemic_update=_epistemic_claim()
+    )
+    second_observation, _reward, _terminated, second_info = env.step(
+        "action1", epistemic_update=_epistemic_claim()
+    )
+
+    assert first_info["epistemic_feedback"]["status"] == "open"
+    assert second_info["epistemic_feedback"]["status"] == "supported"
+    view = json.loads(second_observation)["epistemic_ledger"]
+    assert view["active_hypotheses"][0]["rule"] == _epistemic_claim()["rule"]
+    assert env.action_trace[-1]["epistemic_prediction_matched"] is True
+    assert ledger.public_metrics()["predictions"] == 2
+
+
+def test_arc_epistemic_update_is_required_before_side_effect_when_enabled():
+    ledger = EpistemicLedger()
+    simple = _Action("ACTION1")
+    wrapper = _Wrapper(_Frame(), [simple], [_Frame()])
+    env = ArcAgiEnv(wrapper=wrapper, game_id="fake", epistemic_ledger=ledger)
+    env.reset()
+
+    with pytest.raises(ValueError, match="args.epistemic"):
+        env.step("action1")
+
+    assert wrapper.calls == []
+    assert ledger.public_metrics()["predictions"] == 0
+
+
+def test_dispatch_passes_epistemic_update_only_to_enabled_arc_env():
+    ledger = EpistemicLedger()
+    simple = _Action("ACTION1")
+    wrapper = _Wrapper(
+        _Frame(grid=[[0, 0], [0, 0]]),
+        [simple],
+        [_Frame(grid=[[1, 0], [0, 0]])],
+    )
+    env = ArcAgiEnv(wrapper=wrapper, game_id="fake", epistemic_ledger=ledger)
+    env.reset()
+    call = ToolCall(
+        thought="test a rule",
+        tool="act",
+        args={"action": "action1", "epistemic": _epistemic_claim()},
+        done=False,
+        answer="",
+    )
+
+    with scoped_env(env):
+        result, error = dispatch_tool(call)
+
+    assert error is None
+    assert json.loads(result)["info"]["epistemic_feedback"]["matched"] is True
+    assert ledger.public_metrics()["predictions"] == 1
+
+
+def test_arc_epistemic_prompt_is_opt_in_and_keeps_runtime_authority():
+    plain = ArcAgiEnv(wrapper=_Wrapper(_Frame(), [_Action("ACTION1")], []), game_id="plain")
+    treatment = ArcAgiEnv(
+        wrapper=_Wrapper(_Frame(), [_Action("ACTION1")], []),
+        game_id="treatment",
+        epistemic_ledger=EpistemicLedger(),
+    )
+
+    plain_prompt = plain.build_system_prompt("go")
+    assert "args must also contain an epistemic object" not in plain_prompt
+    assert '"args":{"action":"action1"}}' in plain_prompt
+    prompt = treatment.build_system_prompt("go")
+    assert "args must also contain an epistemic object" in prompt
+    assert "The runtime, not you, decides" in prompt
+    assert '"args":{"action":"action1","epistemic":' in prompt
+
+
+def test_arc_cli_enables_episode_local_epistemic_ledger_explicitly():
+    args = build_parser().parse_args(
+        [
+            "sandbox",
+            "arc-env",
+            "--main-brain",
+            "buzz_anthropic/claude-sonnet-5",
+            "--epistemic-ledger",
+        ]
+    )
+
+    assert args.epistemic_ledger is True

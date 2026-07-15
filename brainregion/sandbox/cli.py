@@ -50,6 +50,7 @@ from .envs import (
     generate_urban_delivery_scenario,
     write_replay_html,
 )
+from .epistemic_ledger import EpistemicLedger, disabled_epistemic_metrics
 from .fixtures import SANDBOX_FIXTURES, get_fixture, list_fixture_ids
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
 from .loop import run_agent, run_cognitive_loop, scoped_env, scoped_memory_mode
@@ -942,8 +943,13 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
         "Explore the unfamiliar environment, infer useful goals and action effects from observations, "
         "and complete as many levels as possible efficiently."
     )
+    epistemic_ledger = EpistemicLedger() if bool(args.epistemic_ledger) else None
     try:
-        env = ArcAgiEnv.create(str(args.game), seed=int(args.seed))
+        env = ArcAgiEnv.create(
+            str(args.game),
+            seed=int(args.seed),
+            epistemic_ledger=epistemic_ledger,
+        )
     except (RuntimeError, ValueError) as exc:
         raise SystemExit(str(exc)) from exc
 
@@ -1001,7 +1007,11 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
         normalized_usage = normalize_usage(trajectory.total_main_usage)
         result = {
             "run_id": run_id,
-            "mode": "arc_agi_3_public_baseline",
+            "mode": (
+                "arc_agi_3_epistemic_ledger"
+                if epistemic_ledger is not None
+                else "arc_agi_3_public_baseline"
+            ),
             "game_id": snapshot.get("game_id"),
             "model": model,
             "endpoint_id": endpoint_id,
@@ -1029,6 +1039,11 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
             "usage": normalized_usage,
             "input_attribution": trajectory.main_input_attribution,
             "tool_result_lifecycle": trajectory.tool_result_lifecycle,
+            "epistemic_ledger": (
+                epistemic_ledger.public_metrics()
+                if epistemic_ledger is not None
+                else disabled_epistemic_metrics()
+            ),
             "workspace_effects": trajectory.workspace_effects,
             "interaction_trace": list(env.action_trace),
             "contains_reasoning": False,

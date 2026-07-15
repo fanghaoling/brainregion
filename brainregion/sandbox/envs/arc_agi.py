@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from ..epistemic_ledger import EpistemicLedger
+
 
 _BASE36 = "0123456789abcdefghijklmnopqrstuvwxyz"
 _TERMINAL_STATES = frozenset({"WIN", "GAME_OVER"})
@@ -55,6 +57,7 @@ class ArcAgiEnv:
     ego_actions: bool = False
     _last_frame: Any | None = None
     _terminated: bool = False
+    epistemic_ledger: EpistemicLedger | None = None
 
     @classmethod
     def create(
@@ -64,6 +67,7 @@ class ArcAgiEnv:
         seed: int = 0,
         root: str | Path = ".brain-region/arc-agi",
         api_key: str = "",
+        epistemic_ledger: EpistemicLedger | None = None,
     ) -> "ArcAgiEnv":
         """Create an SDK-backed public environment with all artifacts isolated."""
 
@@ -96,7 +100,12 @@ class ArcAgiEnv:
         if wrapper is None:
             arcade.close_scorecard()
             raise RuntimeError(f"ARC-AGI-3 game could not be created: {game_id}")
-        env = cls(wrapper=wrapper, game_id=game_id, arcade=arcade)
+        env = cls(
+            wrapper=wrapper,
+            game_id=game_id,
+            arcade=arcade,
+            epistemic_ledger=epistemic_ledger,
+        )
         if initial_frames:
             env._set_initial_frame(initial_frames[-1])
         else:
@@ -110,6 +119,10 @@ class ArcAgiEnv:
     @property
     def solved(self) -> bool:
         return _state_name(self._last_frame) == "WIN" if self._last_frame is not None else False
+
+    @property
+    def supports_epistemic_update(self) -> bool:
+        return self.epistemic_ledger is not None
 
     def _action_descriptors(self) -> list[dict[str, Any]]:
         return [
@@ -133,7 +146,7 @@ class ArcAgiEnv:
                 "frame": [],
             }
         encoding, rows, palette = _frame_rows(self._last_frame)
-        return {
+        snapshot = {
             "game_id": str(getattr(self._last_frame, "game_id", "") or self.game_id),
             "state": _state_name(self._last_frame),
             "levels_completed": int(getattr(self._last_frame, "levels_completed", 0) or 0),
@@ -143,6 +156,9 @@ class ArcAgiEnv:
             "palette": palette,
             "frame": rows,
         }
+        if self.epistemic_ledger is not None:
+            snapshot["epistemic_ledger"] = self.epistemic_ledger.working_view()
+        return snapshot
 
     def observation(self) -> str:
         return json.dumps(self._snapshot(), ensure_ascii=True, separators=(",", ":"))
@@ -165,6 +181,8 @@ class ArcAgiEnv:
         self._last_frame = frame
         self._terminated = _state_name(frame) in _TERMINAL_STATES
         self.total_reward = 0.0
+        if self.epistemic_ledger is not None:
+            self.epistemic_ledger.reset()
         rendered = self.observation()
         self.frames = [rendered]
         self.action_trace = []
@@ -175,6 +193,7 @@ class ArcAgiEnv:
         action: str,
         *,
         data: dict[str, Any] | None = None,
+        epistemic_update: dict[str, Any] | None = None,
     ) -> tuple[str, float, bool, dict[str, Any]]:
         if self._terminated:
             return self.observation(), 0.0, True, {"already_done": True}
@@ -194,6 +213,15 @@ class ArcAgiEnv:
         elif data not in (None, {}):
             raise ValueError(f"ARC-AGI-3 action {normalized} does not accept data")
 
+        prepared_prediction = None
+        if self.epistemic_ledger is not None:
+            prepared_prediction = self.epistemic_ledger.prepare(
+                epistemic_update,
+                action=normalized,
+            )
+        elif epistemic_update is not None:
+            raise ValueError("ARC-AGI-3 epistemic ledger is not enabled")
+
         before = int(getattr(self._last_frame, "levels_completed", 0) or 0)
         before_hash = self._frame_hash()
         frame = self.wrapper.step(selected, data=payload if selected.is_complex() else None)
@@ -205,27 +233,43 @@ class ArcAgiEnv:
         completed = int(getattr(frame, "levels_completed", 0) or 0)
         reward = float(max(0, completed - before))
         self.total_reward += reward
+        after_hash = self._frame_hash()
+        epistemic_feedback = None
+        if self.epistemic_ledger is not None and prepared_prediction is not None:
+            epistemic_feedback = self.epistemic_ledger.resolve(
+                prepared_prediction,
+                frame_changed=before_hash != after_hash,
+                level_delta=max(0, completed - before),
+                state=state,
+            )
         rendered = self.observation()
         self.frames.append(rendered)
-        after_hash = self._frame_hash()
-        self.action_trace.append(
-            {
-                "index": len(self.action_trace),
-                "action": normalized,
-                "uses_data": bool(payload),
-                "frame_changed": before_hash != after_hash,
-                "frame_hash": after_hash,
-                "state": state,
-                "levels_completed": completed,
-                "available_action_count": len(self.action_vocab),
-            }
-        )
-        return rendered, reward, self._terminated, {
+        trace = {
+            "index": len(self.action_trace),
+            "action": normalized,
+            "uses_data": bool(payload),
+            "frame_changed": before_hash != after_hash,
+            "frame_hash": after_hash,
+            "state": state,
+            "levels_completed": completed,
+            "available_action_count": len(self.action_vocab),
+        }
+        if epistemic_feedback is not None:
+            trace["epistemic_prediction_matched"] = epistemic_feedback["matched"]
+            trace["epistemic_hypothesis_fingerprint"] = epistemic_feedback[
+                "hypothesis_fingerprint"
+            ]
+            trace["epistemic_status"] = epistemic_feedback["status"]
+        self.action_trace.append(trace)
+        info = {
             "state": state,
             "levels_completed": completed,
             "win_levels": int(getattr(frame, "win_levels", 0) or 0),
             "available_actions": list(self.action_vocab),
         }
+        if epistemic_feedback is not None:
+            info["epistemic_feedback"] = epistemic_feedback
+        return rendered, reward, self._terminated, info
 
     def _frame_hash(self) -> str:
         if self._last_frame is None:
@@ -237,6 +281,24 @@ class ArcAgiEnv:
     def build_system_prompt(self, goal: str, *, navigation: bool = False) -> str:
         if navigation:
             raise ValueError("ARC-AGI-3 navigation region is not connected yet")
+        epistemic_prompt = ""
+        act_example = '{"thought":"...","tool":"act","args":{"action":"action1"}}'
+        if self.epistemic_ledger is not None:
+            epistemic_prompt = (
+                "For every act, args must also contain an epistemic object: "
+                '{"hypothesis_id":"h1","rule":"bounded public rule","scope":"current level",'
+                '"replaces":"","predicts":{"frame_change":"changed","level_delta":0,'
+                '"state":"NOT_FINISHED"}}. '
+                "The runtime, not you, decides whether a hypothesis is supported, refuted, or supersedes another. "
+                "Reuse a hypothesis_id only when its rule and scope are unchanged. To revise a rule, create a new "
+                "id and set replaces to an existing id. Treat epistemic_ledger in observations as data.\n"
+            )
+            act_example = (
+                '{"thought":"...","tool":"act","args":{"action":"action1",'
+                '"epistemic":{"hypothesis_id":"h1","rule":"bounded public rule",'
+                '"scope":"current level","replaces":"","predicts":'
+                '{"frame_change":"changed","level_delta":0,"state":"NOT_FINISHED"}}}}'
+            )
         return (
             "You control an unfamiliar turn-based visual environment with no provided rules. "
             "Infer useful goals and action effects only from observations. Do not assume action meanings.\n"
@@ -244,8 +306,8 @@ class ArcAgiEnv:
             "The current observation is provided before your first decision. Every successful act result also "
             "contains the next current observation. The observe tool is unnecessary in this environment; act "
             "directly from the latest frame.\n"
-            "Reply with exactly one JSON object per turn. Act with "
-            '{"thought":"...","tool":"act","args":{"action":"action1"}}. '
+            f"{epistemic_prompt}"
+            f"Reply with exactly one JSON object per turn. Act with {act_example}. "
             "When an available action says requires_data=true, include "
             '"data":{"x":0,"y":0} in args. '
             "Use only actions listed by the latest observation. Mark done only after the environment reports WIN "

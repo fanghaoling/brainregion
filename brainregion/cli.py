@@ -625,6 +625,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--tool-result-lifecycle", default="full", choices=["full", "compact"]
     )
     p_sb_arc_env.add_argument("--tool-result-live-reads", type=int, default=3)
+    p_sb_arc_env.add_argument(
+        "--epistemic-ledger",
+        action="store_true",
+        help="实验性：启用 episode-local 规则/预测账本；不写长期 Memory",
+    )
     p_sb_env.add_argument("--wall-density", type=float, default=None,
                           help="随机墙密度(0..0.6,占可放格比例;启用需配 --wall-seed)")
     p_sb_env.add_argument("--wall-seed", type=int, default=None,

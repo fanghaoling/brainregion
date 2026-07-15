@@ -651,9 +651,29 @@ brain-region sandbox arc-env `
 Each run writes the same content-free summary to `.brain-region/arc-agi/runs/`; official frame/action recordings stay
 under `.brain-region/arc-agi/recordings/`. Neither location is tracked by Git.
 
+After establishing a main-only baseline, an opt-in episode-local epistemic ledger can test whether explicit,
+falsifiable rule revisions improve action selection without writing anything to long-term Memory:
+
+```powershell
+brain-region sandbox arc-env `
+  --game ls20 `
+  --main-brain buzz_anthropic/claude-sonnet-5 `
+  --max-steps 12 `
+  --tool-result-lifecycle compact `
+  --tool-result-live-reads 0 `
+  --epistemic-ledger
+```
+
+The model attaches one public rule and one observable prediction to each action. The runtime checks frame change,
+level delta, and state; the model cannot mark its own rule as supported. A replacement rule must match at least two
+executed transitions before the old rule is superseded. Refuted rule bodies leave the working view while a
+content-free tombstone remains, and the entire ledger is discarded when the episode resets. Reports expose only
+counts and prediction accuracy, not rule text or reasoning. Compare this flag through matched runs; it is an
+experimental scaffold, not a production memory or insight-promotion path.
+
 This command is a public-environment architecture probe, not an official ARC-AGI-3 score. It does not encode game
-rules or enable memory, strategy, navigation, or benchmark-specific hints. Add Regions only through matched arms after
-the baseline interaction trace identifies a general capability gap.
+rules or enable long-term memory, strategy, navigation, or benchmark-specific hints. Add Regions only through matched
+arms after the baseline interaction trace identifies a general capability gap.
 
 ### Urban Delivery Navigation Pilot
 

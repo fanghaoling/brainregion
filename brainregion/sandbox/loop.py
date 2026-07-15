@@ -1088,8 +1088,18 @@ def dispatch_tool(call: ToolCall, *, portable_root: str = "") -> tuple[str, str 
             action_data = call.args.get("data")
             if action_data is not None and not isinstance(action_data, dict):
                 raise ValueError("'data' must be an object when provided")
+            epistemic_update = call.args.get("epistemic")
             if getattr(env, "supports_action_data", False):
-                obs, reward, terminated, info = env.step(normalized, data=action_data)
+                if getattr(env, "supports_epistemic_update", False):
+                    obs, reward, terminated, info = env.step(
+                        normalized,
+                        data=action_data,
+                        epistemic_update=epistemic_update,
+                    )
+                else:
+                    if epistemic_update is not None:
+                        raise ValueError("this environment does not accept epistemic updates")
+                    obs, reward, terminated, info = env.step(normalized, data=action_data)
             else:
                 if action_data not in (None, {}):
                     raise ValueError("this environment does not accept action data")
