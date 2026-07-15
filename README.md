@@ -720,6 +720,24 @@ reports all matched pairs separately from pairs where suppression was actually e
 failures or recovered runs containing provider errors from paired effects, and bootstraps repeat-level deltas. Repeats
 of one deterministic probe remain a descriptive stability pilot rather than independent task evidence.
 
+An additional experimental `evidence` lifecycle unloads rejected model-authored rules and reasoning but retains a
+small allow-listed projection of objective runtime feedback (executed action, `matched`, mismatch fields, and transition
+measurements). It never retains the model's prediction or rule text. Compare it directly with the status-only receipt:
+
+```powershell
+brain-region --config brain_region_config.json --env-file .env sandbox rule-shift-eval `
+  --main-brain buzz_anthropic/claude-sonnet-5 `
+  --arms suppress,evidence `
+  --repeats 2 `
+  --max-total-cost-usd 0.20
+```
+
+The initial two-pair Sonnet 5 pilot was a negative result: `evidence - suppress` was `+4067` mean tokens, `+1` model
+step, and `-0.5` solve rate. Both pairs were prefix-matched and infrastructure-clean, but the sample is too small for
+an ability claim. In this short probe the latest observation already contains the same feedback, so per-turn evidence
+receipts mostly repeat data. `evidence` remains opt-in; the next useful comparison is a deduplicated evidence workspace
+on a delayed-recall task.
+
 ### Urban Delivery Navigation Pilot
 
 The urban-delivery sandbox tests execution offload on a deterministic road network. The main brain owns order-level

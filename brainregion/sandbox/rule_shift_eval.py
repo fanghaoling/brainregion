@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import time
+from collections.abc import Sequence
 from typing import Any
 
 from brainregion.eval.stats import bootstrap_statistic, seed_for
@@ -18,7 +19,9 @@ from .task import SandboxTask
 
 ARM_FULL = "full"
 ARM_SUPPRESS = "suppress"
+ARM_EVIDENCE = "evidence"
 RULE_SHIFT_ARMS = (ARM_FULL, ARM_SUPPRESS)
+RULE_SHIFT_LIFECYCLE_ARMS = (ARM_FULL, ARM_SUPPRESS, ARM_EVIDENCE)
 RULE_SHIFT_GOAL = (
     "Establish an evidence-supported action-effect rule, detect any later contradiction, "
     "and verify a replacement rule."
@@ -60,7 +63,7 @@ async def run_rule_shift_case(
 ) -> dict[str, Any]:
     """Run one fresh rule-shift episode and return a content-free case record."""
 
-    if arm not in RULE_SHIFT_ARMS:
+    if arm not in RULE_SHIFT_LIFECYCLE_ARMS:
         raise ValueError(f"unknown rule-shift arm: {arm!r}")
     _validate_eval_args(
         repeats=1,
@@ -136,9 +139,11 @@ async def run_rule_shift_eval(
     shared_prefix_turns: int = 1,
     run_id: str = "",
     bootstrap_samples: int | None = None,
+    arms: Sequence[str] = RULE_SHIFT_ARMS,
 ) -> dict[str, Any]:
-    """Run fresh full/suppress pairs with alternating order and safe prefix replay."""
+    """Run a fresh lifecycle pair with alternating order and safe prefix replay."""
 
+    arms = _normalize_arms(arms)
     _validate_eval_args(
         repeats=repeats,
         shift_after=shift_after,
@@ -150,15 +155,15 @@ async def run_rule_shift_eval(
     )
     run_id = run_id or f"rule-shift-eval-{int(time.time() * 1000)}"
     cases: list[dict[str, Any]] = []
-    order_counts = {"full_first": 0, "suppress_first": 0}
+    order_counts = {f"{arm}_first": 0 for arm in arms}
     actual_provider_cost = 0.0
     actual_provider_calls = 0
     replayed_calls = 0
     execution_order = 0
-    total_runs = repeats * len(RULE_SHIFT_ARMS)
+    total_runs = repeats * len(arms)
 
     for repeat in range(repeats):
-        ordered_arms = list(RULE_SHIFT_ARMS)
+        ordered_arms = list(arms)
         if repeat % 2:
             ordered_arms.reverse()
         order_counts[f"{ordered_arms[0]}_first"] += 1
@@ -212,12 +217,14 @@ async def run_rule_shift_eval(
         cases,
         run_id=run_id,
         bootstrap_samples=bootstrap_samples,
+        arms=arms,
     )
     report["cases"] = cases
     report["execution"] = {
         "model": model,
         "endpoint_id": endpoint_id,
         "repeats": repeats,
+        "arms": list(arms),
         "shift_after": shift_after,
         "max_steps": max_steps,
         "max_cost_usd_per_run": max_cost_usd,
@@ -246,10 +253,12 @@ def summarize_rule_shift_records(
     *,
     run_id: str = "",
     bootstrap_samples: int | None = None,
+    arms: Sequence[str] = RULE_SHIFT_ARMS,
 ) -> dict[str, Any]:
     if not records:
         raise ValueError("rule-shift records cannot be empty")
-    grouped: dict[str, list[dict[str, Any]]] = {arm: [] for arm in RULE_SHIFT_ARMS}
+    arms = _normalize_arms(arms)
+    grouped: dict[str, list[dict[str, Any]]] = {arm: [] for arm in arms}
     for record in records:
         arm = str(record.get("arm") or "")
         if arm not in grouped:
@@ -258,15 +267,15 @@ def summarize_rule_shift_records(
 
     per_arm = {
         arm: _arm_summary(grouped[arm])
-        for arm in RULE_SHIFT_ARMS
+        for arm in arms
         if grouped[arm]
     }
-    diagnostics = _pair_diagnostics(records)
-    matched_rows = _matched_rows(records)
+    diagnostics = _pair_diagnostics(records, arms=arms)
+    matched_rows = _matched_rows(records, arms=arms)
     exposed_repeats = {
         item["repeat"]
         for item in diagnostics
-        if item["treatment_exposed"]
+        if item["contrast_exposed"]
         and item["prefix_replay_valid"] is not False
         and item["first_action_match"] is True
     }
@@ -274,7 +283,7 @@ def summarize_rule_shift_records(
     run_id = run_id or f"rule-shift-summary-{int(time.time() * 1000)}"
     return {
         "run_id": run_id,
-        "arms": list(RULE_SHIFT_ARMS),
+        "arms": list(arms),
         "n_runs": len(records),
         "bootstrap_unit": "repeat",
         "per_arm": per_arm,
@@ -283,12 +292,14 @@ def summarize_rule_shift_records(
             run_id=run_id,
             label="all",
             bootstrap_samples=bootstrap_samples,
+            arms=arms,
         ),
         "exposure_aligned_effect": _effect_summary(
             exposed_rows,
             run_id=run_id,
             label="exposed",
             bootstrap_samples=bootstrap_samples,
+            arms=arms,
         ),
         "pair_quality": _pair_quality(diagnostics),
         "pair_diagnostics": diagnostics,
@@ -315,13 +326,14 @@ def render_rule_shift_eval_summary(report: dict[str, Any]) -> str:
             f"solve={summary.get('solve_rate')} steps={summary.get('mean_model_steps')} "
             f"tokens={summary.get('mean_total_tokens')} "
             f"cost=${float(summary.get('mean_cost_usd') or 0):.6f} "
-            f"suppressed={summary.get('mean_suppressed_turns')}"
+            f"suppressed={summary.get('mean_suppressed_turns')} "
+            f"evidence_receipts={summary.get('mean_evidence_receipts')}"
         )
     effect = report.get("matched_effect") or {}
     raw = effect.get("raw_deltas") or {}
     token_ci = (effect.get("bootstrap_deltas") or {}).get("total_tokens") or {}
     lines.append(
-        "  suppress-full: "
+        f"  {effect.get('delta_direction')}: "
         f"solve={raw.get('solved')} steps={raw.get('model_steps')} "
         f"tokens={raw.get('total_tokens')} cost={raw.get('cost_usd')} "
         f"pairs={effect.get('n_pairs')}"
@@ -333,7 +345,7 @@ def render_rule_shift_eval_summary(report: dict[str, Any]) -> str:
     quality = report.get("pair_quality") or {}
     lines.append(
         f"  pair_quality={quality.get('status')} complete={quality.get('complete_pairs')} "
-        f"exposed={quality.get('treatment_exposed_pairs')} "
+        f"exposed={quality.get('contrast_exposed_pairs')} "
         f"prefix_invalid={quality.get('prefix_replay_invalid_pairs')}"
     )
     lines.append("  interpretation=descriptive pilot; no ability claim")
@@ -435,6 +447,18 @@ def _runner_error_case(*, arm: str, error: Exception) -> dict[str, Any]:
     }
 
 
+def _normalize_arms(arms: Sequence[str]) -> tuple[str, str]:
+    values = tuple(str(arm).strip().lower() for arm in arms)
+    if len(values) != 2:
+        raise ValueError("rule-shift eval requires exactly two arms")
+    if values[0] == values[1]:
+        raise ValueError("rule-shift eval arms must be distinct")
+    unknown = [arm for arm in values if arm not in RULE_SHIFT_LIFECYCLE_ARMS]
+    if unknown:
+        raise ValueError(f"unknown rule-shift arm: {unknown[0]!r}")
+    return values[0], values[1]
+
+
 def _validate_eval_args(
     *,
     repeats: int,
@@ -485,6 +509,7 @@ def _arm_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_verified_insights": _mean(valid, "verified_insights"),
         "mean_supersessions": _mean(valid, "supersessions"),
         "mean_suppressed_turns": _mean(lifecycles, "suppressed_turns"),
+        "mean_evidence_receipts": _mean(lifecycles, "evidence_receipts"),
         "mean_estimated_input_tokens_avoided": _mean(
             lifecycles, "estimated_input_tokens_avoided"
         ),
@@ -492,60 +517,82 @@ def _arm_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _matched_rows(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _matched_rows(
+    records: list[dict[str, Any]],
+    *,
+    arms: tuple[str, str],
+) -> list[dict[str, Any]]:
     grouped: dict[int, dict[str, dict[str, Any]]] = {}
     for record in records:
         grouped.setdefault(int(record["repeat"]), {})[record["arm"]] = record
     rows = []
-    for repeat, arms in sorted(grouped.items()):
-        if not all(arm in arms for arm in RULE_SHIFT_ARMS):
+    for repeat, pair in sorted(grouped.items()):
+        if not all(arm in pair for arm in arms):
             continue
-        if any(arms[arm].get("infrastructure_error") for arm in RULE_SHIFT_ARMS):
+        if any(pair[arm].get("infrastructure_error") for arm in arms):
             continue
-        rows.append({"repeat": repeat, **arms})
+        rows.append({"repeat": repeat, **pair})
     return rows
 
 
-def _pair_diagnostics(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _pair_diagnostics(
+    records: list[dict[str, Any]],
+    *,
+    arms: tuple[str, str],
+) -> list[dict[str, Any]]:
+    control_arm, treatment_arm = arms
     grouped: dict[int, dict[str, dict[str, Any]]] = {}
     for record in records:
         grouped.setdefault(int(record["repeat"]), {})[record["arm"]] = record
     diagnostics = []
-    for repeat, arms in sorted(grouped.items()):
-        complete = all(arm in arms for arm in RULE_SHIFT_ARMS)
+    for repeat, pair in sorted(grouped.items()):
+        complete = all(arm in pair for arm in arms)
         if not complete:
             continue
-        full = arms[ARM_FULL]
-        suppress = arms[ARM_SUPPRESS]
-        prefixes = [full.get("shared_prefix") or {}, suppress.get("shared_prefix") or {}]
+        control = pair[control_arm]
+        treatment = pair[treatment_arm]
+        prefixes = [
+            control.get("shared_prefix") or {},
+            treatment.get("shared_prefix") or {},
+        ]
         replay = next((item for item in prefixes if item.get("role") == "replay"), {})
         prefix_valid = (
             int(replay.get("replay_mismatches") or 0) == 0
             and int(replay.get("replay_shortfalls") or 0) == 0
         )
-        full_first = _first_action_signature(full)
-        suppress_first = _first_action_signature(suppress)
+        control_first = _first_action_signature(control)
+        treatment_first = _first_action_signature(treatment)
+        control_exposed = int(
+            (control.get("epistemic_transcript_lifecycle") or {}).get(
+                "suppressed_turns", 0
+            )
+        ) > 0
+        treatment_exposed = int(
+            (treatment.get("epistemic_transcript_lifecycle") or {}).get(
+                "suppressed_turns", 0
+            )
+        ) > 0
         diagnostics.append(
             {
                 "repeat": repeat,
                 "complete": True,
                 "infrastructure_error": bool(
-                    full.get("infrastructure_error") or suppress.get("infrastructure_error")
+                    control.get("infrastructure_error")
+                    or treatment.get("infrastructure_error")
                 ),
-                "full_execution_order": full.get("execution_order"),
-                "suppress_execution_order": suppress.get("execution_order"),
+                "control": control_arm,
+                "treatment": treatment_arm,
+                "control_execution_order": control.get("execution_order"),
+                "treatment_execution_order": treatment.get("execution_order"),
                 "prefix_replay_valid": prefix_valid,
                 "first_action_match": (
-                    full_first == suppress_first
-                    if full_first is not None and suppress_first is not None
+                    control_first == treatment_first
+                    if control_first is not None and treatment_first is not None
                     else None
                 ),
-                "treatment_exposed": int(
-                    (suppress.get("epistemic_transcript_lifecycle") or {}).get(
-                        "suppressed_turns", 0
-                    )
-                )
-                > 0,
+                "control_exposed": control_exposed,
+                "treatment_exposed": treatment_exposed,
+                "contrast_exposed": control_exposed or treatment_exposed,
                 "contains_rule_content": False,
                 "contains_reasoning": False,
             }
@@ -588,6 +635,7 @@ def _pair_quality(diagnostics: list[dict[str, Any]]) -> dict[str, Any]:
         "complete_pairs": len(diagnostics),
         "valid_pairs": len(valid),
         "treatment_exposed_pairs": sum(item["treatment_exposed"] for item in valid),
+        "contrast_exposed_pairs": sum(item["contrast_exposed"] for item in valid),
         "prefix_replay_invalid_pairs": len(prefix_invalid),
         "first_action_diverged_pairs": len(first_diverged),
         "infrastructure_failed_pairs": len(diagnostics) - len(valid),
@@ -600,31 +648,42 @@ def _effect_summary(
     run_id: str,
     label: str,
     bootstrap_samples: int | None,
+    arms: tuple[str, str],
 ) -> dict[str, Any]:
+    control_arm, treatment_arm = arms
+    direction = f"{treatment_arm}_minus_{control_arm}"
     return {
-        "control": ARM_FULL,
-        "treatment": ARM_SUPPRESS,
-        "delta_direction": "suppress_minus_full",
+        "control": control_arm,
+        "treatment": treatment_arm,
+        "delta_direction": direction,
         "n_pairs": len(rows),
-        "raw_deltas": {metric: _paired_delta(rows, metric) for metric in _METRICS},
+        "raw_deltas": {
+            metric: _paired_delta(rows, metric, arms=arms) for metric in _METRICS
+        },
         "bootstrap_deltas": {
             metric: bootstrap_statistic(
                 rows,
-                lambda sample, metric=metric: _paired_delta(sample, metric),
+                lambda sample, metric=metric: _paired_delta(sample, metric, arms=arms),
                 B=bootstrap_samples,
-                seed=seed_for(run_id, f"rule-shift:{label}:{metric}"),
+                seed=seed_for(run_id, f"rule-shift:{direction}:{label}:{metric}"),
             )
             for metric in _METRICS
         },
     }
 
 
-def _paired_delta(rows: list[dict[str, Any]], metric: str) -> float | None:
+def _paired_delta(
+    rows: list[dict[str, Any]],
+    metric: str,
+    *,
+    arms: tuple[str, str],
+) -> float | None:
+    control_arm, treatment_arm = arms
     values = [
-        float(row[ARM_SUPPRESS][metric]) - float(row[ARM_FULL][metric])
+        float(row[treatment_arm][metric]) - float(row[control_arm][metric])
         for row in rows
-        if row[ARM_SUPPRESS].get(metric) is not None
-        and row[ARM_FULL].get(metric) is not None
+        if row[treatment_arm].get(metric) is not None
+        and row[control_arm].get(metric) is not None
     ]
     return sum(values) / len(values) if values else None
 
@@ -639,9 +698,11 @@ def _mean(records: list[dict[str, Any]], key: str) -> float | None:
 
 
 __all__ = [
+    "ARM_EVIDENCE",
     "ARM_FULL",
     "ARM_SUPPRESS",
     "RULE_SHIFT_ARMS",
+    "RULE_SHIFT_LIFECYCLE_ARMS",
     "RULE_SHIFT_GOAL",
     "render_rule_shift_eval_summary",
     "run_rule_shift_case",

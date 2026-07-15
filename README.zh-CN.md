@@ -427,6 +427,25 @@ Panel 快捷写法：
 
 strict privacy 更适合 plan review。code review 在脱敏后可能损失太多语义。
 
+## 客观证据回执实验
+
+`rule-shift` 的实验性 `evidence` 生命周期会卸载被证伪回合里的模型规则、预测和解释，只保留白名单内的
+客观运行时反馈：已执行动作、是否匹配、差异字段以及实际状态变化。它不会保留模型写出的规则正文。可以把它与只留状态的
+`suppress` 回执做顺序平衡配对：
+
+```powershell
+brain-region --config brain_region_config.json --env-file .env sandbox rule-shift-eval `
+  --main-brain buzz_anthropic/claude-sonnet-5 `
+  --arms suppress,evidence `
+  --repeats 2 `
+  --max-total-cost-usd 0.20
+```
+
+首轮 Sonnet 5 两对 pilot 是负结果：`evidence - suppress` 平均多 `4067` tokens、多 1 个模型步骤，solve rate
+低 `0.5`。两对都通过共同前缀和基础设施检查，但样本太小，不能据此声称能力下降。这个短任务的最新 observation
+本来就含有同一份反馈，因此逐回合 evidence receipt 主要是在重复数据。`evidence` 暂时保持显式 opt-in；下一步应在
+需要延迟召回的任务上测试去重证据工作台，而不是把证据散落在每个历史回合中。
+
 ## 城区配送三臂评测
 
 配送沙盒用确定性路网测试运动控制卸载，主脑保留 `pickup`、`deliver` 和完成判断：

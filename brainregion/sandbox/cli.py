@@ -943,7 +943,7 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit("--max-cost-usd must be positive")
     if args.epistemic_transcript_lifecycle != "full" and not args.epistemic_ledger:
         raise SystemExit(
-            "--epistemic-transcript-lifecycle suppress requires --epistemic-ledger"
+            "a non-full --epistemic-transcript-lifecycle requires --epistemic-ledger"
         )
 
     backend, registry = _build_backend(
@@ -1023,7 +1023,7 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
             "run_id": run_id,
             "mode": (
                 "arc_agi_3_epistemic_transcript"
-                if args.epistemic_transcript_lifecycle == "suppress"
+                if args.epistemic_transcript_lifecycle != "full"
                 else (
                     "arc_agi_3_epistemic_ledger"
                     if epistemic_ledger is not None
@@ -1144,7 +1144,7 @@ async def run_rule_shift(args: argparse.Namespace) -> dict[str, Any]:
 
 
 async def run_rule_shift_evaluation(args: argparse.Namespace) -> dict[str, Any]:
-    """Run counterbalanced full/suppress rule-shift repeats."""
+    """Run a counterbalanced pair of rule-shift transcript lifecycles."""
 
     dd = _defaults_mod.apply()
     model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
@@ -1175,6 +1175,7 @@ async def run_rule_shift_evaluation(args: argparse.Namespace) -> dict[str, Any]:
             tool_result_live_reads=int(args.tool_result_live_reads),
             shared_prefix_turns=int(args.shared_prefix_turns),
             bootstrap_samples=args.bootstrap_samples,
+            arms=tuple(part.strip() for part in args.arms.split(",")),
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc

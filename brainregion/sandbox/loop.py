@@ -2368,6 +2368,8 @@ async def run_agent(
                 if call.tool == "act" and _env is not None
                 else None
             )
+            if call.tool == "act":
+                _last_act_info.set(None)
             if call.tool in {"recall_map", "plan", "recall_topo", "recall_path", "delegate_navigation"}:
                 traj.region_tool_calls += 1
             _arm_cost_before = traj.total_arm_cost_usd
@@ -2556,11 +2558,19 @@ async def run_agent(
             )
             epistemic_update = call.args.get("epistemic")
             if call.tool == "act" and isinstance(epistemic_update, dict):
+                objective_evidence = None
+                if exec_err is None:
+                    act_info = _last_act_info.get()
+                    if isinstance(act_info, dict):
+                        feedback = act_info.get("epistemic_feedback")
+                        if isinstance(feedback, dict):
+                            objective_evidence = feedback
                 belief_lifecycle.mark(
                     assistant_message,
                     hypothesis_id=str(epistemic_update.get("hypothesis_id") or ""),
                     step=step,
                     rejected=bool(exec_err),
+                    evidence=objective_evidence,
                 )
             messages.append(assistant_message)
             # tool-result 当不可信数据:固定围栏(review gpt-9)。

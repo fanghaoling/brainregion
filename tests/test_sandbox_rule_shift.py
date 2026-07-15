@@ -187,7 +187,7 @@ def test_rule_shift_does_not_accept_replacing_a_never_supported_candidate():
     assert env.solved is False
 
 
-def test_rule_shift_cli_defaults_and_suppression_arm():
+def test_rule_shift_cli_defaults_and_transcript_lifecycle_arms():
     parser = build_parser()
     defaults = parser.parse_args(
         ["sandbox", "rule-shift", "--main-brain", "mock/model"]
@@ -204,6 +204,16 @@ def test_rule_shift_cli_defaults_and_suppression_arm():
             "3",
         ]
     )
+    evidence = parser.parse_args(
+        [
+            "sandbox",
+            "rule-shift",
+            "--main-brain",
+            "mock/model",
+            "--epistemic-transcript-lifecycle",
+            "evidence",
+        ]
+    )
 
     assert defaults.sandbox_command == "rule-shift"
     assert defaults.shift_after == 3
@@ -213,3 +223,4 @@ def test_rule_shift_cli_defaults_and_suppression_arm():
     assert defaults.epistemic_transcript_lifecycle == "full"
     assert suppressed.shift_after == 3
     assert suppressed.epistemic_transcript_lifecycle == "suppress"
+    assert evidence.epistemic_transcript_lifecycle == "evidence"

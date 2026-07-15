@@ -633,8 +633,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_arc_env.add_argument(
         "--epistemic-transcript-lifecycle",
         default="full",
-        choices=["full", "suppress"],
-        help="实验性：仅 suppress 会在下一轮前卸载被反驳/拒绝的模型回合",
+        choices=["full", "suppress", "evidence"],
+        help="实验性：suppress 卸载被反驳回合；evidence 仅保留有界客观证据",
     )
     p_sb_rule_shift = p_sb_sub.add_parser(
         "rule-shift",
@@ -661,12 +661,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_rule_shift.add_argument(
         "--epistemic-transcript-lifecycle",
         default="full",
-        choices=["full", "suppress"],
-        help="suppress 会在下一轮前卸载被证伪、取代或拒绝的模型回合",
+        choices=["full", "suppress", "evidence"],
+        help="suppress 卸载被证伪回合；evidence 额外保留有界客观证据",
     )
     p_sb_rule_shift_eval = p_sb_sub.add_parser(
         "rule-shift-eval",
-        help="重复且顺序平衡的 full/suppress 规则切换配对实验",
+        help="重复且顺序平衡的规则切换生命周期配对实验",
     )
     p_sb_rule_shift_eval.add_argument("--main-brain", default=None, help="主执行模型引用")
     p_sb_rule_shift_eval.add_argument("--repeats", type=int, default=2)
@@ -680,6 +680,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sb_rule_shift_eval.add_argument("--max-tokens", type=int, default=2048)
     p_sb_rule_shift_eval.add_argument("--bootstrap-samples", type=int, default=None)
+    p_sb_rule_shift_eval.add_argument(
+        "--arms",
+        default="full,suppress",
+        help="两个生命周期臂，前者为 control、后者为 treatment，例如 suppress,evidence",
+    )
     p_sb_rule_shift_eval.add_argument("--thinking", default="off", choices=["off", "on"])
     p_sb_rule_shift_eval.add_argument(
         "--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"]

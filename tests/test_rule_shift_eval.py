@@ -8,6 +8,7 @@ import pytest
 from brainregion.cli import build_parser
 from brainregion.sandbox.epistemic_ledger import EpistemicLedger
 from brainregion.sandbox.rule_shift_eval import (
+    ARM_EVIDENCE,
     ARM_FULL,
     ARM_SUPPRESS,
     run_rule_shift_eval,
@@ -194,6 +195,7 @@ def test_rule_shift_eval_counterbalances_and_replays_safe_first_turn(tmp_path, m
         "complete_pairs": 2,
         "valid_pairs": 2,
         "treatment_exposed_pairs": 2,
+        "contrast_exposed_pairs": 2,
         "prefix_replay_invalid_pairs": 0,
         "first_action_diverged_pairs": 0,
         "infrastructure_failed_pairs": 0,
@@ -208,6 +210,17 @@ def test_rule_shift_eval_counterbalances_and_replays_safe_first_turn(tmp_path, m
     assert "action1 changes exactly two visible cells" not in serialized
     assert "action1 changes thirty visible cells" not in serialized
 
+    reversed_roles = summarize_rule_shift_records(
+        report["cases"],
+        run_id="rule-shift-reversed-roles",
+        bootstrap_samples=20,
+        arms=(ARM_SUPPRESS, ARM_FULL),
+    )
+    assert reversed_roles["matched_effect"]["delta_direction"] == "full_minus_suppress"
+    assert reversed_roles["exposure_aligned_effect"]["n_pairs"] == 2
+    assert reversed_roles["pair_quality"]["treatment_exposed_pairs"] == 0
+    assert reversed_roles["pair_quality"]["contrast_exposed_pairs"] == 2
+
 
 @pytest.mark.parametrize(
     ("kwargs", "message"),
@@ -221,6 +234,57 @@ def test_rule_shift_eval_counterbalances_and_replays_safe_first_turn(tmp_path, m
 def test_rule_shift_eval_rejects_invalid_experiment_configuration(kwargs, message):
     with pytest.raises(ValueError, match=message):
         asyncio.run(run_rule_shift_eval(_LedgerAwareBackend(), "fake", **kwargs))
+
+
+@pytest.mark.parametrize(
+    ("arms", "message"),
+    [
+        ((ARM_SUPPRESS,), "exactly two"),
+        ((ARM_SUPPRESS, ARM_SUPPRESS), "distinct"),
+        ((ARM_SUPPRESS, "unknown"), "unknown rule-shift arm"),
+    ],
+)
+def test_rule_shift_eval_rejects_invalid_arm_pair(arms, message):
+    with pytest.raises(ValueError, match=message):
+        asyncio.run(
+            run_rule_shift_eval(_LedgerAwareBackend(), "fake", arms=arms)
+        )
+
+
+def test_rule_shift_eval_compares_status_only_with_evidence_receipts(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    report = asyncio.run(
+        run_rule_shift_eval(
+            _LedgerAwareBackend(),
+            "fake-model",
+            repeats=2,
+            max_steps=8,
+            max_cost_usd=1.0,
+            shared_prefix_turns=1,
+            bootstrap_samples=20,
+            run_id="rule-shift-evidence-test",
+            arms=(ARM_SUPPRESS, ARM_EVIDENCE),
+        )
+    )
+
+    assert report["arms"] == [ARM_SUPPRESS, ARM_EVIDENCE]
+    assert report["execution"]["arm_order_counts"] == {
+        "suppress_first": 1,
+        "evidence_first": 1,
+    }
+    assert report["matched_effect"]["control"] == ARM_SUPPRESS
+    assert report["matched_effect"]["treatment"] == ARM_EVIDENCE
+    assert report["matched_effect"]["delta_direction"] == "evidence_minus_suppress"
+    assert report["per_arm"][ARM_EVIDENCE]["mean_evidence_receipts"] > 0
+    assert report["per_arm"][ARM_SUPPRESS]["mean_evidence_receipts"] == 0
+    assert report["pair_quality"]["status"] == "matched"
+    assert report["pair_quality"]["treatment_exposed_pairs"] == 2
+    assert report["pair_quality"]["contrast_exposed_pairs"] == 2
+    serialized = json.dumps(report)
+    assert "action1 changes exactly two visible cells" not in serialized
+    assert "action1 changes thirty visible cells" not in serialized
 
 
 def test_rule_shift_summary_excludes_pair_with_recovered_provider_error(tmp_path, monkeypatch):
@@ -270,5 +334,18 @@ def test_rule_shift_eval_cli_defaults_are_bounded_and_explicit():
     assert args.max_steps == 10
     assert args.max_cost_usd == 0.08
     assert args.max_total_cost_usd is None
+    assert args.arms == "full,suppress"
     assert args.shared_prefix_turns == 1
     assert args.tool_result_lifecycle == "compact"
+
+    comparison = build_parser().parse_args(
+        [
+            "sandbox",
+            "rule-shift-eval",
+            "--main-brain",
+            "fake/model",
+            "--arms",
+            "suppress,evidence",
+        ]
+    )
+    assert comparison.arms == "suppress,evidence"
