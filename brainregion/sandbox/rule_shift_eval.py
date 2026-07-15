@@ -69,6 +69,7 @@ async def run_rule_shift_case(
     tool_result_lifecycle: str = "compact",
     tool_result_live_reads: int = 0,
     evidence_wake_live_reads: int = 2,
+    evidence_max_selected_events: int = 4,
 ) -> dict[str, Any]:
     """Run one fresh rule-shift episode and return a content-free case record."""
 
@@ -84,6 +85,7 @@ async def run_rule_shift_case(
         shared_prefix_turns=0,
         bootstrap_samples=None,
         evidence_wake_live_reads=evidence_wake_live_reads,
+        evidence_max_selected_events=evidence_max_selected_events,
         selective_wake_enabled=arm == ARM_SELECTIVE,
     )
     env = RuleShiftEnv(
@@ -126,6 +128,9 @@ async def run_rule_shift_case(
                 tool_result_live_reads=tool_result_live_reads,
                 epistemic_transcript_lifecycle=arm,
                 epistemic_evidence_wake_live_reads=evidence_wake_live_reads,
+                epistemic_evidence_max_selected_events=(
+                    evidence_max_selected_events
+                ),
                 initial_observation=env.observation(),
             )
         return _case_from_trajectory(trajectory, env=env, arm=arm)
@@ -154,6 +159,7 @@ async def run_rule_shift_eval(
     tool_result_lifecycle: str = "compact",
     tool_result_live_reads: int = 0,
     evidence_wake_live_reads: int = 2,
+    evidence_max_selected_events: int = 4,
     shared_prefix_turns: int = 1,
     run_id: str = "",
     bootstrap_samples: int | None = None,
@@ -172,6 +178,7 @@ async def run_rule_shift_eval(
         shared_prefix_turns=shared_prefix_turns,
         bootstrap_samples=bootstrap_samples,
         evidence_wake_live_reads=evidence_wake_live_reads,
+        evidence_max_selected_events=evidence_max_selected_events,
         selective_wake_enabled=ARM_SELECTIVE in arms,
     )
     run_id = run_id or f"rule-shift-eval-{int(time.time() * 1000)}"
@@ -219,6 +226,7 @@ async def run_rule_shift_eval(
                     tool_result_lifecycle=tool_result_lifecycle,
                     tool_result_live_reads=tool_result_live_reads,
                     evidence_wake_live_reads=evidence_wake_live_reads,
+                    evidence_max_selected_events=evidence_max_selected_events,
                 )
             except Exception as exc:  # noqa: BLE001 - preserve the matched matrix
                 case = _runner_error_case(arm=arm, error=exc)
@@ -261,6 +269,7 @@ async def run_rule_shift_eval(
         "tool_result_lifecycle": tool_result_lifecycle,
         "tool_result_live_reads": tool_result_live_reads,
         "evidence_wake_live_reads": evidence_wake_live_reads,
+        "evidence_max_selected_events": evidence_max_selected_events,
         "shared_prefix_turns": shared_prefix_turns,
         "shared_prefix_policy": "exact_first_response_before_suppression_v1",
         "arm_order_policy": "alternating_by_repeat",
@@ -355,7 +364,9 @@ def render_rule_shift_eval_summary(report: dict[str, Any]) -> str:
             f"evidence_receipts={summary.get('mean_evidence_receipts')} "
             f"workspace_events={summary.get('mean_evidence_workspace_events')} "
             f"workspace_injections={summary.get('mean_workspace_injections')} "
-            f"wake_requests={summary.get('mean_wake_requests')}"
+            f"wake_requests={summary.get('mean_wake_requests')} "
+            f"attention_selected={summary.get('mean_attention_selected_events')} "
+            f"attention_omitted={summary.get('mean_attention_omitted_events')}"
         )
     effect = report.get("matched_effect") or {}
     raw = effect.get("raw_deltas") or {}
@@ -504,6 +515,7 @@ def _validate_eval_args(
     shared_prefix_turns: int,
     bootstrap_samples: int | None,
     evidence_wake_live_reads: int,
+    evidence_max_selected_events: int,
     selective_wake_enabled: bool,
 ) -> None:
     if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats <= 0:
@@ -538,6 +550,12 @@ def _validate_eval_args(
         or evidence_wake_live_reads <= 0
     ):
         raise ValueError("evidence_wake_live_reads must be a positive integer")
+    if selective_wake_enabled and (
+        isinstance(evidence_max_selected_events, bool)
+        or not isinstance(evidence_max_selected_events, int)
+        or evidence_max_selected_events <= 0
+    ):
+        raise ValueError("evidence_max_selected_events must be a positive integer")
 
 
 def _arm_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -547,6 +565,7 @@ def _arm_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         lifecycle.get("evidence_workspace") or {} for lifecycle in lifecycles
     ]
     selective_wakes = [lifecycle.get("selective_wake") or {} for lifecycle in lifecycles]
+    event_attentions = [lifecycle.get("event_attention") or {} for lifecycle in lifecycles]
     return {
         "n_runs": len(records),
         "n_valid_runs": len(valid),
@@ -579,6 +598,16 @@ def _arm_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         ),
         "mean_wake_requests": _mean(selective_wakes, "requests"),
         "mean_wake_activations": _mean(selective_wakes, "activations"),
+        "mean_attention_selection_passes": _mean(
+            event_attentions, "selection_passes"
+        ),
+        "mean_attention_selected_events": _mean(
+            event_attentions, "selected_events"
+        ),
+        "mean_attention_omitted_events": _mean(
+            event_attentions, "omitted_events"
+        ),
+        "mean_attention_empty_wakes": _mean(event_attentions, "empty_wakes"),
         "mean_estimated_input_tokens_avoided": _mean(
             lifecycles, "estimated_input_tokens_avoided"
         ),

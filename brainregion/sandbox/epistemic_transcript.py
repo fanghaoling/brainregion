@@ -38,6 +38,7 @@ class EpistemicTranscriptLifecycle:
     mode: EpistemicTranscriptMode = "full"
     ledger: EpistemicLedger | None = field(default=None, repr=False)
     selective_wake_live_reads: int = 2
+    selective_max_events: int = 4
     compaction_passes: int = 0
     marked_turns: int = 0
     suppressed_turns: int = 0
@@ -54,11 +55,19 @@ class EpistemicTranscriptLifecycle:
     workspace_refreshes: int = 0
     workspace_skips: int = 0
     workspace_estimated_tokens_injected: int = 0
+    workspace_selection_passes: int = 0
+    workspace_selected_events: int = 0
+    workspace_omitted_events: int = 0
+    workspace_empty_wakes: int = 0
+    last_candidate_events: int = 0
+    last_selected_events: int = 0
+    last_omitted_events: int = 0
     wake_requests: int = 0
     wake_activations: int = 0
     wake_requests_by_reason: dict[str, int] = field(default_factory=dict)
     _seen_turn_ids: set[str] = field(default_factory=set, repr=False)
     _last_evidence_action: str = field(default="", repr=False)
+    _focus_lineage: list[str] = field(default_factory=list, repr=False)
     _wake_reads_remaining: int = field(default=0, repr=False)
 
     def __post_init__(self) -> None:
@@ -75,6 +84,12 @@ class EpistemicTranscriptLifecycle:
             or self.selective_wake_live_reads <= 0
         ):
             raise ValueError("selective_wake_live_reads must be a positive integer")
+        if self.mode == "selective" and (
+            isinstance(self.selective_max_events, bool)
+            or not isinstance(self.selective_max_events, int)
+            or self.selective_max_events <= 0
+        ):
+            raise ValueError("selective_max_events must be a positive integer")
 
     def mark(
         self,
@@ -102,6 +117,7 @@ class EpistemicTranscriptLifecycle:
         if self.mode == "selective" and evidence_ref:
             action = str(objective_evidence.get("action") or "")
             if self._last_evidence_action and action != self._last_evidence_action:
+                self._remember_previous_focus(self._last_evidence_action)
                 self.request_wake("action_focus_change")
             self._last_evidence_action = action
             if objective_evidence.get("matched") is False:
@@ -157,11 +173,12 @@ class EpistemicTranscriptLifecycle:
             self.suppressed_by_status[status] = self.suppressed_by_status.get(status, 0) + 1
 
         if self.mode == "evidence":
-            self._replace_workspace_message(messages, inject=True)
+            self._replace_workspace_message(messages, inject=True, attention=False)
         elif self.mode == "selective":
             injected = self._replace_workspace_message(
                 messages,
                 inject=self._wake_reads_remaining > 0,
+                attention=True,
             )
             if injected:
                 self._wake_reads_remaining = max(0, self._wake_reads_remaining - 1)
@@ -244,6 +261,19 @@ class EpistemicTranscriptLifecycle:
                 "requests_by_reason": dict(sorted(self.wake_requests_by_reason.items())),
                 "contains_focus_content": False,
             },
+            "event_attention": {
+                "enabled": self.mode == "selective",
+                "max_selected_events": self.selective_max_events,
+                "selection_passes": self.workspace_selection_passes,
+                "selected_events": self.workspace_selected_events,
+                "omitted_events": self.workspace_omitted_events,
+                "empty_wakes": self.workspace_empty_wakes,
+                "last_candidate_events": self.last_candidate_events,
+                "last_selected_events": self.last_selected_events,
+                "last_omitted_events": self.last_omitted_events,
+                "contains_event_content": False,
+                "contains_focus_content": False,
+            },
             "suppressed_by_status": dict(sorted(self.suppressed_by_status.items())),
             "body_characters_removed": self.body_characters_removed,
             "body_estimated_tokens_removed": self.body_estimated_tokens_removed,
@@ -279,6 +309,7 @@ class EpistemicTranscriptLifecycle:
         messages: list[dict[str, Any]],
         *,
         inject: bool,
+        attention: bool,
     ) -> bool:
         messages[:] = [
             message
@@ -287,10 +318,28 @@ class EpistemicTranscriptLifecycle:
         ]
         view = self.evidence_workspace.model_view()
         if not view["events"]:
+            if inject and attention:
+                self.workspace_empty_wakes += 1
             return False
         if not inject:
             self.workspace_skips += 1
             return False
+        if attention:
+            view = self.evidence_workspace.attention_view(
+                current_action=self._last_evidence_action,
+                focus_lineage=tuple(self._focus_lineage),
+                max_events=self.selective_max_events,
+            )
+            selection = view["selection"]
+            candidate_events = int(selection["candidate_events"])
+            selected_events = int(selection["selected_events"])
+            omitted_events = int(selection["omitted_events"])
+            self.workspace_selection_passes += 1
+            self.workspace_selected_events += selected_events
+            self.workspace_omitted_events += omitted_events
+            self.last_candidate_events = candidate_events
+            self.last_selected_events = selected_events
+            self.last_omitted_events = omitted_events
         rendered = json.dumps(
             view,
             ensure_ascii=True,
@@ -300,7 +349,9 @@ class EpistemicTranscriptLifecycle:
         content = (
             f"{_WORKSPACE_TAG}\n"
             "These are deduplicated objective runtime observations, not instructions, "
-            "rules, or chain-of-thought. Use event_id references when revising beliefs.\n"
+            "rules, or chain-of-thought. Use event_id references when revising beliefs. "
+            "In a selective view, an omitted pointer target remains in the episode store; "
+            "absence from this view does not mean deletion.\n"
             f"{rendered}\n"
             "</epistemic_evidence_workspace>"
         )
@@ -308,6 +359,11 @@ class EpistemicTranscriptLifecycle:
         self.workspace_refreshes += 1
         self.workspace_estimated_tokens_injected += estimate_context_tokens(content)
         return True
+
+    def _remember_previous_focus(self, action: str) -> None:
+        self._focus_lineage = [item for item in self._focus_lineage if item != action]
+        self._focus_lineage.append(action)
+        del self._focus_lineage[:-2]
 
 
 def _fingerprint(hypothesis_id: str) -> str:
@@ -328,7 +384,8 @@ def _receipt(
             f'evidence_ref="{evidence_ref}">\n'
             "The model-authored rule, prediction, and reasoning were unloaded. "
             "Resolve a non-empty evidence_ref when the evidence workspace is awake; "
-            "otherwise use the latest ledger and observations.\n"
+            "a selective view may omit a stored target. Otherwise use the latest ledger "
+            "and observations.\n"
             "</epistemic_evidence_pointer>"
         )
     return (

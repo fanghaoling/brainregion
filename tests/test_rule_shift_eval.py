@@ -332,6 +332,13 @@ def test_rule_shift_eval_counterbalances_and_replays_safe_first_turn(tmp_path, m
             },
             "evidence_wake_live_reads",
         ),
+        (
+            {
+                "evidence_max_selected_events": 0,
+                "arms": (ARM_SUPPRESS, ARM_SELECTIVE),
+            },
+            "evidence_max_selected_events",
+        ),
     ],
 )
 def test_rule_shift_eval_rejects_invalid_experiment_configuration(kwargs, message):
@@ -453,6 +460,8 @@ def test_selective_wake_matches_always_on_recall_with_fewer_injections(
     assert selective["mean_total_tokens"] < always["mean_total_tokens"]
     assert selective["mean_wake_requests"] > 0
     assert selective["mean_workspace_skips"] > 0
+    assert selective["mean_attention_selection_passes"] > 0
+    assert selective["mean_attention_omitted_events"] > 0
 
 
 def test_rule_shift_summary_excludes_pair_with_recovered_provider_error(tmp_path, monkeypatch):
@@ -507,6 +516,7 @@ def test_rule_shift_eval_cli_defaults_are_bounded_and_explicit():
     assert args.shared_prefix_turns == 1
     assert args.tool_result_lifecycle == "compact"
     assert args.evidence_wake_live_reads == 2
+    assert args.evidence_max_selected_events == 4
 
     comparison = build_parser().parse_args(
         [

@@ -640,6 +640,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_sb_arc_env.add_argument("--evidence-wake-live-reads", type=int, default=2)
+    p_sb_arc_env.add_argument("--evidence-max-selected-events", type=int, default=4)
     p_sb_rule_shift = p_sb_sub.add_parser(
         "rule-shift",
         help="确定性规则切换探针：验证证伪、替代理解和上下文抑制链路",
@@ -678,6 +679,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_sb_rule_shift.add_argument("--evidence-wake-live-reads", type=int, default=2)
+    p_sb_rule_shift.add_argument("--evidence-max-selected-events", type=int, default=4)
     p_sb_rule_shift_eval = p_sb_sub.add_parser(
         "rule-shift-eval",
         help="重复且顺序平衡的规则切换生命周期配对实验",
@@ -704,6 +706,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p_sb_rule_shift_eval.add_argument("--evidence-wake-live-reads", type=int, default=2)
+    p_sb_rule_shift_eval.add_argument("--evidence-max-selected-events", type=int, default=4)
     p_sb_rule_shift_eval.add_argument("--thinking", default="off", choices=["off", "on"])
     p_sb_rule_shift_eval.add_argument(
         "--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"]

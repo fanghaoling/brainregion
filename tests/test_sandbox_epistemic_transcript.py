@@ -203,6 +203,19 @@ def test_selective_mode_sleeps_until_an_explicit_bounded_wake():
         "requests_by_reason": {"explicit_recall": 1},
         "contains_focus_content": False,
     }
+    assert metrics["event_attention"] == {
+        "enabled": True,
+        "max_selected_events": 4,
+        "selection_passes": 2,
+        "selected_events": 2,
+        "omitted_events": 0,
+        "empty_wakes": 0,
+        "last_candidate_events": 1,
+        "last_selected_events": 1,
+        "last_omitted_events": 0,
+        "contains_event_content": False,
+        "contains_focus_content": False,
+    }
 
 
 def test_selective_mode_wakes_on_contradiction_and_action_focus_change():
@@ -253,6 +266,7 @@ def test_selective_wake_is_inert_for_other_modes_and_validates_enabled_requests(
     lifecycle = EpistemicTranscriptLifecycle(
         mode="full",
         selective_wake_live_reads=0,
+        selective_max_events=0,
     )
     assert lifecycle.request_wake("arbitrary disabled request") is False
     assert lifecycle.public_metrics()["selective_wake"]["requests"] == 0
@@ -270,6 +284,12 @@ def test_selective_wake_is_inert_for_other_modes_and_validates_enabled_requests(
             mode="selective",
             ledger=EpistemicLedger(),
             selective_wake_live_reads=0,
+        )
+    with pytest.raises(ValueError, match="selective_max_events"):
+        EpistemicTranscriptLifecycle(
+            mode="selective",
+            ledger=EpistemicLedger(),
+            selective_max_events=0,
         )
 
 

@@ -101,6 +101,80 @@ class EpistemicEvidenceWorkspace:
             "events": [event.to_model_dict() for event in events],
         }
 
+    def attention_view(
+        self,
+        *,
+        current_action: str = "",
+        focus_lineage: tuple[str, ...] = (),
+        max_events: int = 4,
+    ) -> dict[str, Any]:
+        """Select a bounded provider view without removing episode evidence."""
+
+        if isinstance(max_events, bool) or not isinstance(max_events, int) or max_events <= 0:
+            raise ValueError("attention max_events must be a positive integer")
+        events = list(self._events.values())
+        if not events:
+            return {
+                "policy": "attention_selected_objective_evidence_v1",
+                "selection": {
+                    "candidate_events": 0,
+                    "selected_events": 0,
+                    "omitted_events": 0,
+                },
+                "events": [],
+            }
+
+        latest_by_action: dict[str, EvidenceEvent] = {}
+        for event in events:
+            latest = latest_by_action.get(event.action)
+            if latest is None or _recency_key(event) > _recency_key(latest):
+                latest_by_action[event.action] = event
+
+        lineage_actions = tuple(
+            action
+            for action in dict.fromkeys(str(item or "") for item in focus_lineage)
+            if action and action != current_action
+        )
+        ranked: list[tuple[int, tuple[int, int, str], EvidenceEvent, set[str]]] = []
+        for event in events:
+            reasons: set[str] = set()
+            score = 0
+            if event.prediction_mismatches > event.prediction_matches:
+                reasons.add("unresolved_contradiction")
+                score += 400
+            if current_action and event.action == current_action:
+                reasons.add("current_action")
+                score += 200
+            if (
+                event.action in lineage_actions
+                and latest_by_action.get(event.action) is event
+            ):
+                reasons.add("focus_lineage")
+                score += 100
+            if reasons:
+                ranked.append((score, _recency_key(event), event, reasons))
+
+        if not ranked:
+            latest = max(events, key=_recency_key)
+            ranked.append((1, _recency_key(latest), latest, {"recent_fallback"}))
+        ranked.sort(key=lambda item: (item[0], item[1]), reverse=True)
+        selected = ranked[:max_events]
+        selected.sort(key=lambda item: item[1])
+        rendered_events = []
+        for _, _, event, reasons in selected:
+            rendered = event.to_model_dict()
+            rendered["attention_reasons"] = sorted(reasons)
+            rendered_events.append(rendered)
+        return {
+            "policy": "attention_selected_objective_evidence_v1",
+            "selection": {
+                "candidate_events": len(events),
+                "selected_events": len(rendered_events),
+                "omitted_events": len(events) - len(rendered_events),
+            },
+            "events": rendered_events,
+        }
+
     def contains(self, event_id: str) -> bool:
         return str(event_id or "") in self._events
 
@@ -189,6 +263,10 @@ def _event_id(action: str, actual: dict[str, Any]) -> str:
         sort_keys=True,
     )
     return "evidence-" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:12]
+
+
+def _recency_key(event: EvidenceEvent) -> tuple[int, int, str]:
+    return event.last_step, event.first_step, event.event_id
 
 
 __all__ = [

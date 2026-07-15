@@ -728,8 +728,9 @@ never enter the workspace.
 The opt-in `selective` lifecycle keeps the same local workspace asleep at provider boundaries. An objective prediction
 contradiction or action-focus change wakes it for two reads by default; `explicit_recall`, `expert_request`, and
 `task_focus_change` are bounded API reasons reserved for runtime callers. Other lifecycle modes do not validate or run
-the wake policy. Compare always-on delivery with selective delivery after deliberately overwriting the latest
-evaluation:
+the wake policy. A deterministic event selector then sends at most four events by default: unresolved contradictions,
+events for the current action, and the latest event from recent focus lineage. The complete episode store is unchanged.
+Compare always-on delivery with selective delivery after deliberately overwriting the latest evaluation:
 
 ```powershell
 brain-region --config brain_region_config.json --env-file .env sandbox rule-shift-eval `
@@ -737,6 +738,7 @@ brain-region --config brain_region_config.json --env-file .env sandbox rule-shif
   --arms evidence,selective `
   --distractor-steps 2 `
   --evidence-wake-live-reads 2 `
+  --evidence-max-selected-events 4 `
   --max-steps 12 `
   --repeats 2 `
   --max-total-cost-usd 0.24
@@ -746,11 +748,14 @@ The earlier per-turn receipt prototype was negative and motivated this workspace
 Sonnet 5 pilot was also neutral on solve (`0.5` in both arms) while `evidence - suppress` added `3099.5` mean tokens and
 `$0.005163`. All four runs completed the contradiction/action2-overwrite/action1-return exposure; each evidence run
 deduplicated eight observations into four events. One pair favored each arm, and the second executed arm won both pairs,
-so there is no attributable workspace ability signal. `evidence` remains opt-in; the next experiment should wake only
-events relevant to the current action/task focus instead of injecting the full workspace every turn.
+so there is no attributable workspace ability signal. `evidence` remains opt-in; this result motivated selective wake
+and event-level delivery instead of replaying the full workspace every turn.
 
 The deterministic delayed-recall backend now proves that `selective` recovers the overwritten action1 evidence like
 always-on `evidence`, while using fewer workspace injections and input tokens; status-only `suppress` cannot recover it.
+Event-selection tests additionally prove that a resolved local misprediction and an unrelated action are omitted while
+the current action2 event and the action1 global contradiction remain visible. Reports separate complete-store events
+from cumulative selected/omitted event deliveries and never include focus or event content.
 The first real provider comparison on 2026-07-15 was infrastructure-invalid: the BUZZ Anthropic route returned repeated
 service-unavailable errors, leaving zero valid pairs. A capped BUZZ GPT-5.5 smoke did exercise three wake requests, four
 injections, and four sleeping skips, but its intermittent Chat Completions/Responses routing errors and budget stop make

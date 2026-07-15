@@ -435,8 +435,9 @@ strict privacy 更适合 plan review。code review 在脱敏后可能损失太�
 
 显式启用的 `selective` 生命周期仍在本地积累同一工作台，但在 provider 边界默认休眠。客观预测矛盾或 action 焦点
 变化会默认唤醒两个读取窗口；运行时还预留了 `explicit_recall`、`expert_request` 和 `task_focus_change` 三种有界请求
-原因。其他 lifecycle 不校验、也不运行唤醒策略。可以在覆盖 latest evaluation 后，把常驻注入与选择性注入做顺序
-平衡配对：
+原因。其他 lifecycle 不校验、也不运行唤醒策略。唤醒后由确定性 event selector 默认最多发送 4 个事件：未消解矛盾、
+当前 action 的事件，以及最近 focus lineage 中每个旧 action 的最新事件；完整 episode store 不会被裁剪。可以在覆盖
+latest evaluation 后，把常驻注入与选择性注入做顺序平衡配对：
 
 ```powershell
 brain-region --config brain_region_config.json --env-file .env sandbox rule-shift-eval `
@@ -444,6 +445,7 @@ brain-region --config brain_region_config.json --env-file .env sandbox rule-shif
   --arms evidence,selective `
   --distractor-steps 2 `
   --evidence-wake-live-reads 2 `
+  --evidence-max-selected-events 4 `
   --max-steps 12 `
   --repeats 2 `
   --max-total-cost-usd 0.24
@@ -452,11 +454,13 @@ brain-region --config brain_region_config.json --env-file .env sandbox rule-shif
 早期逐回合 receipt 的负结果促成了当前工作台设计。新的 Sonnet 5 两对 delayed-recall pilot 中，两臂 solve 都是
 `0.5`，但 `evidence - suppress` 仍平均多 `3099.5` tokens 和 `$0.005163`。4 个 run 都完整经历了
 “action1 矛盾 → action2 覆盖 → action1 恢复”；每个 evidence run 把 8 次观察去重为 4 个 event。两对各有一臂获胜，
-且都是第二个执行臂获胜，因此没有可归因的工作台能力信号。`evidence` 继续保持显式 opt-in；下一实验应按当前 action/
-任务焦点只唤醒相关 event，不再每轮注入完整工作台。
+且都是第二个执行臂获胜，因此没有可归因的工作台能力信号。`evidence` 继续保持显式 opt-in；该结果促成了 selective
+wake 和 event-level delivery，不再每轮注入完整工作台。
 
 当前确定性 delayed-recall 后端已经证明：`selective` 与常驻 `evidence` 一样能找回被覆盖的 action1 证据，同时减少
-工作台注入次数和输入 token；只留状态的 `suppress` 无法恢复。2026-07-15 的首轮真实 provider 对照因 BUZZ
+工作台注入次数和输入 token；只留状态的 `suppress` 无法恢复。event selector 测试还证明：已由后续匹配消解的 local
+误判和无关 action 会被省略，当前 action2 事件与 action1/global 矛盾仍会保留。报告会分别记录完整 store 事件数和
+累计 selected/omitted deliveries，但不记录 focus 或 event 正文。2026-07-15 的首轮真实 provider 对照因 BUZZ
 Anthropic 路由连续返回 service unavailable，最终没有有效配对；一个限额的 BUZZ GPT-5.5 smoke 确实走出了 3 次
 唤醒请求、4 次注入和 4 次休眠跳过，但又受到 Chat Completions/Responses 路由间歇错误和成本门终止影响。因此两次
 真实运行都只作为传输链路诊断，不形成模型能力结论。
