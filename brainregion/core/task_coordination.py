@@ -22,6 +22,12 @@ _EVIDENCE_WAKE_REASONS = frozenset(
 _EVIDENCE_WAKE_SOURCES = frozenset(
     {"main_brain", "region_expert", "runtime_policy", "mcp_request"}
 )
+_REPORT_STATE_TO_ASSIGNMENT_STATUS = {
+    "working": "working",
+    "done": "done",
+    "blocked": "blocked",
+    "needs_decision": "blocked",
+}
 
 
 def _required_text(value: Any, name: str, *, max_length: int = 2000) -> str:
@@ -73,6 +79,24 @@ def _bounded_positive_int(value: Any, name: str, *, maximum: int) -> int:
     if result > maximum:
         raise ValueError(f"{name} cannot exceed {maximum}")
     return result
+
+
+def _task_status_from_assignments(
+    assignments: dict[str, "ExpertAssignment"],
+) -> TaskStatus:
+    statuses = [assignment.status for assignment in assignments.values()]
+    active = [status for status in statuses if status != "cancelled"]
+    if not active:
+        return "cancelled"
+    if all(status == "done" for status in active):
+        return "done"
+    if all(status in {"done", "blocked"} for status in active) and any(
+        status == "blocked" for status in active
+    ):
+        return "blocked"
+    if any(status in {"working", "done", "blocked"} for status in active):
+        return "working"
+    return "queued"
 
 
 @dataclass(frozen=True)
@@ -321,7 +345,24 @@ class TaskCoordinationBoard:
                 raise ValueError(f"unknown assignment: {assignment_id}")
             updated = replace(assignment, status=normalized)
             self._assignments[task_id][assignment_id] = updated
+            task = self._tasks.get(task_id)
+            if task is None:
+                raise ValueError(f"unknown task: {task_id}")
+            task_status = _task_status_from_assignments(self._assignments[task_id])
+            self._tasks[task_id] = replace(task, status=task_status)
         return updated.to_dict()
+
+    def apply_assignment_report(
+        self, task_id: str, assignment_id: str, report_state: str
+    ) -> dict[str, Any]:
+        normalized = str(report_state or "").strip().casefold()
+        status = _REPORT_STATE_TO_ASSIGNMENT_STATUS.get(normalized)
+        if status is None:
+            raise ValueError(
+                "report state must be one of "
+                f"{sorted(_REPORT_STATE_TO_ASSIGNMENT_STATUS)}"
+            )
+        return self.set_assignment_status(task_id, assignment_id, status)
 
     def assignment(self, task_id: str, assignment_id: str) -> dict[str, Any]:
         """Return one exact assignment contract without private context."""

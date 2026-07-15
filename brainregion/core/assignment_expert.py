@@ -183,6 +183,7 @@ class AssignmentExpertRunner:
             max_blocks=max_blocks,
         )
         if not view.blocks:
+            self.tasks.set_assignment_status(task_id, assignment_id, "working")
             expert_result = await self.engine.run(
                 workspace=self.workspace,
                 coordination=self.coordination,
@@ -199,6 +200,7 @@ class AssignmentExpertRunner:
                 effort=effort,
                 view=view,
             )
+            self._sync_result_status(task_id, assignment_id, expert_result)
             return AssignmentExpertResult(
                 state="waiting_context",
                 task_id=task_id,
@@ -223,22 +225,28 @@ class AssignmentExpertRunner:
                 pending_provider_reads=_pending_provider_reads(pending),
             )
 
-        expert_result = await self.engine.run(
-            workspace=self.workspace,
-            coordination=self.coordination,
-            task_id=task_id,
-            region=assignment["region"],
-            task=_assignment_task(assignment),
-            model=model,
-            assignment_id=assignment_id,
-            endpoint_id=endpoint_id,
-            max_context_tokens=max_context_tokens,
-            max_blocks=max_blocks,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            effort=effort,
-            view=view,
-        )
+        self.tasks.set_assignment_status(task_id, assignment_id, "working")
+        try:
+            expert_result = await self.engine.run(
+                workspace=self.workspace,
+                coordination=self.coordination,
+                task_id=task_id,
+                region=assignment["region"],
+                task=_assignment_task(assignment),
+                model=model,
+                assignment_id=assignment_id,
+                endpoint_id=endpoint_id,
+                max_context_tokens=max_context_tokens,
+                max_blocks=max_blocks,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                effort=effort,
+                view=view,
+            )
+        except Exception:
+            self.tasks.set_assignment_status(task_id, assignment_id, "blocked")
+            raise
+        self._sync_result_status(task_id, assignment_id, expert_result)
         pending = self.tasks.evidence_wake_status(task_id, assignment_id)
         return AssignmentExpertResult(
             state="awake",
@@ -252,6 +260,21 @@ class AssignmentExpertRunner:
             pending_wake_requests=int(pending["count"]),
             pending_provider_reads=_pending_provider_reads(pending),
         )
+
+    def _sync_result_status(
+        self,
+        task_id: str,
+        assignment_id: str,
+        result: RegionExpertResult,
+    ) -> None:
+        published = result.published_report or {}
+        report = published.get("report") or {}
+        if report.get("state"):
+            self.tasks.apply_assignment_report(
+                task_id, assignment_id, str(report["state"])
+            )
+        elif not result.ok:
+            self.tasks.set_assignment_status(task_id, assignment_id, "blocked")
 
 
 __all__ = [

@@ -76,6 +76,7 @@ def test_task_board_tracks_multiple_independent_assignments_without_context():
 
     assert status["assignment_count"] == 2
     assert status["assignments"][0]["status"] == "working"
+    assert status["task"]["status"] == "working"
     assert status["contains_context_content"] is False
     assert "ContextBlock" not in json.dumps(status)
 
@@ -101,6 +102,43 @@ def test_task_board_rejects_unknown_tasks_duplicates_and_bad_status():
         )
     with pytest.raises(ValueError, match="must be one of"):
         board.set_assignment_status("root", "a", "sleeping")
+
+
+def test_assignment_reports_drive_assignment_and_aggregate_task_status():
+    board = TaskCoordinationBoard()
+    board.create_task({"task_id": "root", "goal": "g"})
+    for assignment_id in ("parser", "network"):
+        board.delegate(
+            "root",
+            {
+                "assignment_id": assignment_id,
+                "region": "debugging",
+                "question": "q",
+            },
+        )
+
+    board.apply_assignment_report("root", "parser", "done")
+    partial = board.status("root")
+    board.apply_assignment_report("root", "network", "done")
+    complete = board.status("root")
+
+    assert partial["assignments"][0]["status"] == "done"
+    assert partial["task"]["status"] == "working"
+    assert complete["task"]["status"] == "done"
+
+
+def test_needs_decision_blocks_assignment_and_completed_task_set():
+    board = TaskCoordinationBoard()
+    board.create_task({"task_id": "root", "goal": "g"})
+    board.delegate(
+        "root",
+        {"assignment_id": "a", "region": "review", "question": "q"},
+    )
+
+    assignment = board.apply_assignment_report("root", "a", "needs_decision")
+
+    assert assignment["status"] == "blocked"
+    assert board.status("root")["task"]["status"] == "blocked"
 
 
 def test_evidence_wakes_are_assignment_scoped_and_age_only_on_matching_reads():

@@ -2046,7 +2046,22 @@ def workspace_context(
         report_data = dict(report or {})
         if assignment_id:
             report_data["assignment_id"] = assignment_id
-        return _region_coordination_board.publish(task_id, report_data)
+        published = _region_coordination_board.publish(task_id, report_data)
+        published_report = published["report"]
+        published_assignment_id = str(
+            published_report.get("assignment_id") or ""
+        )
+        if published_assignment_id:
+            try:
+                _task_coordination_board.apply_assignment_report(
+                    task_id,
+                    published_assignment_id,
+                    str(published_report["state"]),
+                )
+            except ValueError as exc:
+                if not str(exc).startswith(("unknown task:", "unknown assignment:")):
+                    raise
+        return published
     if operation == "status":
         return _region_coordination_board.status(task_id)
     if operation == "inbox":
@@ -2310,6 +2325,9 @@ async def run_assignment_expert(
         wake_gated=True,
     )
     if "assignment_lifecycle" not in output:
+        _task_coordination_board.set_assignment_status(
+            task_id, assignment_id, "blocked"
+        )
         pending = _task_coordination_board.evidence_wake_status(
             task_id, assignment_id
         )

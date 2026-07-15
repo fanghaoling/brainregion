@@ -76,6 +76,9 @@ def test_mcp_task_delegation_and_report_collection_are_assignment_scoped(monkeyp
     assert parser["assignment"]["memory_request"]["target_region"] == "debugging"
     assert status["assignment_count"] == 2
     assert status["assignments"][0]["report_count"] == 1
+    assert status["assignments"][0]["status"] == "done"
+    assert status["assignments"][1]["status"] == "done"
+    assert status["task"]["status"] == "done"
     assert status["assignments"][0]["latest_report"]["report"]["summary"] == (
         "Parser conclusion"
     )

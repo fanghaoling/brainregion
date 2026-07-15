@@ -7,6 +7,8 @@
 
 from __future__ import annotations
 
+import subprocess
+
 import pytest
 
 from brainregion.core.context import ContextBlock, ContextQuery, ProviderRegistry
@@ -150,6 +152,18 @@ def test_store_non_repo_degrades_to_empty_git_available():
 
     events, meta = GitStore(runner=_err_runner).list_commits()
     assert events == [] and meta["git_available"] is True and meta["commits_found"] == 0
+
+
+def test_store_timeout_degrades_with_observable_reason():
+    def _timeout_runner(args, cwd):
+        raise subprocess.TimeoutExpired(["git", *args], timeout=10.0)
+
+    events, meta = GitStore(runner=_timeout_runner).list_commits()
+
+    assert events == []
+    assert meta["git_available"] is True
+    assert meta["timed_out"] is True
+    assert "timed out" in meta["error"]
 
 
 def test_provider_store_degradation_no_crash():

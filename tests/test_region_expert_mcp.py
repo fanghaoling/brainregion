@@ -305,6 +305,8 @@ def test_mcp_assignment_budget_guard_preserves_unread_wake(monkeypatch):
     assert result["assignment_lifecycle"]["state"] == "blocked"
     assert result["assignment_lifecycle"]["wake_delivered"] is False
     assert pending["wakes"][0]["remaining_reads"] == 1
+    assert tasks.status("expert-mcp-task")["task"]["status"] == "blocked"
+    assert tasks.assignment("expert-mcp-task", "parser")["status"] == "blocked"
     assert backend.calls == []
 
 
@@ -357,6 +359,8 @@ def test_mcp_assignment_export_guard_preserves_unread_wake(monkeypatch):
     assert result["assignment_lifecycle"]["state"] == "blocked"
     assert result["assignment_lifecycle"]["pending_provider_reads"] == 1
     assert pending["wakes"][0]["remaining_reads"] == 1
+    assert tasks.status("expert-mcp-task")["task"]["status"] == "blocked"
+    assert tasks.assignment("expert-mcp-task", "parser")["status"] == "blocked"
     assert backend.calls == []
 
 

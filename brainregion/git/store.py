@@ -25,6 +25,7 @@ _RS = "\x1e"
 _US = "\x1f"
 # git format placeholders(git 把 %x1e 渲染成真实 0x1e 字节)。subject(%s)单行故无换行歧义。
 _FMT = "%x1e%H%x1f%s%x1f%an%x1f%aI"
+_GIT_TIMEOUT_SECONDS = 10.0
 
 # query tokenization 停用词(去常见噪声;镜像 router.py ManifestRouter._terms 的极小集)。
 _STOPWORDS = frozenset(
@@ -83,6 +84,7 @@ def _real_runner(args: list[str], cwd: str) -> tuple[int, str, str]:
         text=True,
         encoding="utf-8",
         errors="replace",
+        timeout=_GIT_TIMEOUT_SECONDS,
     )
     return proc.returncode, proc.stdout, proc.stderr
 
@@ -109,6 +111,14 @@ class GitStore:
         runner = self.runner or _real_runner
         try:
             rc, stdout, stderr = runner(self._log_args(), self.cwd)
+        except subprocess.TimeoutExpired as e:
+            logger.warning("GitStore.list_commits: git log timed out: %s", e)
+            return [], {
+                "git_available": True,
+                "commits_found": 0,
+                "timed_out": True,
+                "error": f"git log timed out after {e.timeout}s",
+            }
         except (FileNotFoundError, OSError) as e:
             logger.warning("GitStore.list_commits: git 不可用: %s", e)
             return [], {"git_available": False, "commits_found": 0, "error": str(e)}

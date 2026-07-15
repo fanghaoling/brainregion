@@ -222,6 +222,9 @@ def test_assignment_runner_consumes_exact_wake_and_returns_only_grounded_report(
     ]
     assert private not in json.dumps(first)
     assert coordination.reports("root", assignment_id="parser")["count"] == 2
+    status = tasks.status("root")
+    assert status["assignments"][0]["status"] == "done"
+    assert status["task"]["status"] == "working"
 
 
 def test_assignment_runner_preserves_wake_while_waiting_for_private_context():
@@ -245,6 +248,9 @@ def test_assignment_runner_preserves_wake_while_waiting_for_private_context():
     assert pending["wakes"][0]["remaining_reads"] == 1
     assert coordination.reports("root", assignment_id="parser")["count"] == 1
     assert backend.calls == []
+    status = tasks.status("root")
+    assert status["assignments"][0]["status"] == "working"
+    assert status["task"]["status"] == "working"
 
 
 def test_assignment_runner_rejects_mismatched_snapshot_before_consuming_wake():
