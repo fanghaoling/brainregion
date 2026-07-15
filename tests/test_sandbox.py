@@ -445,6 +445,8 @@ def test_loop_consecutive_parse_error_early_stop():
         assert traj.solve_status == "parse_error"
         assert traj.termination_reason == "parse_error"
         assert traj.n_steps == 3
+        assert {step.error_kind for step in traj.steps} == {"parse_error"}
+        assert {step["error_kind"] for step in traj.progress_trace} == {"parse_error"}
     finally:
         cleanup_run_dir(run_dir)
 
@@ -470,6 +472,7 @@ def test_loop_consecutive_backend_errors_are_infrastructure_failures():
         assert traj.solve_status == "model_error"
         assert traj.termination_reason == "model_error"
         assert traj.n_steps == 3
+        assert {step.error_kind for step in traj.steps} == {"model_error"}
     finally:
         cleanup_run_dir(run_dir)
 
@@ -493,7 +496,32 @@ def test_loop_unknown_tool_error_feedback_no_crash():
             MockBackend([_J({"thought": "x", "tool": "delete_all", "args": {}})] + _solve_script(run_dir)),
             "mock", task, run_dir=run_dir, arm="none"))
         assert traj.steps[0].error and "unknown tool" in traj.steps[0].error
+        assert traj.steps[0].error_kind == "protocol_error"
         assert traj.solve_status == "solved"  # recovered and solved
+    finally:
+        cleanup_run_dir(run_dir)
+
+
+def test_loop_tool_execution_error_is_classified_after_valid_protocol():
+    task, run_dir = _materialized("off_by_one")
+    try:
+        traj = asyncio.run(
+            run_agent(
+                MockBackend(
+                    [
+                        _J({"thought": "read", "tool": "read_text", "args": {}}),
+                        _J({"thought": "stop", "done": True, "answer": "done"}),
+                    ]
+                ),
+                "mock",
+                task,
+                run_dir=run_dir,
+                arm="none",
+            )
+        )
+        assert traj.steps[0].tool == "read_text"
+        assert traj.steps[0].error_kind == "tool_error"
+        assert traj.progress_trace[0]["error_kind"] == "tool_error"
     finally:
         cleanup_run_dir(run_dir)
 

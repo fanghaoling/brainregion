@@ -992,6 +992,11 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
             operation_counts[operation] = operation_counts.get(operation, 0) + 1
         environment_actions = operation_counts.get("act", 0)
         error_steps = sum(bool(progress.get("error")) for progress in progress_trace)
+        error_kind_counts: dict[str, int] = {}
+        for progress in progress_trace:
+            error_kind = str(progress.get("error_kind") or "")
+            if error_kind:
+                error_kind_counts[error_kind] = error_kind_counts.get(error_kind, 0) + 1
         action_denominator = max(1, environment_actions)
         normalized_usage = normalize_usage(trajectory.total_main_usage)
         result = {
@@ -1008,6 +1013,7 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
             "model_steps": trajectory.n_steps,
             "operation_counts": operation_counts,
             "error_steps": error_steps,
+            "error_kind_counts": error_kind_counts,
             "environment_action_rate": round(
                 environment_actions / max(1, trajectory.n_steps), 4
             ),

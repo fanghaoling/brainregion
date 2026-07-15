@@ -323,6 +323,7 @@ class StepRecord:
     phase_at_call: str = ""
     phase_after: str = ""
     effort_routing_shadow: dict[str, Any] = field(default_factory=dict)
+    error_kind: str = ""
 
 
 @dataclass(frozen=True)
@@ -494,6 +495,7 @@ class Trajectory:
                 "workspace_effect": step.workspace_effect,
                 "verification_passed": step.verification_passed,
                 "error": bool(step.error),
+                "error_kind": step.error_kind,
             }
             for step in self.steps
         ]
@@ -574,6 +576,7 @@ class Trajectory:
                     "result_chars": s.result_chars,
                     "result_preview": s.result_preview,
                     "error": s.error,
+                    "error_kind": s.error_kind,
                     "main_cost_usd": round(s.main_cost_usd, 6),
                     "arm_cost_usd": round(s.arm_cost_usd, 6),
                     "main_usage": normalize_usage(s.main_usage),
@@ -880,34 +883,49 @@ def _replace_region_workbench_message(messages: list[dict], view: dict[str, Any]
     )
 
 
-def parse_tool_call(content: str) -> tuple[ToolCall | None, str | None]:
-    """解析 + 严格校验 model 输出。返回 (call, error);error 非 None 则**绝不执行**(review opus-13/gpt-8)。"""
+def parse_tool_call_diagnostic(
+    content: str,
+) -> tuple[ToolCall | None, str | None, str]:
+    """解析并区分 JSON 提取失败与合法 JSON 的协议校验失败。"""
     obj = extract_json_object(content)
     if obj is None or not isinstance(obj, dict):
-        return None, 'no JSON object found; emit {"thought","tool","args"} or {"thought","done":true,"answer"}'
+        return (
+            None,
+            'no JSON object found; emit {"thought","tool","args"} or '
+            '{"thought","done":true,"answer"}',
+            "parse_error",
+        )
     thought = str(obj.get("thought", ""))
     raw_cognitive_update = obj.get("cognitive_update")
     if raw_cognitive_update is not None and not isinstance(raw_cognitive_update, dict):
-        return None, "'cognitive_update' must be a JSON object"
+        return None, "'cognitive_update' must be a JSON object", "protocol_error"
     has_done = obj.get("done") is True
     has_tool = bool(obj.get("tool"))
     if has_done and has_tool:
-        return None, "'done' and 'tool' are mutually exclusive"
+        return None, "'done' and 'tool' are mutually exclusive", "protocol_error"
     if has_done:
         raw_ids = obj.get("adopted_assignment_ids", [])
         if not isinstance(raw_ids, list):
-            return None, "'adopted_assignment_ids' must be an array"
+            return None, "'adopted_assignment_ids' must be an array", "protocol_error"
         adopted: list[str] = []
         for raw_id in raw_ids:
             if not isinstance(raw_id, str):
-                return None, "'adopted_assignment_ids' entries must be strings"
+                return None, "'adopted_assignment_ids' entries must be strings", "protocol_error"
             assignment_id = raw_id.strip()
             if not assignment_id or len(assignment_id) > 200:
-                return None, "'adopted_assignment_ids' entries must be 1..200 characters"
+                return (
+                    None,
+                    "'adopted_assignment_ids' entries must be 1..200 characters",
+                    "protocol_error",
+                )
             if assignment_id not in adopted:
                 adopted.append(assignment_id)
         if len(adopted) > 32:
-            return None, "'adopted_assignment_ids' cannot contain more than 32 entries"
+            return (
+                None,
+                "'adopted_assignment_ids' cannot contain more than 32 entries",
+                "protocol_error",
+            )
         return ToolCall(
             thought,
             None,
@@ -916,16 +934,26 @@ def parse_tool_call(content: str) -> tuple[ToolCall | None, str | None]:
             str(obj.get("answer", "")),
             tuple(adopted),
             raw_cognitive_update,
-        ), None
+        ), None, ""
     if not has_tool:
-        return None, "missing 'tool' (or set 'done': true to finish)"
+        return None, "missing 'tool' (or set 'done': true to finish)", "protocol_error"
     tool = str(obj["tool"])
     if tool not in ALLOWED_TOOLS:
-        return None, f"unknown tool '{tool}'; allowed: {sorted(ALLOWED_TOOLS)}"
+        return (
+            None,
+            f"unknown tool '{tool}'; allowed: {sorted(ALLOWED_TOOLS)}",
+            "protocol_error",
+        )
     args = obj.get("args", {})
     if not isinstance(args, dict):
-        return None, "'args' must be a JSON object"
-    return ToolCall(thought, tool, args, False, "", (), raw_cognitive_update), None
+        return None, "'args' must be a JSON object", "protocol_error"
+    return ToolCall(thought, tool, args, False, "", (), raw_cognitive_update), None, ""
+
+
+def parse_tool_call(content: str) -> tuple[ToolCall | None, str | None]:
+    """兼容入口：失败时绝不执行；详细类别由运行时诊断入口记录。"""
+    call, error, _error_kind = parse_tool_call_diagnostic(content)
+    return call, error
 
 
 def _req(args: dict, key: str) -> Any:
@@ -2147,6 +2175,7 @@ async def run_agent(
                 traj.steps.append(StepRecord(
                     index=step, thought="", tool=None, args={}, done=False,
                     result_chars=0, result_preview="", error=resp.error or "empty model output",
+                    error_kind="model_error",
                     main_cost_usd=step_main_cost, arm_cost_usd=0.0, status_injected=status_injected,
                     main_usage=step_main_usage, main_cost_source=step_main_cost_source,
                     main_input_attribution=step_main_input_attribution,
@@ -2184,7 +2213,7 @@ async def run_agent(
                 )
                 continue
 
-            call, parse_err = parse_tool_call(resp.content)
+            call, parse_err, parse_error_kind = parse_tool_call_diagnostic(resp.content)
             if parse_err is not None:
                 consecutive_errors += 1
                 _emit_phase_transition(
@@ -2195,6 +2224,7 @@ async def run_agent(
                 traj.steps.append(StepRecord(
                     index=step, thought="", tool=None, args={}, done=False,
                     result_chars=0, result_preview="", error=parse_err,
+                    error_kind=parse_error_kind,
                     main_cost_usd=step_main_cost, arm_cost_usd=0.0, status_injected=status_injected,
                     main_usage=step_main_usage, main_cost_source=step_main_cost_source,
                     main_input_attribution=step_main_input_attribution,
@@ -2210,6 +2240,7 @@ async def run_agent(
                         "arm": arm,
                         "step": step,
                         "parse_error": parse_err,
+                        "error_kind": parse_error_kind,
                         "phase": phase_controller.phase.value,
                         "recommended_tier": phase_controller.tier.value,
                         "difficulty_score": round(phase_controller.difficulty.score, 3),
@@ -2451,6 +2482,7 @@ async def run_agent(
             step_record = StepRecord(
                 index=step, thought=call.thought, tool=call.tool, args=call.args, done=False,
                 result_chars=len(result_str), result_preview=preview, error=exec_err,
+                error_kind="tool_error" if exec_err else "",
                 main_cost_usd=step_main_cost,
                 arm_cost_usd=traj.total_arm_cost_usd - _arm_cost_before,
                 status_injected=status_injected,
@@ -2493,6 +2525,7 @@ async def run_agent(
                     "step": step,
                     "tool": call.tool,
                     "error": exec_err,
+                    "error_kind": step_record.error_kind,
                     "phase": phase_controller.phase.value,
                     "recommended_tier": phase_controller.tier.value,
                     "difficulty_score": round(phase_controller.difficulty.score, 3),
