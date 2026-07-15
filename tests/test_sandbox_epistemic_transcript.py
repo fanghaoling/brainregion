@@ -6,6 +6,7 @@ import json
 import pytest
 
 from brainregion.sandbox.epistemic_ledger import EpistemicLedger
+from brainregion.sandbox.epistemic_evidence import EpistemicEvidenceWorkspace
 from brainregion.sandbox.epistemic_transcript import EpistemicTranscriptLifecycle
 from brainregion.sandbox.input_attribution import attributed_message, provider_messages
 from brainregion.sandbox.loop import run_agent, scoped_env
@@ -120,19 +121,26 @@ def test_evidence_mode_keeps_only_allowlisted_runtime_outcome():
         },
     )
 
-    lifecycle.apply([message], next_step=1)
+    messages = [message]
+    lifecycle.apply(messages, next_step=1)
 
-    assert "wrong private reasoning" not in message["content"]
-    assert "secret model rule" not in message["content"]
-    assert "private_note" not in message["content"]
-    assert "model_secret" not in message["content"]
-    assert "epistemic_evidence_receipt" in message["content"]
-    assert '"action":"action1"' in message["content"]
-    assert '"change_scale":"none"' in message["content"]
-    assert '"changed_cells":0' in message["content"]
+    visible = "\n".join(item["content"] for item in provider_messages(messages))
+    assert "wrong private reasoning" not in visible
+    assert "secret model rule" not in visible
+    assert "private_note" not in visible
+    assert "model_secret" not in visible
+    assert "epistemic_evidence_pointer" in message["content"]
+    assert 'evidence_ref="evidence-' in message["content"]
+    assert '"action":"action1"' not in message["content"]
+    assert "epistemic_evidence_workspace" in visible
+    assert '"action":"action1"' in visible
+    assert '"change_scale":"none"' in visible
+    assert '"changed_cells":0' in visible
     metrics = lifecycle.public_metrics()
-    assert metrics["policy"] == "objective_evidence_receipt_v1"
+    assert metrics["policy"] == "objective_evidence_workspace_v1"
+    assert metrics["receipt_mode"] == "workspace_pointer"
     assert metrics["evidence_receipts"] == 1
+    assert metrics["evidence_workspace"]["events"] == 1
     assert metrics["contains_objective_evidence"] is True
 
 
@@ -149,6 +157,52 @@ def test_suppress_mode_requires_a_ledger_but_full_mode_is_noop():
 
     assert message["content"] == "unchanged"
     assert lifecycle.public_metrics()["enabled"] is False
+
+
+def test_evicted_evidence_event_does_not_leave_a_dangling_pointer():
+    lifecycle = EpistemicTranscriptLifecycle(
+        mode="evidence",
+        ledger=EpistemicLedger(),
+        evidence_workspace=EpistemicEvidenceWorkspace(max_events=1),
+    )
+    messages = []
+    for step, action, scale in ((0, "action1", "local"), (1, "action2", "none")):
+        message = attributed_message(
+            "assistant", f"private reasoning {step}", "model_transcript"
+        )
+        lifecycle.mark(
+            message,
+            hypothesis_id=f"h{step}",
+            step=step,
+            rejected=True,
+            evidence={
+                "action": action,
+                "matched": False,
+                "mismatch_fields": ["change_scale"],
+                "actual": {
+                    "change_scale": scale,
+                    "changed_cells": 2 if scale == "local" else 0,
+                    "total_cells": 100,
+                    "level_delta": 0,
+                    "state": "NOT_FINISHED",
+                },
+            },
+        )
+        messages.append(message)
+
+    lifecycle.apply(messages, next_step=2)
+
+    assert 'evidence_ref=""' in messages[0]["content"]
+    assert 'evidence_ref="evidence-' in messages[1]["content"]
+    observed = lifecycle.observe(messages)
+    assert observed[0]["evidence_ref"] == ""
+    assert observed[1]["evidence_ref"].startswith("evidence-")
+    visible = "\n".join(item["content"] for item in provider_messages(messages))
+    assert '"action":"action1"' not in visible
+    assert '"action":"action2"' in visible
+    metrics = lifecycle.public_metrics()
+    assert metrics["expired_evidence_receipts"] == 1
+    assert metrics["evidence_receipts"] == 1
 
 
 class _Response:
@@ -312,7 +366,8 @@ def test_run_agent_preserves_objective_evidence_without_model_rule(tmp_path):
     )
     assert "wrong private reasoning" not in visible
     assert "action1 changes a small visible component" not in visible
-    assert "epistemic_evidence_receipt" in visible
+    assert "epistemic_evidence_pointer" in visible
+    assert "epistemic_evidence_workspace" in visible
     assert '"action":"action1"' in visible
     assert '"change_scale":"none"' in visible
     assert trajectory.epistemic_transcript_lifecycle["evidence_receipts"] == 1
@@ -349,6 +404,8 @@ def test_rejected_action_does_not_reuse_previous_runtime_evidence(tmp_path):
     )
     assert "model reasoning turn 1" not in visible
     assert "model reasoning turn 2" not in visible
-    assert visible.count("objective_evidence=null") == 1
+    assert visible.count('evidence_ref=""') == 1
+    assert visible.count("epistemic_evidence_workspace") == 2
     assert trajectory.epistemic_transcript_lifecycle["suppressed_turns"] == 2
     assert trajectory.epistemic_transcript_lifecycle["evidence_receipts"] == 1
+    assert trajectory.epistemic_transcript_lifecycle["evidence_workspace"]["events"] == 1

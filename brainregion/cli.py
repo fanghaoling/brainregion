@@ -647,6 +647,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=3,
         help="隐藏机制切换前的稳定动作数（不会暴露给模型）",
     )
+    p_sb_rule_shift.add_argument(
+        "--distractor-steps",
+        type=int,
+        default=0,
+        help="关键 action1 矛盾后仅开放 action2 的延迟召回步数",
+    )
     p_sb_rule_shift.add_argument("--max-steps", type=int, default=10)
     p_sb_rule_shift.add_argument("--max-cost-usd", type=float, default=0.03)
     p_sb_rule_shift.add_argument("--max-tokens", type=int, default=2048)
@@ -671,6 +677,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_rule_shift_eval.add_argument("--main-brain", default=None, help="主执行模型引用")
     p_sb_rule_shift_eval.add_argument("--repeats", type=int, default=2)
     p_sb_rule_shift_eval.add_argument("--shift-after", type=int, default=3)
+    p_sb_rule_shift_eval.add_argument("--distractor-steps", type=int, default=0)
     p_sb_rule_shift_eval.add_argument("--max-steps", type=int, default=10)
     p_sb_rule_shift_eval.add_argument(
         "--max-cost-usd", type=float, default=0.08, help="每个 arm 的成本上限"

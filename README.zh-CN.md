@@ -429,22 +429,26 @@ strict privacy 更适合 plan review。code review 在脱敏后可能损失太�
 
 ## 客观证据回执实验
 
-`rule-shift` 的实验性 `evidence` 生命周期会卸载被证伪回合里的模型规则、预测和解释，只保留白名单内的
-客观运行时反馈：已执行动作、是否匹配、差异字段以及实际状态变化。它不会保留模型写出的规则正文。可以把它与只留状态的
-`suppress` 回执做顺序平衡配对：
+`rule-shift` 的实验性 `evidence` 生命周期会把被证伪回合里的模型规则、预测和解释卸载成 content-free 指针。
+白名单内的运行时反馈按“已执行动作 + 实际转移”upsert 到一个有容量上限、episode-local 的工作台；重复观察只累计
+次数，不再向 transcript 追加副本。工作台不会保存模型写出的预测或规则正文。可以在覆盖 latest evaluation 后，
+把它与只留状态的 `suppress` 回执做顺序平衡配对：
 
 ```powershell
 brain-region --config brain_region_config.json --env-file .env sandbox rule-shift-eval `
   --main-brain buzz_anthropic/claude-sonnet-5 `
   --arms suppress,evidence `
+  --distractor-steps 2 `
+  --max-steps 12 `
   --repeats 2 `
-  --max-total-cost-usd 0.20
+  --max-total-cost-usd 0.24
 ```
 
-首轮 Sonnet 5 两对 pilot 是负结果：`evidence - suppress` 平均多 `4067` tokens、多 1 个模型步骤，solve rate
-低 `0.5`。两对都通过共同前缀和基础设施检查，但样本太小，不能据此声称能力下降。这个短任务的最新 observation
-本来就含有同一份反馈，因此逐回合 evidence receipt 主要是在重复数据。`evidence` 暂时保持显式 opt-in；下一步应在
-需要延迟召回的任务上测试去重证据工作台，而不是把证据散落在每个历史回合中。
+早期逐回合 receipt 的负结果促成了当前工作台设计。新的 Sonnet 5 两对 delayed-recall pilot 中，两臂 solve 都是
+`0.5`，但 `evidence - suppress` 仍平均多 `3099.5` tokens 和 `$0.005163`。4 个 run 都完整经历了
+“action1 矛盾 → action2 覆盖 → action1 恢复”；每个 evidence run 把 8 次观察去重为 4 个 event。两对各有一臂获胜，
+且都是第二个执行臂获胜，因此没有可归因的工作台能力信号。`evidence` 继续保持显式 opt-in；下一实验应按当前 action/
+任务焦点只唤醒相关 event，不再每轮注入完整工作台。
 
 ## 城区配送三臂评测
 

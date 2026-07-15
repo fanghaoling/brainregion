@@ -33,6 +33,7 @@ _METRICS = (
     "model_steps",
     "environment_actions",
     "environment_action_attempts",
+    "distractor_actions",
     "error_steps",
     "input_tokens",
     "total_tokens",
@@ -50,6 +51,7 @@ async def run_rule_shift_case(
     endpoint_id: str | None = None,
     arm: str = ARM_FULL,
     shift_after: int = 3,
+    distractor_steps: int = 0,
     max_steps: int = 10,
     max_cost_usd: float = 0.08,
     temperature: float = 0.0,
@@ -68,13 +70,17 @@ async def run_rule_shift_case(
     _validate_eval_args(
         repeats=1,
         shift_after=shift_after,
+        distractor_steps=distractor_steps,
         max_steps=max_steps,
         max_cost_usd=max_cost_usd,
         max_total_cost_usd=None,
         shared_prefix_turns=0,
         bootstrap_samples=None,
     )
-    env = RuleShiftEnv(shift_after=shift_after)
+    env = RuleShiftEnv(
+        shift_after=shift_after,
+        distractor_steps=distractor_steps,
+    )
     task = SandboxTask(id="rule-shift", goal=RULE_SHIFT_GOAL)
 
     def verify(t, run_dir, *, python_exe=None):
@@ -125,6 +131,7 @@ async def run_rule_shift_eval(
     endpoint_id: str | None = None,
     repeats: int = 2,
     shift_after: int = 3,
+    distractor_steps: int = 0,
     max_steps: int = 10,
     max_cost_usd: float = 0.08,
     max_total_cost_usd: float | None = None,
@@ -147,6 +154,7 @@ async def run_rule_shift_eval(
     _validate_eval_args(
         repeats=repeats,
         shift_after=shift_after,
+        distractor_steps=distractor_steps,
         max_steps=max_steps,
         max_cost_usd=max_cost_usd,
         max_total_cost_usd=max_total_cost_usd,
@@ -186,6 +194,7 @@ async def run_rule_shift_eval(
                     endpoint_id=endpoint_id,
                     arm=arm,
                     shift_after=shift_after,
+                    distractor_steps=distractor_steps,
                     max_steps=max_steps,
                     max_cost_usd=run_budget,
                     temperature=temperature,
@@ -226,6 +235,7 @@ async def run_rule_shift_eval(
         "repeats": repeats,
         "arms": list(arms),
         "shift_after": shift_after,
+        "distractor_steps": distractor_steps,
         "max_steps": max_steps,
         "max_cost_usd_per_run": max_cost_usd,
         "max_total_cost_usd": max_total_cost_usd,
@@ -327,7 +337,8 @@ def render_rule_shift_eval_summary(report: dict[str, Any]) -> str:
             f"tokens={summary.get('mean_total_tokens')} "
             f"cost=${float(summary.get('mean_cost_usd') or 0):.6f} "
             f"suppressed={summary.get('mean_suppressed_turns')} "
-            f"evidence_receipts={summary.get('mean_evidence_receipts')}"
+            f"evidence_receipts={summary.get('mean_evidence_receipts')} "
+            f"workspace_events={summary.get('mean_evidence_workspace_events')}"
         )
     effect = report.get("matched_effect") or {}
     raw = effect.get("raw_deltas") or {}
@@ -385,6 +396,10 @@ def _case_from_trajectory(trajectory: Any, *, env: RuleShiftEnv, arm: str) -> di
         "infrastructure_degraded": model_error_events > 0,
         "model_steps": trajectory.n_steps,
         "environment_actions": len(env.action_trace),
+        "distractor_actions": sum(
+            item.get("action") == "action2" for item in env.action_trace
+        ),
+        "delayed_recall_exposed": _delayed_recall_exposed(env.action_trace),
         "environment_action_attempts": operation_counts.get("act", 0),
         "operation_counts": operation_counts,
         "error_steps": sum(bool(item.get("error")) for item in progress),
@@ -422,6 +437,8 @@ def _runner_error_case(*, arm: str, error: Exception) -> dict[str, Any]:
         "model_steps": 0,
         "environment_actions": 0,
         "environment_action_attempts": 0,
+        "distractor_actions": 0,
+        "delayed_recall_exposed": False,
         "operation_counts": {},
         "error_steps": 0,
         "error_kind_counts": {"runner_error": 1},
@@ -463,6 +480,7 @@ def _validate_eval_args(
     *,
     repeats: int,
     shift_after: int,
+    distractor_steps: int,
     max_steps: int,
     max_cost_usd: float,
     max_total_cost_usd: float | None,
@@ -473,6 +491,12 @@ def _validate_eval_args(
         raise ValueError("repeats must be a positive integer")
     if isinstance(shift_after, bool) or not isinstance(shift_after, int) or shift_after < 2:
         raise ValueError("shift_after must be an integer of at least 2")
+    if (
+        isinstance(distractor_steps, bool)
+        or not isinstance(distractor_steps, int)
+        or distractor_steps < 0
+    ):
+        raise ValueError("distractor_steps must be a non-negative integer")
     if isinstance(max_steps, bool) or not isinstance(max_steps, int) or max_steps <= 0:
         raise ValueError("max_steps must be a positive integer")
     if not math.isfinite(max_cost_usd) or max_cost_usd <= 0:
@@ -494,6 +518,9 @@ def _validate_eval_args(
 def _arm_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     valid = [record for record in records if not record.get("infrastructure_error")]
     lifecycles = [record.get("epistemic_transcript_lifecycle") or {} for record in valid]
+    evidence_workspaces = [
+        lifecycle.get("evidence_workspace") or {} for lifecycle in lifecycles
+    ]
     return {
         "n_runs": len(records),
         "n_valid_runs": len(valid),
@@ -501,6 +528,8 @@ def _arm_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         "protocol_completion_rate": _mean(valid, "protocol_completed"),
         "mean_model_steps": _mean(valid, "model_steps"),
         "mean_environment_actions": _mean(valid, "environment_actions"),
+        "mean_distractor_actions": _mean(valid, "distractor_actions"),
+        "delayed_recall_exposure_rate": _mean(valid, "delayed_recall_exposed"),
         "mean_error_steps": _mean(valid, "error_steps"),
         "mean_input_tokens": _mean(valid, "input_tokens"),
         "mean_total_tokens": _mean(valid, "total_tokens"),
@@ -510,6 +539,13 @@ def _arm_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_supersessions": _mean(valid, "supersessions"),
         "mean_suppressed_turns": _mean(lifecycles, "suppressed_turns"),
         "mean_evidence_receipts": _mean(lifecycles, "evidence_receipts"),
+        "mean_evidence_workspace_events": _mean(evidence_workspaces, "events"),
+        "mean_evidence_workspace_observations": _mean(
+            evidence_workspaces, "observations"
+        ),
+        "mean_evidence_workspace_deduplicated": _mean(
+            evidence_workspaces, "deduplicated_observations"
+        ),
         "mean_estimated_input_tokens_avoided": _mean(
             lifecycles, "estimated_input_tokens_avoided"
         ),
@@ -612,6 +648,29 @@ def _first_action_signature(record: dict[str, Any]) -> tuple[Any, ...] | None:
         first.get("epistemic_status"),
         tuple(first.get("epistemic_mismatch_fields") or []),
     )
+
+
+def _delayed_recall_exposed(trace: list[dict[str, Any]]) -> bool:
+    for index, event in enumerate(trace):
+        if (
+            event.get("action") != "action1"
+            or event.get("change_scale") != "global"
+            or event.get("epistemic_status") != "refuted"
+        ):
+            continue
+        tail = trace[index + 1 :]
+        action2_indexes = [
+            tail_index
+            for tail_index, tail_event in enumerate(tail)
+            if tail_event.get("action") == "action2"
+        ]
+        if not action2_indexes:
+            continue
+        return any(
+            tail_event.get("action") == "action1"
+            for tail_event in tail[max(action2_indexes) + 1 :]
+        )
+    return False
 
 
 def _pair_quality(diagnostics: list[dict[str, Any]]) -> dict[str, Any]:

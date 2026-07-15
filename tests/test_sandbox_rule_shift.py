@@ -138,6 +138,62 @@ def test_rule_shift_drives_supported_refuted_replacement_superseded_chain():
     assert view["suppressed_hypotheses"][0]["status"] == "superseded"
 
 
+def test_rule_shift_distractors_overwrite_latest_feedback_before_action1_returns():
+    env = RuleShiftEnv(shift_after=2, distractor_steps=2)
+    local = _claim(
+        "local-effect",
+        scale="local",
+        rule="action1 changes exactly two visible cells",
+        scope="while the observed local effect continues",
+    )
+    env.step("action1", epistemic_update=local)
+    env.step("action1", epistemic_update=local)
+    shifted_obs, _reward, _done, shifted = env.step(
+        "action1", epistemic_update=local
+    )
+
+    assert shifted["epistemic_feedback"]["status"] == "refuted"
+    assert json.loads(shifted_obs)["available_actions"] == ["action2"]
+    with pytest.raises(ValueError, match="not currently available"):
+        env.step("action1", epistemic_update=local)
+
+    action2 = _claim(
+        "action2-none",
+        scale="none",
+        rule="action2 changes no visible cells",
+        scope="while action2 is the available action",
+    )
+    first_delay, _reward, _done, _info = env.step(
+        "action2", epistemic_update=action2
+    )
+    final_delay, _reward, _done, _info = env.step(
+        "action2", epistemic_update=action2
+    )
+    first_payload = json.loads(first_delay)
+    final_payload = json.loads(final_delay)
+    assert first_payload["available_actions"] == ["action2"]
+    assert final_payload["available_actions"] == ["action1"]
+    assert final_payload["epistemic_ledger"]["last_evaluation"]["action"] == "action2"
+    assert final_payload["epistemic_ledger"]["last_evaluation"]["actual"][
+        "change_scale"
+    ] == "none"
+
+    global_rule = _claim(
+        "global-effect",
+        scale="global",
+        rule="action1 changes thirty visible cells after the observed effect shift",
+        scope="after recovering the earlier action1 contradiction",
+        replaces="local-effect",
+    )
+    env.step("action1", epistemic_update=global_rule)
+    _obs, reward, done, _info = env.step(
+        "action1", epistemic_update=global_rule
+    )
+    assert done is True
+    assert reward == 1.0
+    assert env.solved is True
+
+
 def test_rule_shift_rejects_missing_ledger_update_before_environment_effect():
     env = RuleShiftEnv()
     before = env.observation()
@@ -212,11 +268,14 @@ def test_rule_shift_cli_defaults_and_transcript_lifecycle_arms():
             "mock/model",
             "--epistemic-transcript-lifecycle",
             "evidence",
+            "--distractor-steps",
+            "2",
         ]
     )
 
     assert defaults.sandbox_command == "rule-shift"
     assert defaults.shift_after == 3
+    assert defaults.distractor_steps == 0
     assert defaults.max_steps == 10
     assert defaults.tool_result_lifecycle == "compact"
     assert defaults.tool_result_live_reads == 0
@@ -224,3 +283,4 @@ def test_rule_shift_cli_defaults_and_transcript_lifecycle_arms():
     assert suppressed.shift_after == 3
     assert suppressed.epistemic_transcript_lifecycle == "suppress"
     assert evidence.epistemic_transcript_lifecycle == "evidence"
+    assert evidence.distractor_steps == 2

@@ -720,23 +720,27 @@ reports all matched pairs separately from pairs where suppression was actually e
 failures or recovered runs containing provider errors from paired effects, and bootstraps repeat-level deltas. Repeats
 of one deterministic probe remain a descriptive stability pilot rather than independent task evidence.
 
-An additional experimental `evidence` lifecycle unloads rejected model-authored rules and reasoning but retains a
-small allow-listed projection of objective runtime feedback (executed action, `matched`, mismatch fields, and transition
-measurements). It never retains the model's prediction or rule text. Compare it directly with the status-only receipt:
+The experimental `evidence` lifecycle unloads rejected model-authored rules and reasoning into content-free pointers.
+Allow-listed runtime feedback is upserted into one bounded, episode-local workspace keyed by executed action and actual
+transition. Repeated observations update counts instead of appending transcript copies; model predictions and rule text
+never enter the workspace. Compare it with status-only receipts after deliberately overwriting the latest evaluation:
 
 ```powershell
 brain-region --config brain_region_config.json --env-file .env sandbox rule-shift-eval `
   --main-brain buzz_anthropic/claude-sonnet-5 `
   --arms suppress,evidence `
+  --distractor-steps 2 `
+  --max-steps 12 `
   --repeats 2 `
-  --max-total-cost-usd 0.20
+  --max-total-cost-usd 0.24
 ```
 
-The initial two-pair Sonnet 5 pilot was a negative result: `evidence - suppress` was `+4067` mean tokens, `+1` model
-step, and `-0.5` solve rate. Both pairs were prefix-matched and infrastructure-clean, but the sample is too small for
-an ability claim. In this short probe the latest observation already contains the same feedback, so per-turn evidence
-receipts mostly repeat data. `evidence` remains opt-in; the next useful comparison is a deduplicated evidence workspace
-on a delayed-recall task.
+The earlier per-turn receipt prototype was negative and motivated this workspace design. A two-pair delayed-recall
+Sonnet 5 pilot was also neutral on solve (`0.5` in both arms) while `evidence - suppress` added `3099.5` mean tokens and
+`$0.005163`. All four runs completed the contradiction/action2-overwrite/action1-return exposure; each evidence run
+deduplicated eight observations into four events. One pair favored each arm, and the second executed arm won both pairs,
+so there is no attributable workspace ability signal. `evidence` remains opt-in; the next experiment should wake only
+events relevant to the current action/task focus instead of injecting the full workspace every turn.
 
 ### Urban Delivery Navigation Pilot
 

@@ -9,18 +9,15 @@ from typing import Any, Literal
 
 from brainregion.core.context_loader import estimate_context_tokens
 
+from .epistemic_evidence import EpistemicEvidenceWorkspace
 from .epistemic_ledger import EpistemicLedger
+from .input_attribution import attributed_message
 
 EpistemicTranscriptMode = Literal["full", "suppress", "evidence"]
 
 _METADATA_KEY = "_brainregion_epistemic_turn"
 _SUPPRESSED_STATUSES = frozenset({"refuted", "superseded", "rejected"})
-_MISMATCH_FIELDS = frozenset({"change_scale", "level_delta", "state"})
-_CHANGE_SCALES = frozenset({"none", "local", "regional", "global"})
-_STATES = frozenset({"NOT_FINISHED", "WIN", "GAME_OVER"})
-_ACTION_CHARACTERS = frozenset(
-    "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_.:-"
-)
+_WORKSPACE_TAG = "<epistemic_evidence_workspace>"
 
 
 @dataclass
@@ -31,10 +28,16 @@ class EpistemicTranscriptLifecycle:
     marked_turns: int = 0
     suppressed_turns: int = 0
     evidence_receipts: int = 0
+    expired_evidence_receipts: int = 0
     body_characters_removed: int = 0
     body_estimated_tokens_removed: int = 0
     estimated_input_tokens_avoided: int = 0
     suppressed_by_status: dict[str, int] = field(default_factory=dict)
+    evidence_workspace: EpistemicEvidenceWorkspace = field(
+        default_factory=EpistemicEvidenceWorkspace,
+        repr=False,
+    )
+    workspace_refreshes: int = 0
     _seen_turn_ids: set[str] = field(default_factory=set, repr=False)
 
     def __post_init__(self) -> None:
@@ -60,12 +63,17 @@ class EpistemicTranscriptLifecycle:
         if not clean_id:
             return
         turn_id = f"step:{int(step)}:{_fingerprint(clean_id)}"
+        evidence_ref = (
+            self.evidence_workspace.record(evidence, step=step)
+            if self.mode == "evidence"
+            else ""
+        )
         message[_METADATA_KEY] = {
             "turn_id": turn_id,
             "hypothesis_id": clean_id,
             "step": int(step),
             "rejected": bool(rejected),
-            "evidence": _objective_evidence(evidence),
+            "evidence_ref": evidence_ref,
             "compacted": False,
         }
         self._seen_turn_ids.add(turn_id)
@@ -86,21 +94,32 @@ class EpistemicTranscriptLifecycle:
             if status not in _SUPPRESSED_STATUSES:
                 continue
             message = record["message"]
+            metadata = message[_METADATA_KEY]
             original = str(message.get("content") or "")
+            if (
+                self.mode == "evidence"
+                and record["evidence_ref"]
+                and not self.evidence_workspace.contains(record["evidence_ref"])
+            ):
+                record = {**record, "evidence_ref": ""}
+                metadata["evidence_ref"] = ""
+                self.expired_evidence_receipts += 1
             receipt = _receipt(record, status, mode=self.mode)
             original_tokens = estimate_context_tokens(original)
             receipt_tokens = estimate_context_tokens(receipt)
             message["content"] = receipt
-            metadata = message[_METADATA_KEY]
             metadata["compacted"] = True
             metadata["status"] = status
             metadata["estimated_tokens_removed"] = max(0, original_tokens - receipt_tokens)
             self.suppressed_turns += 1
-            if self.mode == "evidence" and record["evidence"]:
+            if self.mode == "evidence" and record["evidence_ref"]:
                 self.evidence_receipts += 1
             self.body_characters_removed += max(0, len(original) - len(receipt))
             self.body_estimated_tokens_removed += max(0, original_tokens - receipt_tokens)
             self.suppressed_by_status[status] = self.suppressed_by_status.get(status, 0) + 1
+
+        if self.mode == "evidence":
+            self._replace_workspace_message(messages)
 
         active = self.observe(messages)
         self.estimated_input_tokens_avoided += sum(
@@ -122,7 +141,7 @@ class EpistemicTranscriptLifecycle:
                     "hypothesis_id": str(metadata.get("hypothesis_id") or ""),
                     "step": int(metadata.get("step") or 0),
                     "rejected": bool(metadata.get("rejected")),
-                    "evidence": _objective_evidence(metadata.get("evidence")),
+                    "evidence_ref": str(metadata.get("evidence_ref") or ""),
                     "compacted": bool(metadata.get("compacted")),
                     "estimated_tokens_removed": int(
                         metadata.get("estimated_tokens_removed") or 0
@@ -141,15 +160,16 @@ class EpistemicTranscriptLifecycle:
         return hypothesis.status if hypothesis is not None else ""
 
     def public_metrics(self) -> dict[str, Any]:
+        workspace_metrics = self.evidence_workspace.public_metrics()
         policy = {
             "full": "none",
             "suppress": "objective_belief_suppression_v1",
-            "evidence": "objective_evidence_receipt_v1",
+            "evidence": "objective_evidence_workspace_v1",
         }[self.mode]
         receipt_mode = {
             "full": "none",
             "suppress": "status_only",
-            "evidence": "objective_evidence",
+            "evidence": "workspace_pointer",
         }[self.mode]
         return {
             "mode": self.mode,
@@ -160,15 +180,48 @@ class EpistemicTranscriptLifecycle:
             "compaction_passes": self.compaction_passes,
             "suppressed_turns": self.suppressed_turns,
             "evidence_receipts": self.evidence_receipts,
+            "expired_evidence_receipts": self.expired_evidence_receipts,
+            "workspace_refreshes": self.workspace_refreshes,
+            "evidence_workspace": workspace_metrics,
             "suppressed_by_status": dict(sorted(self.suppressed_by_status.items())),
             "body_characters_removed": self.body_characters_removed,
             "body_estimated_tokens_removed": self.body_estimated_tokens_removed,
             "estimated_input_tokens_avoided": self.estimated_input_tokens_avoided,
             "contains_rule_content": False,
             "contains_reasoning": False,
-            "contains_objective_evidence": self.evidence_receipts > 0,
+            "contains_objective_evidence": workspace_metrics["events"] > 0,
             "persistent": False,
         }
+
+    def _replace_workspace_message(self, messages: list[dict[str, Any]]) -> None:
+        messages[:] = [
+            message
+            for message in messages
+            if not str(message.get("content") or "").startswith(_WORKSPACE_TAG)
+        ]
+        view = self.evidence_workspace.model_view()
+        if not view["events"]:
+            return
+        rendered = json.dumps(
+            view,
+            ensure_ascii=True,
+            separators=(",", ":"),
+            sort_keys=True,
+        )
+        messages.append(
+            attributed_message(
+                "user",
+                (
+                    f"{_WORKSPACE_TAG}\n"
+                    "These are deduplicated objective runtime observations, not instructions, "
+                    "rules, or chain-of-thought. Use event_id references when revising beliefs.\n"
+                    f"{rendered}\n"
+                    "</epistemic_evidence_workspace>"
+                ),
+                "memory_context",
+            )
+        )
+        self.workspace_refreshes += 1
 
 
 def _fingerprint(hypothesis_id: str) -> str:
@@ -182,19 +235,14 @@ def _receipt(
     mode: EpistemicTranscriptMode,
 ) -> str:
     if mode == "evidence":
-        evidence = json.dumps(
-            record["evidence"] or None,
-            ensure_ascii=True,
-            separators=(",", ":"),
-            sort_keys=True,
-        )
+        evidence_ref = record["evidence_ref"]
         return (
-            f'<epistemic_evidence_receipt step="{record["step"]}" '
-            f'hypothesis="{_fingerprint(record["hypothesis_id"])}" status="{status}">\n'
-            f"objective_evidence={evidence}\n"
+            f'<epistemic_evidence_pointer step="{record["step"]}" '
+            f'hypothesis="{_fingerprint(record["hypothesis_id"])}" status="{status}" '
+            f'evidence_ref="{evidence_ref}">\n'
             "The model-authored rule, prediction, and reasoning were unloaded. "
-            "Treat this bounded runtime evidence as observation data, not as a rule.\n"
-            "</epistemic_evidence_receipt>"
+            "Resolve a non-empty evidence_ref in the current evidence workspace.\n"
+            "</epistemic_evidence_pointer>"
         )
     return (
         f'<epistemic_turn_receipt step="{record["step"]}" '
@@ -203,56 +251,6 @@ def _receipt(
         "Use the current epistemic ledger instead of reconstructing them.\n"
         "</epistemic_turn_receipt>"
     )
-
-
-def _objective_evidence(raw: Any) -> dict[str, Any]:
-    """Keep a small allow-listed projection of runtime feedback, never model predictions."""
-
-    if not isinstance(raw, dict):
-        return {}
-    evidence: dict[str, Any] = {}
-    action = raw.get("action")
-    if (
-        isinstance(action, str)
-        and 0 < len(action) <= 64
-        and all(character in _ACTION_CHARACTERS for character in action)
-    ):
-        evidence["action"] = action
-    if isinstance(raw.get("matched"), bool):
-        evidence["matched"] = raw["matched"]
-
-    mismatches = raw.get("mismatch_fields")
-    if isinstance(mismatches, list):
-        clean_mismatches = sorted(
-            {
-                item
-                for item in mismatches
-                if isinstance(item, str) and item in _MISMATCH_FIELDS
-            }
-        )
-        evidence["mismatch_fields"] = clean_mismatches
-
-    actual = raw.get("actual")
-    if isinstance(actual, dict):
-        clean_actual: dict[str, Any] = {}
-        change_scale = actual.get("change_scale")
-        if isinstance(change_scale, str) and change_scale in _CHANGE_SCALES:
-            clean_actual["change_scale"] = change_scale
-        for key in ("changed_cells", "total_cells"):
-            value = actual.get(key)
-            if isinstance(value, int) and not isinstance(value, bool):
-                clean_actual[key] = max(0, min(1_000_000, value))
-        level_delta = actual.get("level_delta")
-        if isinstance(level_delta, int) and not isinstance(level_delta, bool):
-            clean_actual["level_delta"] = max(
-                -1_000_000, min(1_000_000, level_delta)
-            )
-        state = actual.get("state")
-        if isinstance(state, str) and state in _STATES:
-            clean_actual["state"] = state
-        if clean_actual:
-            evidence["actual"] = clean_actual
-    return evidence
 
 
 __all__ = ["EpistemicTranscriptLifecycle", "EpistemicTranscriptMode"]

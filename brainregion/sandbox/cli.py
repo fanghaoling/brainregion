@@ -1099,6 +1099,7 @@ async def run_rule_shift(args: argparse.Namespace) -> dict[str, Any]:
             endpoint_id=endpoint_id,
             arm=args.epistemic_transcript_lifecycle,
             shift_after=int(args.shift_after),
+            distractor_steps=int(args.distractor_steps),
             max_steps=int(args.max_steps),
             max_cost_usd=float(args.max_cost_usd),
             temperature=float(dd.get("sandbox_temperature", 0.0)),
@@ -1120,6 +1121,7 @@ async def run_rule_shift(args: argparse.Namespace) -> dict[str, Any]:
         "model": model,
         "endpoint_id": endpoint_id,
         "shift_after": int(args.shift_after),
+        "distractor_steps": int(args.distractor_steps),
         **case,
         "termination": case["termination_reason"],
         "tokens_per_environment_action": round(
@@ -1162,6 +1164,7 @@ async def run_rule_shift_evaluation(args: argparse.Namespace) -> dict[str, Any]:
             endpoint_id=endpoint_id,
             repeats=int(args.repeats),
             shift_after=int(args.shift_after),
+            distractor_steps=int(args.distractor_steps),
             max_steps=int(args.max_steps),
             max_cost_usd=float(args.max_cost_usd),
             max_total_cost_usd=args.max_total_cost_usd,

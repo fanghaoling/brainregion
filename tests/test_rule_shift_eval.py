@@ -99,6 +99,78 @@ class _LedgerAwareBackend:
         return _Response(content, input_tokens=input_tokens)
 
 
+class _DelayedRecallBackend:
+    async def complete_messages(self, messages, **kwargs):
+        del kwargs
+        observation = _latest_observation(messages)
+        input_tokens = max(
+            1,
+            sum(len(str(message.get("content") or "")) for message in messages) // 4,
+        )
+        if observation["state"] == "WIN":
+            return _Response(
+                json.dumps({"thought": "terminal", "done": True, "answer": "done"}),
+                input_tokens=input_tokens,
+            )
+
+        ledger = observation["epistemic_ledger"]
+        active = {item["hypothesis_id"]: item for item in ledger["active_hypotheses"]}
+        suppressed = {
+            item["hypothesis_id"]: item for item in ledger["suppressed_hypotheses"]
+        }
+        action = observation["available_actions"][0]
+        if action == "action2":
+            hypothesis = active.get("action2-none")
+            update = _claim(
+                "action2-none",
+                rule=(hypothesis or {}).get("rule", "action2 changes no visible cells"),
+                scope=(hypothesis or {}).get("scope", "while action2 is available"),
+                scale="none",
+            )
+        elif "local-effect" not in suppressed:
+            hypothesis = active.get("local-effect")
+            update = _claim(
+                "local-effect",
+                rule=(hypothesis or {}).get("rule", "action1 changes exactly two visible cells"),
+                scope=(hypothesis or {}).get("scope", "before the action1 contradiction"),
+                scale="local",
+            )
+        else:
+            remembered = _workspace_has_transition(
+                messages,
+                action="action1",
+                change_scale="global",
+            )
+            hypothesis_id = "global-effect" if remembered else "forgotten-effect"
+            hypothesis = active.get(hypothesis_id)
+            update = _claim(
+                hypothesis_id,
+                rule=(hypothesis or {}).get(
+                    "rule",
+                    (
+                        "action1 changes thirty visible cells after the contradiction"
+                        if remembered
+                        else "action1 still changes exactly two visible cells"
+                    ),
+                ),
+                scope=(hypothesis or {}).get(
+                    "scope", "after action2 overwrote the latest evaluation"
+                ),
+                replaces="local-effect",
+                scale="global" if remembered else "local",
+            )
+        return _Response(
+            json.dumps(
+                {
+                    "thought": "use only currently visible runtime evidence",
+                    "tool": "act",
+                    "args": {"action": action, "epistemic": update},
+                }
+            ),
+            input_tokens=input_tokens,
+        )
+
+
 def _latest_observation(messages: list[dict]) -> dict:
     for message in reversed(messages):
         content = str(message.get("content") or "")
@@ -107,6 +179,28 @@ def _latest_observation(messages: list[dict]) -> dict:
         payload = content.split("<visual>", 1)[1].split("</visual>", 1)[0].strip()
         return json.loads(payload)
     raise AssertionError("rule-shift observation was not supplied to the model")
+
+
+def _workspace_has_transition(
+    messages: list[dict],
+    *,
+    action: str,
+    change_scale: str,
+) -> bool:
+    for message in reversed(messages):
+        content = str(message.get("content") or "")
+        if "<epistemic_evidence_workspace>" not in content:
+            continue
+        payload = content.split("<epistemic_evidence_workspace>", 1)[1]
+        payload = payload.split("</epistemic_evidence_workspace>", 1)[0]
+        rendered = next(line for line in payload.splitlines() if line.startswith("{"))
+        workspace = json.loads(rendered)
+        return any(
+            event.get("action") == action
+            and (event.get("actual") or {}).get("change_scale") == change_scale
+            for event in workspace["events"]
+        )
+    return False
 
 
 def _claim(
@@ -227,6 +321,7 @@ def test_rule_shift_eval_counterbalances_and_replays_safe_first_turn(tmp_path, m
     [
         ({"repeats": 0}, "repeats"),
         ({"shared_prefix_turns": 2}, "shared_prefix_turns"),
+        ({"distractor_steps": -1}, "distractor_steps"),
         ({"max_total_cost_usd": 0.0}, "max_total_cost_usd"),
         ({"bootstrap_samples": 0}, "bootstrap_samples"),
     ],
@@ -287,6 +382,42 @@ def test_rule_shift_eval_compares_status_only_with_evidence_receipts(
     assert "action1 changes thirty visible cells" not in serialized
 
 
+def test_delayed_recall_workspace_recovers_overwritten_action1_evidence(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    report = asyncio.run(
+        run_rule_shift_eval(
+            _DelayedRecallBackend(),
+            "fake-model",
+            repeats=2,
+            shift_after=2,
+            distractor_steps=2,
+            max_steps=9,
+            max_cost_usd=1.0,
+            shared_prefix_turns=1,
+            bootstrap_samples=20,
+            run_id="rule-shift-delayed-recall-test",
+            arms=(ARM_SUPPRESS, ARM_EVIDENCE),
+        )
+    )
+
+    assert report["execution"]["distractor_steps"] == 2
+    assert report["per_arm"][ARM_SUPPRESS]["solve_rate"] == 0.0
+    assert report["per_arm"][ARM_EVIDENCE]["solve_rate"] == 1.0
+    assert report["matched_effect"]["raw_deltas"]["solved"] == 1.0
+    assert report["pair_quality"]["status"] == "matched"
+    assert report["pair_quality"]["contrast_exposed_pairs"] == 2
+    assert report["per_arm"][ARM_SUPPRESS]["delayed_recall_exposure_rate"] == 1.0
+    assert report["per_arm"][ARM_EVIDENCE]["delayed_recall_exposure_rate"] == 1.0
+    assert all(case["delayed_recall_exposed"] for case in report["cases"])
+    evidence_cases = [case for case in report["cases"] if case["arm"] == ARM_EVIDENCE]
+    assert all(
+        case["epistemic_transcript_lifecycle"]["evidence_workspace"]["events"] >= 3
+        for case in evidence_cases
+    )
+
+
 def test_rule_shift_summary_excludes_pair_with_recovered_provider_error(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     report = asyncio.run(
@@ -331,6 +462,7 @@ def test_rule_shift_eval_cli_defaults_are_bounded_and_explicit():
     assert args.sandbox_command == "rule-shift-eval"
     assert args.repeats == 2
     assert args.shift_after == 3
+    assert args.distractor_steps == 0
     assert args.max_steps == 10
     assert args.max_cost_usd == 0.08
     assert args.max_total_cost_usd is None
