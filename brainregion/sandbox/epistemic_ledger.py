@@ -403,6 +403,7 @@ class EpistemicLedger:
                 "hypothesis_id": item.hypothesis_id,
                 "rule": item.rule,
                 "scope": item.scope,
+                "replaces": item.replaces,
                 "status": item.status,
                 "support_count": item.support_count,
                 "contradiction_count": item.contradiction_count,

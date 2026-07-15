@@ -704,6 +704,22 @@ under `.brain-region/rule-shift/runs/` contain model, usage, cost, state-transit
 content-free hypothesis fingerprints. They contain no frames, rule bodies, or model reasoning. This probe validates
 the scaffold and suppression mechanism; it is not evidence that the scaffold improves open-ended task ability.
 
+For repeated matched pairs, use the evaluator instead of manually alternating commands:
+
+```powershell
+brain-region sandbox rule-shift-eval `
+  --main-brain buzz_anthropic/claude-sonnet-5 `
+  --repeats 4 `
+  --max-cost-usd 0.08 `
+  --max-total-cost-usd 0.40
+```
+
+The evaluator alternates arm order by repeat and, by default, captures and exactly replays the first model response
+inside each pair. One turn is the safe maximum because suppression can first affect the second provider request. It
+reports all matched pairs separately from pairs where suppression was actually exposed, excludes terminal provider
+failures or recovered runs containing provider errors from paired effects, and bootstraps repeat-level deltas. Repeats
+of one deterministic probe remain a descriptive stability pilot rather than independent task evidence.
+
 ### Urban Delivery Navigation Pilot
 
 The urban-delivery sandbox tests execution offload on a deterministic road network. The main brain owns order-level
