@@ -15,19 +15,32 @@ json_object + prompt 贴 schema 范例 + parsing 防御解析）。调用方可�
 from __future__ import annotations
 
 import logging
+import os
 import re
 import time
-
-import litellm
 
 from brainregion.runtime import emit_event
 from brainregion.runtime.pricing import model_usage_payload
 
 from .base import ModelResponse
 
-litellm.suppress_debug_info = True  # 抑制 litellm stdout banner（CLI/MCP stdout 要纯 JSON/JSON-RPC）
-
 logger = logging.getLogger("brainregion.provider.litellm")
+
+
+def _configure_litellm_environment() -> None:
+    # BrainRegion maintains relay-aware prices. Avoid LiteLLM's optional startup
+    # fetch unless the operator explicitly opts into it before importing us.
+    os.environ.setdefault("LITELLM_LOCAL_MODEL_COST_MAP", "True")
+
+
+_configure_litellm_environment()
+
+
+def _load_litellm():
+    import litellm
+
+    litellm.suppress_debug_info = True
+    return litellm
 
 
 def _effort_kwargs(model: str, effort: str | None, thinking: bool | None = None) -> dict:
@@ -154,7 +167,7 @@ class LiteLLMBackend:
         thinking: bool | None,
     ) -> object:
         """litellm.acompletion + json_object 回退：provider 拒 json_object 时去 response_format 重试。"""
-        import litellm
+        litellm = _load_litellm()
 
         litellm.drop_params = True
         base_kwargs = dict(
