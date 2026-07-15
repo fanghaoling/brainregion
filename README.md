@@ -314,6 +314,42 @@ usage/cost telemetry, routing metadata, and context counts; raw model output and
 If the region has no private context, the runtime publishes `request_context` without calling a model. A conservative
 single-job preflight skips the call when `max_cost_usd` cannot cover the configured model and output cap.
 
+For wake-gated execution, register a task and assignment, stage context to that exact assignment, then request a
+bounded wake before running the expert:
+
+    create_task(task_id="parser-debug", goal="Resolve the parser regression")
+    delegate_task(
+        task_id="parser-debug",
+        assignment_id="parser",
+        region="debugging",
+        question="Choose the next grounded parser diagnostic.",
+    )
+    stage_region_context(
+        task_id="parser-debug",
+        query="Repeated parser failures",
+        audience="region",
+        target_region="debugging",
+        assignment_id="parser",
+    )
+    request_evidence_wake(
+        task_id="parser-debug",
+        assignment_id="parser",
+        reason="expert_request",
+        ttl_reads=2,
+    )
+    run_assignment_expert(
+        task_id="parser-debug",
+        assignment_id="parser",
+        model="modelbridge_anthropic/claude-sonnet-4-6",
+        max_cost_usd=0.05,
+    )
+
+`run_assignment_expert` derives region, question, and scope from the registered assignment. With no matching wake it
+returns while still sleeping, before reading private context or resolving endpoint credentials. Missing context and
+export/budget denial preserve the unread wake; a ready provider call consumes only that assignment's read TTL. The
+same audited `WorkspaceView` snapshot is used for export policy and the provider prompt. This remains an architectural
+delivery boundary, not caller authentication, and one active wake consumer is expected per assignment.
+
 Expert context export has an independent three-state authorization gate. It never rewrites allowed context:
 
 ```json

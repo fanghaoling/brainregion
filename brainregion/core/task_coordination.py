@@ -323,6 +323,48 @@ class TaskCoordinationBoard:
             self._assignments[task_id][assignment_id] = updated
         return updated.to_dict()
 
+    def assignment(self, task_id: str, assignment_id: str) -> dict[str, Any]:
+        """Return one exact assignment contract without private context."""
+
+        task_id = _required_text(task_id, "task_id", max_length=200)
+        assignment_id = _required_text(
+            assignment_id, "assignment_id", max_length=200
+        )
+        with self._lock:
+            if task_id not in self._tasks:
+                raise ValueError(f"unknown task: {task_id}")
+            assignment = self._assignments.get(task_id, {}).get(assignment_id)
+        if assignment is None:
+            raise ValueError(f"unknown assignment: {assignment_id}")
+        return assignment.to_dict()
+
+    def evidence_wake_status(
+        self, task_id: str, assignment_id: str
+    ) -> dict[str, Any]:
+        """Inspect pending wakes for one assignment without consuming read TTL."""
+
+        task_id = _required_text(task_id, "task_id", max_length=200)
+        assignment_id = _required_text(
+            assignment_id, "assignment_id", max_length=200
+        )
+        with self._lock:
+            if task_id not in self._tasks:
+                raise ValueError(f"unknown task: {task_id}")
+            assignment = self._assignments.get(task_id, {}).get(assignment_id)
+            if assignment is None:
+                raise ValueError(f"unknown assignment: {assignment_id}")
+            requests = list(
+                self._evidence_wakes.get(task_id, {}).get(assignment_id, ())
+            )
+        return {
+            "task_id": task_id,
+            "assignment_id": assignment_id,
+            "region": assignment.region,
+            "wakes": [request.to_dict() for request in requests],
+            "count": len(requests),
+            "contains_context_content": False,
+        }
+
     def request_evidence_wake(
         self,
         task_id: str,

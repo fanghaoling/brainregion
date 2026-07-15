@@ -12,7 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from .cognitive_workspace import CognitiveWorkspace
+from .cognitive_workspace import CognitiveWorkspace, WorkspaceView
 from .context import ContextBlock, render_context_blocks
 from .region_reporting import RegionCoordinationBoard
 from .stages.parse import extract_json_object
@@ -205,6 +205,7 @@ class RegionExpertEngine:
         max_tokens: int = 1200,
         temperature: float = 0.1,
         effort: str | None = None,
+        view: WorkspaceView | None = None,
     ) -> RegionExpertResult:
         task = str(task or "").strip()
         region = str(region or "").strip().casefold()
@@ -215,14 +216,24 @@ class RegionExpertEngine:
         assignment_id = str(assignment_id or "").strip()
         if len(assignment_id) > 200:
             raise ValueError("assignment_id cannot exceed 200 characters")
-        view = workspace.read(
-            task_id,
-            consumer="region",
-            region=region,
-            assignment_id=assignment_id,
-            max_context_tokens=max_context_tokens,
-            max_blocks=max_blocks,
-        )
+        if view is None:
+            view = workspace.read(
+                task_id,
+                consumer="region",
+                region=region,
+                assignment_id=assignment_id,
+                max_context_tokens=max_context_tokens,
+                max_blocks=max_blocks,
+            )
+        elif (
+            view.task_id != task_id
+            or view.consumer != "region"
+            or view.region != region
+            or view.assignment_id != assignment_id
+        ):
+            raise ValueError(
+                "expert view must match task_id, region, and assignment_id"
+            )
         context_state = _context_state(
             coordination, task_id, region, assignment_id, bool(view.blocks)
         )

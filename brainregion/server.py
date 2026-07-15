@@ -44,6 +44,10 @@ from .adapters.generic import GenericAdapter  # noqa: E402
 from .adapters.unity import UnityAdapter  # noqa: E402
 from .core.activation import ActivationSignal as _ActivationSignal  # noqa: E402
 from .core.cognitive_workspace import CognitiveWorkspace as _CognitiveWorkspace  # noqa: E402
+from .core.assignment_expert import (  # noqa: E402
+    AssignmentExpertResult as _AssignmentExpertResult,
+    AssignmentExpertRunner as _AssignmentExpertRunner,
+)
 from .core.context_export import (  # noqa: E402
     bypass_context_export as _bypass_context_export,
     context_export_mode as _context_export_mode,
@@ -2053,8 +2057,7 @@ def workspace_context(
     )
 
 
-@mcp.tool()
-async def run_region_expert(
+async def _run_region_expert_impl(
     task_id: str,
     region: str,
     task: str,
@@ -2066,6 +2069,7 @@ async def run_region_expert(
     temperature: float = 0.1,
     effort: str | None = None,
     max_cost_usd: float | None = None,
+    wake_gated: bool = False,
 ) -> dict:
     """Run one model as a focused region expert over its private workspace view.
 
@@ -2085,7 +2089,8 @@ async def run_region_expert(
     export_policy = dd.get("context_export_policy")
     export_mode = _context_export_mode(export_policy)
     export_decision = _bypass_context_export()
-    if export_mode != "off":
+    expert_view = None
+    if wake_gated or export_mode != "off":
         expert_view = _cognitive_workspace.read(
             task_id,
             consumer="region",
@@ -2094,6 +2099,7 @@ async def run_region_expert(
             max_context_tokens=max_context_tokens,
             max_blocks=max_blocks,
         )
+    if export_mode != "off":
         endpoint_trust = _endpoint_context_trust(
             endpoint_id, endpoints_cfg, export_policy
         )
@@ -2168,21 +2174,40 @@ async def run_region_expert(
                 "routing": {"requested_model": model, "resolved_model": entry["model"]},
             }
     engine = _build_region_expert_engine(dd, endpoint_registry)
-    result = await engine.run(
-        workspace=_cognitive_workspace,
-        coordination=_region_coordination_board,
-        task_id=task_id,
-        region=region,
-        task=task,
-        model=entry["model"],
-        assignment_id=assignment_id,
-        endpoint_id=entry.get("endpoint_id"),
-        max_context_tokens=max_context_tokens,
-        max_blocks=max_blocks,
-        max_tokens=max_tokens,
-        temperature=temperature,
-        effort=dd.get("effort"),
-    )
+    if wake_gated:
+        result = await _AssignmentExpertRunner(
+            engine=engine,
+            tasks=_task_coordination_board,
+            workspace=_cognitive_workspace,
+            coordination=_region_coordination_board,
+        ).run(
+            task_id=task_id,
+            assignment_id=assignment_id,
+            model=entry["model"],
+            endpoint_id=entry.get("endpoint_id"),
+            max_context_tokens=max_context_tokens,
+            max_blocks=max_blocks,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            effort=dd.get("effort"),
+            evidence_view=expert_view,
+        )
+    else:
+        result = await engine.run(
+            workspace=_cognitive_workspace,
+            coordination=_region_coordination_board,
+            task_id=task_id,
+            region=region,
+            task=task,
+            model=entry["model"],
+            assignment_id=assignment_id,
+            endpoint_id=entry.get("endpoint_id"),
+            max_context_tokens=max_context_tokens,
+            max_blocks=max_blocks,
+            max_tokens=max_tokens,
+            temperature=temperature,
+            effort=dd.get("effort"),
+        )
     output = result.to_dict()
     output["assignment_id"] = assignment_id
     output["budget"] = budget
@@ -2192,6 +2217,118 @@ async def run_region_expert(
         "resolved_model": entry["model"],
         "endpoint_id": entry.get("endpoint_id"),
     }
+    return output
+
+
+@mcp.tool()
+async def run_region_expert(
+    task_id: str,
+    region: str,
+    task: str,
+    model: str,
+    assignment_id: str = "",
+    max_context_tokens: int = 2000,
+    max_blocks: int = 12,
+    max_tokens: int = 1200,
+    temperature: float = 0.1,
+    effort: str | None = None,
+    max_cost_usd: float | None = None,
+) -> dict:
+    """Run one focused expert directly over its private workspace view."""
+    return await _run_region_expert_impl(
+        task_id=task_id,
+        region=region,
+        task=task,
+        model=model,
+        assignment_id=assignment_id,
+        max_context_tokens=max_context_tokens,
+        max_blocks=max_blocks,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        effort=effort,
+        max_cost_usd=max_cost_usd,
+    )
+
+
+@mcp.tool()
+async def run_assignment_expert(
+    task_id: str,
+    assignment_id: str,
+    model: str,
+    max_context_tokens: int = 2000,
+    max_blocks: int = 12,
+    max_tokens: int = 1200,
+    temperature: float = 0.1,
+    effort: str | None = None,
+    max_cost_usd: float | None = None,
+) -> dict:
+    """Run an assignment expert only when its exact private evidence view is awake.
+
+    Region, question, and scope come from the registered assignment. A sleeping
+    assignment returns before reading private context or resolving model endpoints.
+    This is an architectural delivery boundary, not caller authentication.
+    """
+    assignment = _task_coordination_board.assignment(task_id, assignment_id)
+    wake_status = _task_coordination_board.evidence_wake_status(
+        task_id, assignment_id
+    )
+    budget = {
+        "max_usd": max_cost_usd,
+        "estimated_usd": None,
+        "exhausted": False,
+    }
+    if wake_status["count"] == 0:
+        output = _AssignmentExpertResult.sleeping(
+            assignment=assignment,
+            model=model,
+        ).to_dict()
+        output["budget"] = budget
+        output["context_export"] = _bypass_context_export().to_dict()
+        output["routing"] = {
+            "requested_model": model,
+            "resolved_model": None,
+            "endpoint_id": None,
+            "resolution_skipped": "assignment_sleeping",
+        }
+        return output
+
+    task = str(assignment["question"])
+    if assignment.get("scope"):
+        task += f"\n\nDELEGATED SCOPE:\n{assignment['scope']}"
+    output = await _run_region_expert_impl(
+        task_id=task_id,
+        region=assignment["region"],
+        task=task,
+        model=model,
+        assignment_id=assignment_id,
+        max_context_tokens=max_context_tokens,
+        max_blocks=max_blocks,
+        max_tokens=max_tokens,
+        temperature=temperature,
+        effort=effort,
+        max_cost_usd=max_cost_usd,
+        wake_gated=True,
+    )
+    if "assignment_lifecycle" not in output:
+        pending = _task_coordination_board.evidence_wake_status(
+            task_id, assignment_id
+        )
+        output["assignment_lifecycle"] = {
+            "state": "blocked",
+            "wake_required": True,
+            "wake_delivered": False,
+            "wake_delivery_count": 0,
+            "wake_request_ids": [],
+            "wake_reasons": [],
+            "wake_sources": [],
+            "pending_wake_requests": pending["count"],
+            "pending_provider_reads": sum(
+                max(0, int(wake.get("remaining_reads") or 0))
+                for wake in pending["wakes"]
+            ),
+            "contains_context_content": False,
+            "authorization_boundary": False,
+        }
     return output
 
 

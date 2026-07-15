@@ -10,6 +10,11 @@ from .activation import (
     evaluate_activation,
     plan_activation,
 )
+from .assignment_expert import (
+    AssignmentExpertResult,
+    AssignmentExpertRunner,
+    AssignmentExpertState,
+)
 from .context_export import (
     ContextExportDecision,
     bypass_context_export,
@@ -49,6 +54,9 @@ __all__ = [
     "ActivationContract",
     "ActivationPlan",
     "ActivationSignal",
+    "AssignmentExpertResult",
+    "AssignmentExpertRunner",
+    "AssignmentExpertState",
     "ContextRequest",
     "ContextExportDecision",
     "bypass_context_export",

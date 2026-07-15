@@ -11,6 +11,7 @@ from brainregion.core.context import ContextBlock
 from brainregion.core.context_loader import ActivatedContext, ContextLoadRecord
 from brainregion.core.region_expert import RegionExpertEngine
 from brainregion.core.region_reporting import RegionContextReceipt, RegionCoordinationBoard
+from brainregion.core.task_coordination import TaskCoordinationBoard
 from brainregion.providers.base import ModelResponse
 
 
@@ -45,7 +46,7 @@ class _Backend:
         )
 
 
-def _runtime(private: str):
+def _runtime(private: str, *, assignment_id: str = ""):
     activated = ActivatedContext(
         activation=ActivationPlan(
             decisions=(),
@@ -78,6 +79,7 @@ def _runtime(private: str):
         task_id="expert-mcp-task",
         audience="region",
         target_region="debugging",
+        assignment_id=assignment_id,
     )
     board = RegionCoordinationBoard()
     board.record_receipt(
@@ -85,6 +87,7 @@ def _runtime(private: str):
             activated,
             task_id="expert-mcp-task",
             region="debugging",
+            assignment_id=assignment_id,
             evidence_refs=tuple(delivery.entry["evidence_refs"]),
         )
     )
@@ -105,6 +108,23 @@ def _configure(monkeypatch, server, backend, workspace, board):
     )
     monkeypatch.setattr(server, "_cognitive_workspace", workspace)
     monkeypatch.setattr(server, "_region_coordination_board", board)
+
+
+def _assignment_board() -> TaskCoordinationBoard:
+    tasks = TaskCoordinationBoard()
+    tasks.create_task(
+        {"task_id": "expert-mcp-task", "goal": "Resolve the parser regression"}
+    )
+    tasks.delegate(
+        "expert-mcp-task",
+        {
+            "assignment_id": "parser",
+            "region": "debugging",
+            "question": "Choose the next parser debugging action.",
+            "scope": "Parser loading only.",
+        },
+    )
+    return tasks
 
 
 def test_mcp_run_region_expert_returns_report_without_private_context(monkeypatch):
@@ -163,6 +183,180 @@ def test_mcp_region_expert_budget_guard_skips_model(monkeypatch):
     assert result["error"].startswith("budget_exceeded")
     assert result["model_called"] is False
     assert result["budget"]["exhausted"] is True
+    assert backend.calls == []
+
+
+def test_mcp_assignment_expert_sleeps_before_context_or_endpoint_resolution(
+    monkeypatch,
+):
+    from brainregion import server
+
+    tasks = _assignment_board()
+    workspace = CognitiveWorkspace()
+    backend = _Backend()
+    monkeypatch.setattr(server, "_task_coordination_board", tasks)
+    monkeypatch.setattr(server, "_cognitive_workspace", workspace)
+
+    def should_not_apply(**_kwargs):
+        raise AssertionError("sleeping assignment resolved model defaults")
+
+    def should_not_read(*_args, **_kwargs):
+        raise AssertionError("sleeping assignment read private context")
+
+    monkeypatch.setattr(server._defaults_mod, "apply", should_not_apply)
+    monkeypatch.setattr(workspace, "read", should_not_read)
+
+    result = asyncio.run(
+        server.run_assignment_expert(
+            task_id="expert-mcp-task",
+            assignment_id="parser",
+            model="unconfigured-model",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["model_called"] is False
+    assert result["assignment_lifecycle"]["state"] == "sleeping"
+    assert result["routing"]["resolution_skipped"] == "assignment_sleeping"
+    assert backend.calls == []
+
+
+def test_mcp_assignment_expert_wakes_exact_private_view_and_returns_report(
+    monkeypatch,
+):
+    from brainregion import server
+
+    private = "Private parser evidence remains inside the parser assignment."
+    workspace, board = _runtime(private, assignment_id="parser")
+    backend = _Backend()
+    tasks = _assignment_board()
+    tasks.request_evidence_wake(
+        "expert-mcp-task",
+        "parser",
+        reason="expert_request",
+        source="region_expert",
+        ttl_reads=2,
+    )
+    _configure(monkeypatch, server, backend, workspace, board)
+    monkeypatch.setattr(server, "_task_coordination_board", tasks)
+    reads = {"count": 0}
+    original_read = workspace.read
+
+    def counted_read(*args, **kwargs):
+        reads["count"] += 1
+        return original_read(*args, **kwargs)
+
+    monkeypatch.setattr(workspace, "read", counted_read)
+
+    result = asyncio.run(
+        server.run_assignment_expert(
+            task_id="expert-mcp-task",
+            assignment_id="parser",
+            model="mock-model",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["assignment_lifecycle"]["state"] == "awake"
+    assert result["assignment_lifecycle"]["wake_reasons"] == ["expert_request"]
+    assert result["assignment_lifecycle"]["pending_wake_requests"] == 1
+    assert result["assignment_lifecycle"]["pending_provider_reads"] == 1
+    assert result["published_report"]["report"]["assignment_id"] == "parser"
+    assert result["published_report"]["report"]["evidence_refs"] == [
+        "memory:id:expert-mcp"
+    ]
+    assert private in backend.calls[0]["user"]
+    assert "Choose the next parser debugging action" in backend.calls[0]["user"]
+    assert "Parser loading only" in backend.calls[0]["user"]
+    assert private not in json.dumps(result)
+    assert reads["count"] == 1
+
+
+def test_mcp_assignment_budget_guard_preserves_unread_wake(monkeypatch):
+    from brainregion import server
+
+    workspace, board = _runtime(
+        "Private context must remain asleep when the budget guard blocks the call.",
+        assignment_id="parser",
+    )
+    backend = _Backend()
+    tasks = _assignment_board()
+    tasks.request_evidence_wake(
+        "expert-mcp-task",
+        "parser",
+        reason="explicit_recall",
+        source="main_brain",
+    )
+    _configure(monkeypatch, server, backend, workspace, board)
+    monkeypatch.setattr(server, "_task_coordination_board", tasks)
+
+    result = asyncio.run(
+        server.run_assignment_expert(
+            task_id="expert-mcp-task",
+            assignment_id="parser",
+            model="unknown-priced-model",
+            max_cost_usd=0.0,
+        )
+    )
+    pending = tasks.evidence_wake_status("expert-mcp-task", "parser")
+
+    assert result["ok"] is False
+    assert result["error"].startswith("budget_exceeded")
+    assert result["assignment_lifecycle"]["state"] == "blocked"
+    assert result["assignment_lifecycle"]["wake_delivered"] is False
+    assert pending["wakes"][0]["remaining_reads"] == 1
+    assert backend.calls == []
+
+
+def test_mcp_assignment_export_guard_preserves_unread_wake(monkeypatch):
+    from brainregion import server
+
+    workspace, board = _runtime(
+        "Private assignment evidence must not leave through an untrusted endpoint.",
+        assignment_id="parser",
+    )
+    backend = _Backend()
+    tasks = _assignment_board()
+    tasks.request_evidence_wake(
+        "expert-mcp-task",
+        "parser",
+        reason="expert_request",
+        source="region_expert",
+    )
+    monkeypatch.setattr(
+        server._defaults_mod,
+        "apply",
+        lambda **_kwargs: {
+            "endpoints": {},
+            "timeout": 90,
+            "effort": None,
+            "context_export_policy": {"mode": "enforce"},
+        },
+    )
+    monkeypatch.setattr(server, "_resolve_endpoints", lambda _cfg: {})
+    monkeypatch.setattr(
+        server,
+        "_build_region_expert_engine",
+        lambda _dd, _registry: RegionExpertEngine(backend=backend),
+    )
+    monkeypatch.setattr(server, "_task_coordination_board", tasks)
+    monkeypatch.setattr(server, "_cognitive_workspace", workspace)
+    monkeypatch.setattr(server, "_region_coordination_board", board)
+
+    result = asyncio.run(
+        server.run_assignment_expert(
+            task_id="expert-mcp-task",
+            assignment_id="parser",
+            model="mock-model",
+        )
+    )
+    pending = tasks.evidence_wake_status("expert-mcp-task", "parser")
+
+    assert result["ok"] is False
+    assert result["error"].startswith("context_export_denied")
+    assert result["assignment_lifecycle"]["state"] == "blocked"
+    assert result["assignment_lifecycle"]["pending_provider_reads"] == 1
+    assert pending["wakes"][0]["remaining_reads"] == 1
     assert backend.calls == []
 
 
