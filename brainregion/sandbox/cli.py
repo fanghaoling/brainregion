@@ -45,12 +45,17 @@ from .phase_effort_eval import (
 from .envs import (
     ArcAgiEnv,
     GridWorld,
+    RuleShiftEnv,
     UrbanDeliveryEnv,
     build_env_system_prompt,
     generate_urban_delivery_scenario,
     write_replay_html,
 )
-from .epistemic_ledger import EpistemicLedger, disabled_epistemic_metrics
+from .epistemic_ledger import (
+    EpistemicLedger,
+    classify_epistemic_error,
+    disabled_epistemic_metrics,
+)
 from .fixtures import SANDBOX_FIXTURES, get_fixture, list_fixture_ids
 from .isolation import cleanup_run_dir, make_run_dir, materialize_fixture
 from .loop import run_agent, run_cognitive_loop, scoped_env, scoped_memory_mode
@@ -1064,6 +1069,131 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
             "contains_frame_content": False,
         }
         report_path = write_report(result, Path(".brain-region") / "arc-agi" / "runs")
+        result["report"] = str(report_path)
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return result
+    finally:
+        env.close()
+        cleanup_run_dir(run_dir)
+
+
+async def run_rule_shift(args: argparse.Namespace) -> dict[str, Any]:
+    """Run the deterministic evidence-revision probe through the production loop."""
+
+    dd = _defaults_mod.apply()
+    model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
+    if not model_str:
+        raise SystemExit("--main-brain is required (or configure sandbox_main_brain)")
+    if int(args.shift_after) < 2:
+        raise SystemExit("--shift-after must be at least 2")
+    if int(args.max_steps) < 1:
+        raise SystemExit("--max-steps must be positive")
+    if float(args.max_cost_usd) <= 0:
+        raise SystemExit("--max-cost-usd must be positive")
+
+    backend, registry = _build_backend(
+        dd,
+        endpoint_ids=_endpoint_ids_for_refs(dd, [model_str]),
+    )
+    model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
+    env = RuleShiftEnv(shift_after=int(args.shift_after))
+    goal = (
+        "Establish an evidence-supported action-effect rule, detect any later contradiction, "
+        "and verify a replacement rule."
+    )
+    task = SandboxTask(id="rule-shift", goal=goal)
+
+    def verify(t, run_dir, *, python_exe=None):
+        del t, run_dir, python_exe
+        return {
+            "tests_green": env.solved,
+            "solve_status": "solved" if env.solved else "tests_fail",
+            "pytest": None,
+            "gold_diff": "",
+        }
+
+    run_dir = make_run_dir(prefix="brainregion-rule-shift-")
+    try:
+        with scoped_env(env):
+            trajectory = await run_agent(
+                backend,
+                model,
+                task,
+                run_dir=run_dir,
+                max_steps=int(args.max_steps),
+                max_env_actions=int(args.max_steps),
+                max_cost_usd=float(args.max_cost_usd),
+                temperature=float(dd.get("sandbox_temperature", 0.0)),
+                max_tokens=int(args.max_tokens),
+                transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
+                consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
+                endpoint_id=endpoint_id,
+                thinking=_thinking_arg(args),
+                effort=args.effort,
+                system_prompt=env.build_system_prompt(goal),
+                verify_fn=verify,
+                visual_ephemeral=True,
+                tool_result_lifecycle=args.tool_result_lifecycle,
+                tool_result_live_reads=int(args.tool_result_live_reads),
+                epistemic_transcript_lifecycle=args.epistemic_transcript_lifecycle,
+                initial_observation=env.observation(),
+            )
+
+        progress_trace = trajectory.progress_trace
+        operation_counts: dict[str, int] = {}
+        error_kind_counts: dict[str, int] = {}
+        for progress in progress_trace:
+            operation = str(progress.get("operation") or "model_turn")
+            operation_counts[operation] = operation_counts.get(operation, 0) + 1
+            error_kind = str(progress.get("error_kind") or "")
+            if error_kind:
+                error_kind_counts[error_kind] = error_kind_counts.get(error_kind, 0) + 1
+        environment_actions = len(env.action_trace)
+        normalized_usage = normalize_usage(trajectory.total_main_usage)
+        action_denominator = max(1, environment_actions)
+        tool_error_code_counts: dict[str, int] = {}
+        for step in trajectory.steps:
+            if step.error_kind != "tool_error":
+                continue
+            code = classify_epistemic_error(step.error)
+            if code:
+                tool_error_code_counts[code] = tool_error_code_counts.get(code, 0) + 1
+        result = {
+            "run_id": f"rule-shift-{int(time.time() * 1000)}",
+            "mode": "rule_shift_epistemic_probe",
+            "model": model,
+            "endpoint_id": endpoint_id,
+            "shift_after": env.shift_after,
+            "solved": env.solved,
+            "state": env.snapshot().get("state"),
+            "environment_actions": environment_actions,
+            "environment_action_attempts": operation_counts.get("act", 0),
+            "model_steps": trajectory.n_steps,
+            "operation_counts": operation_counts,
+            "error_steps": sum(bool(item.get("error")) for item in progress_trace),
+            "error_kind_counts": error_kind_counts,
+            "tool_error_code_counts": tool_error_code_counts,
+            "tokens_per_environment_action": round(
+                int(normalized_usage.get("total_tokens", 0)) / action_denominator,
+                2,
+            ),
+            "cost_per_environment_action_usd": round(
+                trajectory.total_main_cost_usd / action_denominator,
+                6,
+            ),
+            "termination": trajectory.termination_reason,
+            "cost_usd": round(trajectory.total_main_cost_usd, 6),
+            "usage": normalized_usage,
+            "input_attribution": trajectory.main_input_attribution,
+            "tool_result_lifecycle": trajectory.tool_result_lifecycle,
+            "epistemic_transcript_lifecycle": trajectory.epistemic_transcript_lifecycle,
+            "epistemic_ledger": env.epistemic_ledger.public_metrics(),
+            "interaction_trace": list(env.action_trace),
+            "contains_reasoning": False,
+            "contains_rule_content": False,
+            "contains_frame_content": False,
+        }
+        report_path = write_report(result, Path(".brain-region") / "rule-shift" / "runs")
         result["report"] = str(report_path)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return result

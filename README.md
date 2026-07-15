@@ -684,6 +684,26 @@ This command is a public-environment architecture probe, not an official ARC-AGI
 rules or enable long-term memory, strategy, navigation, or benchmark-specific hints. Add Regions only through matched
 arms after the baseline interaction trace identifies a general capability gap.
 
+### Rule-Shift Epistemic Probe
+
+Before relying on an ARC game to produce a useful rule change by chance, use the deterministic `rule-shift` probe to
+exercise the complete episode-local lifecycle. The model first gets enough visual evidence to support an action-effect
+hypothesis; the hidden environment mechanism then changes. A successful run must detect the contradiction, create a
+genuinely revised hypothesis with `replaces`, verify it twice, and let the runtime supersede the old rule. The prompt
+and observations never reveal the switch timing or mechanism.
+
+```powershell
+brain-region sandbox rule-shift `
+  --main-brain buzz_anthropic/claude-sonnet-5 `
+  --max-steps 10 `
+  --epistemic-transcript-lifecycle full
+```
+
+Run the same model and budgets again with `--epistemic-transcript-lifecycle suppress` for a matched comparison. Reports
+under `.brain-region/rule-shift/runs/` contain model, usage, cost, state-transition counts, prediction outcomes, and
+content-free hypothesis fingerprints. They contain no frames, rule bodies, or model reasoning. This probe validates
+the scaffold and suppression mechanism; it is not evidence that the scaffold improves open-ended task ability.
+
 ### Urban Delivery Navigation Pilot
 
 The urban-delivery sandbox tests execution offload on a deterministic road network. The main brain owns order-level

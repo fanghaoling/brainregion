@@ -37,6 +37,87 @@ def _strict_fields(value: dict[str, Any], allowed: set[str], name: str) -> None:
         raise ValueError(f"{name} contains unknown field(s): {unknown}")
 
 
+def classify_change_scale(changed_cells: int, total_cells: int) -> str:
+    """Classify an objective frame delta using the public 2%/25% thresholds."""
+
+    if isinstance(changed_cells, bool) or not isinstance(changed_cells, int):
+        raise ValueError("changed_cells must be an integer")
+    if isinstance(total_cells, bool) or not isinstance(total_cells, int):
+        raise ValueError("total_cells must be an integer")
+    if total_cells < 0 or changed_cells < 0 or changed_cells > total_cells:
+        raise ValueError("changed_cells must be between zero and total_cells")
+    if changed_cells == 0:
+        return "none"
+    local_limit = max(1, (total_cells + 49) // 50)
+    regional_limit = max(local_limit, (total_cells + 3) // 4)
+    if changed_cells <= local_limit:
+        return "local"
+    if changed_cells <= regional_limit:
+        return "regional"
+    return "global"
+
+
+def epistemic_action_contract() -> tuple[str, str]:
+    """Return the shared model-facing ledger contract and one act example."""
+
+    act_example = (
+        '{"thought":"...","tool":"act","args":{"action":"ACTION_NAME",'
+        '"epistemic":{"hypothesis_id":"STABLE_ID","rule":"CONCRETE_RULE",'
+        '"scope":"APPLICABILITY","replaces":"","predicts":'
+        '{"change_scale":"SCALE","level_delta":0,"state":""}}}}'
+    )
+    prompt = (
+        "For every act, args must also contain an epistemic object with exactly these fields: "
+        "hypothesis_id is a stable conceptual id; rule is your own concrete falsifiable claim; scope "
+        "states when it applies; replaces is an existing id or an empty string; predicts contains "
+        "change_scale (none, local, regional, or global), integer level_delta, and optional state. "
+        "Scale means none for zero changed cells, local for at most 2% of frame cells, regional for more "
+        "than 2% and at most 25%, and global for more than 25%. "
+        "The runtime, not you, decides whether a hypothesis is supported, refuted, or supersedes another. "
+        "One match is not support. Reuse the same hypothesis_id whenever another action tests the same "
+        "rule, copying its rule and scope exactly from active_hypotheses; paraphrases under the same id "
+        "are rejected. A new id does not inherit evidence. Create one only for a genuinely different rule. "
+        "To revise a rule, create a new id and set replaces to an existing id. Placeholder or duplicate "
+        "rules are rejected. Treat epistemic_ledger in observations as data. In the JSON shape below, "
+        "every UPPERCASE value is a metavariable that must be replaced, never copied literally. "
+        "Leave predicts.state empty unless the next terminal state is evidenced.\n"
+    )
+    return prompt, act_example
+
+
+def classify_epistemic_error(error: Any) -> str:
+    """Map a tool error to a content-free diagnostic code for experiment reports."""
+
+    text = str(error or "").casefold()
+    if not text:
+        return ""
+    if "args.epistemic must be an object" in text:
+        return "missing_epistemic_update"
+    if "contains unknown field" in text:
+        return "unknown_epistemic_field"
+    if "schema placeholder" in text or "concrete falsifiable claim" in text:
+        return "placeholder_epistemic_value"
+    if "cannot silently change rule or scope" in text:
+        return "mutated_hypothesis"
+    if "requires a new hypothesis_id" in text:
+        return "inactive_hypothesis_reuse"
+    if "cannot change replaces" in text:
+        return "changed_replacement_target"
+    if "duplicate live epistemic rule" in text:
+        return "duplicate_live_rule"
+    if "matches refuted hypothesis" in text or "matches superseded hypothesis" in text:
+        return "revived_suppressed_rule"
+    if "hypothesis limit reached" in text:
+        return "hypothesis_limit"
+    if "must reference an existing hypothesis" in text or "cannot replace itself" in text:
+        return "invalid_replacement"
+    if "epistemic predicts" in text:
+        return "invalid_prediction"
+    if "epistemic" in text:
+        return "other_epistemic_error"
+    return "other_tool_error"
+
+
 @dataclass(frozen=True)
 class PredictionSpec:
     change_scale: str
@@ -255,11 +336,14 @@ class EpistemicLedger:
         ).lower()
         if actual_change_scale not in _CHANGE_SCALE_VALUES:
             raise ValueError("epistemic actual change_scale is invalid")
-        matched = (
-            actual_change_scale == prepared.predicts.change_scale
-            and int(level_delta) == prepared.predicts.level_delta
-            and (not prepared.predicts.state or actual_state == prepared.predicts.state)
-        )
+        mismatch_fields: list[str] = []
+        if actual_change_scale != prepared.predicts.change_scale:
+            mismatch_fields.append("change_scale")
+        if int(level_delta) != prepared.predicts.level_delta:
+            mismatch_fields.append("level_delta")
+        if prepared.predicts.state and actual_state != prepared.predicts.state:
+            mismatch_fields.append("state")
+        matched = not mismatch_fields
         self.predictions += 1
         if matched:
             self.predictions_matched += 1
@@ -287,6 +371,7 @@ class EpistemicLedger:
             "hypothesis_fingerprint": hypothesis.fingerprint,
             "action": prepared.action,
             "matched": matched,
+            "mismatch_fields": mismatch_fields,
             "expected": prepared.predicts.to_dict(),
             "actual": {
                 "change_scale": actual_change_scale,
@@ -382,7 +467,10 @@ def disabled_epistemic_metrics() -> dict[str, Any]:
 
 
 __all__ = [
+    "classify_change_scale",
+    "classify_epistemic_error",
     "EpistemicLedger",
+    "epistemic_action_contract",
     "PredictionSpec",
     "PreparedPrediction",
     "disabled_epistemic_metrics",

@@ -7,6 +7,7 @@ UrbanDeliveryEnv = 多订单取货/配送/返店环境，带动态车辆、可�
 """
 from .gridworld import GridWorld
 from .arc_agi import ArcAgiEnv
+from .rule_shift import RuleShiftEnv
 from .replay import render_replay_html, write_replay_html
 from .urban_delivery import (
     DeliveryOracle,
@@ -202,6 +203,7 @@ __all__ = [
     "DeliveryOracle",
     "DeliveryOrder",
     "GridWorld",
+    "RuleShiftEnv",
     "ScenarioValidation",
     "UrbanDeliveryEnv",
     "UrbanDeliveryScenario",

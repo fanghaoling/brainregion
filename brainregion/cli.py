@@ -636,6 +636,34 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["full", "suppress"],
         help="实验性：仅 suppress 会在下一轮前卸载被反驳/拒绝的模型回合",
     )
+    p_sb_rule_shift = p_sb_sub.add_parser(
+        "rule-shift",
+        help="确定性规则切换探针：验证证伪、替代理解和上下文抑制链路",
+    )
+    p_sb_rule_shift.add_argument("--main-brain", default=None, help="主执行模型引用")
+    p_sb_rule_shift.add_argument(
+        "--shift-after",
+        type=int,
+        default=3,
+        help="隐藏机制切换前的稳定动作数（不会暴露给模型）",
+    )
+    p_sb_rule_shift.add_argument("--max-steps", type=int, default=10)
+    p_sb_rule_shift.add_argument("--max-cost-usd", type=float, default=0.03)
+    p_sb_rule_shift.add_argument("--max-tokens", type=int, default=2048)
+    p_sb_rule_shift.add_argument("--thinking", default="off", choices=["off", "on"])
+    p_sb_rule_shift.add_argument(
+        "--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"]
+    )
+    p_sb_rule_shift.add_argument(
+        "--tool-result-lifecycle", default="compact", choices=["full", "compact"]
+    )
+    p_sb_rule_shift.add_argument("--tool-result-live-reads", type=int, default=0)
+    p_sb_rule_shift.add_argument(
+        "--epistemic-transcript-lifecycle",
+        default="full",
+        choices=["full", "suppress"],
+        help="suppress 会在下一轮前卸载被证伪、取代或拒绝的模型回合",
+    )
     p_sb_env.add_argument("--wall-density", type=float, default=None,
                           help="随机墙密度(0..0.6,占可放格比例;启用需配 --wall-seed)")
     p_sb_env.add_argument("--wall-seed", type=int, default=None,
@@ -1294,6 +1322,8 @@ def main() -> None:
             asyncio.run(sandbox_cli.run_env(args))
         elif args.sandbox_command == "arc-env":
             asyncio.run(sandbox_cli.run_arc_env(args))
+        elif args.sandbox_command == "rule-shift":
+            asyncio.run(sandbox_cli.run_rule_shift(args))
         elif args.sandbox_command == "env-eval":
             asyncio.run(sandbox_cli.run_env_eval(args))
         elif args.sandbox_command == "delivery-eval":
