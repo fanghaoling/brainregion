@@ -10,6 +10,7 @@ from brainregion.sandbox.epistemic_ledger import EpistemicLedger
 from brainregion.sandbox.rule_shift_eval import (
     ARM_EVIDENCE,
     ARM_FULL,
+    ARM_SELECTIVE,
     ARM_SUPPRESS,
     run_rule_shift_eval,
     summarize_rule_shift_records,
@@ -324,6 +325,13 @@ def test_rule_shift_eval_counterbalances_and_replays_safe_first_turn(tmp_path, m
         ({"distractor_steps": -1}, "distractor_steps"),
         ({"max_total_cost_usd": 0.0}, "max_total_cost_usd"),
         ({"bootstrap_samples": 0}, "bootstrap_samples"),
+        (
+            {
+                "evidence_wake_live_reads": 0,
+                "arms": (ARM_SUPPRESS, ARM_SELECTIVE),
+            },
+            "evidence_wake_live_reads",
+        ),
     ],
 )
 def test_rule_shift_eval_rejects_invalid_experiment_configuration(kwargs, message):
@@ -382,7 +390,7 @@ def test_rule_shift_eval_compares_status_only_with_evidence_receipts(
     assert "action1 changes thirty visible cells" not in serialized
 
 
-def test_delayed_recall_workspace_recovers_overwritten_action1_evidence(
+def test_delayed_recall_selective_workspace_recovers_overwritten_action1_evidence(
     tmp_path, monkeypatch
 ):
     monkeypatch.chdir(tmp_path)
@@ -398,24 +406,53 @@ def test_delayed_recall_workspace_recovers_overwritten_action1_evidence(
             shared_prefix_turns=1,
             bootstrap_samples=20,
             run_id="rule-shift-delayed-recall-test",
-            arms=(ARM_SUPPRESS, ARM_EVIDENCE),
+            arms=(ARM_SUPPRESS, ARM_SELECTIVE),
         )
     )
 
     assert report["execution"]["distractor_steps"] == 2
     assert report["per_arm"][ARM_SUPPRESS]["solve_rate"] == 0.0
-    assert report["per_arm"][ARM_EVIDENCE]["solve_rate"] == 1.0
+    assert report["per_arm"][ARM_SELECTIVE]["solve_rate"] == 1.0
     assert report["matched_effect"]["raw_deltas"]["solved"] == 1.0
     assert report["pair_quality"]["status"] == "matched"
     assert report["pair_quality"]["contrast_exposed_pairs"] == 2
     assert report["per_arm"][ARM_SUPPRESS]["delayed_recall_exposure_rate"] == 1.0
-    assert report["per_arm"][ARM_EVIDENCE]["delayed_recall_exposure_rate"] == 1.0
+    assert report["per_arm"][ARM_SELECTIVE]["delayed_recall_exposure_rate"] == 1.0
     assert all(case["delayed_recall_exposed"] for case in report["cases"])
-    evidence_cases = [case for case in report["cases"] if case["arm"] == ARM_EVIDENCE]
+    evidence_cases = [case for case in report["cases"] if case["arm"] == ARM_SELECTIVE]
     assert all(
         case["epistemic_transcript_lifecycle"]["evidence_workspace"]["events"] >= 3
         for case in evidence_cases
     )
+
+
+def test_selective_wake_matches_always_on_recall_with_fewer_injections(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    report = asyncio.run(
+        run_rule_shift_eval(
+            _DelayedRecallBackend(),
+            "fake-model",
+            repeats=2,
+            shift_after=2,
+            distractor_steps=2,
+            max_steps=9,
+            max_cost_usd=1.0,
+            shared_prefix_turns=1,
+            bootstrap_samples=20,
+            run_id="rule-shift-selective-cost-test",
+            arms=(ARM_EVIDENCE, ARM_SELECTIVE),
+        )
+    )
+
+    always = report["per_arm"][ARM_EVIDENCE]
+    selective = report["per_arm"][ARM_SELECTIVE]
+    assert always["solve_rate"] == selective["solve_rate"] == 1.0
+    assert selective["mean_workspace_injections"] < always["mean_workspace_injections"]
+    assert selective["mean_total_tokens"] < always["mean_total_tokens"]
+    assert selective["mean_wake_requests"] > 0
+    assert selective["mean_workspace_skips"] > 0
 
 
 def test_rule_shift_summary_excludes_pair_with_recovered_provider_error(tmp_path, monkeypatch):
@@ -469,6 +506,7 @@ def test_rule_shift_eval_cli_defaults_are_bounded_and_explicit():
     assert args.arms == "full,suppress"
     assert args.shared_prefix_turns == 1
     assert args.tool_result_lifecycle == "compact"
+    assert args.evidence_wake_live_reads == 2
 
     comparison = build_parser().parse_args(
         [
@@ -477,7 +515,7 @@ def test_rule_shift_eval_cli_defaults_are_bounded_and_explicit():
             "--main-brain",
             "fake/model",
             "--arms",
-            "suppress,evidence",
+            "evidence,selective",
         ]
     )
-    assert comparison.arms == "suppress,evidence"
+    assert comparison.arms == "evidence,selective"

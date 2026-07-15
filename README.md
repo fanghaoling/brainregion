@@ -723,13 +723,20 @@ of one deterministic probe remain a descriptive stability pilot rather than inde
 The experimental `evidence` lifecycle unloads rejected model-authored rules and reasoning into content-free pointers.
 Allow-listed runtime feedback is upserted into one bounded, episode-local workspace keyed by executed action and actual
 transition. Repeated observations update counts instead of appending transcript copies; model predictions and rule text
-never enter the workspace. Compare it with status-only receipts after deliberately overwriting the latest evaluation:
+never enter the workspace.
+
+The opt-in `selective` lifecycle keeps the same local workspace asleep at provider boundaries. An objective prediction
+contradiction or action-focus change wakes it for two reads by default; `explicit_recall`, `expert_request`, and
+`task_focus_change` are bounded API reasons reserved for runtime callers. Other lifecycle modes do not validate or run
+the wake policy. Compare always-on delivery with selective delivery after deliberately overwriting the latest
+evaluation:
 
 ```powershell
 brain-region --config brain_region_config.json --env-file .env sandbox rule-shift-eval `
   --main-brain buzz_anthropic/claude-sonnet-5 `
-  --arms suppress,evidence `
+  --arms evidence,selective `
   --distractor-steps 2 `
+  --evidence-wake-live-reads 2 `
   --max-steps 12 `
   --repeats 2 `
   --max-total-cost-usd 0.24
@@ -741,6 +748,13 @@ Sonnet 5 pilot was also neutral on solve (`0.5` in both arms) while `evidence - 
 deduplicated eight observations into four events. One pair favored each arm, and the second executed arm won both pairs,
 so there is no attributable workspace ability signal. `evidence` remains opt-in; the next experiment should wake only
 events relevant to the current action/task focus instead of injecting the full workspace every turn.
+
+The deterministic delayed-recall backend now proves that `selective` recovers the overwritten action1 evidence like
+always-on `evidence`, while using fewer workspace injections and input tokens; status-only `suppress` cannot recover it.
+The first real provider comparison on 2026-07-15 was infrastructure-invalid: the BUZZ Anthropic route returned repeated
+service-unavailable errors, leaving zero valid pairs. A capped BUZZ GPT-5.5 smoke did exercise three wake requests, four
+injections, and four sleeping skips, but its intermittent Chat Completions/Responses routing errors and budget stop make
+it a transport smoke only. No model-ability claim is drawn from either run.
 
 ### Urban Delivery Navigation Pilot
 

@@ -144,11 +144,142 @@ def test_evidence_mode_keeps_only_allowlisted_runtime_outcome():
     assert metrics["contains_objective_evidence"] is True
 
 
+def test_selective_mode_sleeps_until_an_explicit_bounded_wake():
+    lifecycle = EpistemicTranscriptLifecycle(
+        mode="selective",
+        ledger=EpistemicLedger(),
+        selective_wake_live_reads=2,
+    )
+    message = attributed_message("assistant", "private rule", "model_transcript")
+    lifecycle.mark(
+        message,
+        hypothesis_id="action1-effect",
+        step=0,
+        rejected=True,
+        evidence={
+            "action": "action1",
+            "matched": True,
+            "actual": {
+                "change_scale": "local",
+                "changed_cells": 2,
+                "total_cells": 100,
+                "level_delta": 0,
+                "state": "NOT_FINISHED",
+            },
+        },
+    )
+    messages = [message]
+
+    lifecycle.apply(messages, next_step=1)
+    assert "epistemic_evidence_workspace" not in "\n".join(
+        item["content"] for item in provider_messages(messages)
+    )
+
+    assert lifecycle.request_wake("explicit_recall") is True
+    lifecycle.apply(messages, next_step=2)
+    assert "epistemic_evidence_workspace" in "\n".join(
+        item["content"] for item in provider_messages(messages)
+    )
+    lifecycle.apply(messages, next_step=3)
+    assert "epistemic_evidence_workspace" in "\n".join(
+        item["content"] for item in provider_messages(messages)
+    )
+    lifecycle.apply(messages, next_step=4)
+    assert "epistemic_evidence_workspace" not in "\n".join(
+        item["content"] for item in provider_messages(messages)
+    )
+
+    metrics = lifecycle.public_metrics()
+    assert metrics["policy"] == "objective_evidence_selective_wake_v1"
+    assert metrics["workspace_refreshes"] == 2
+    assert metrics["workspace_skips"] == 2
+    assert metrics["selective_wake"] == {
+        "enabled": True,
+        "live_reads": 2,
+        "active": False,
+        "reads_remaining": 0,
+        "requests": 1,
+        "activations": 1,
+        "requests_by_reason": {"explicit_recall": 1},
+        "contains_focus_content": False,
+    }
+
+
+def test_selective_mode_wakes_on_contradiction_and_action_focus_change():
+    lifecycle = EpistemicTranscriptLifecycle(
+        mode="selective",
+        ledger=EpistemicLedger(),
+    )
+    messages = []
+    for step, action, matched in (
+        (0, "action1", True),
+        (1, "action1", False),
+        (2, "action2", True),
+    ):
+        message = attributed_message("assistant", f"private {step}", "model_transcript")
+        lifecycle.mark(
+            message,
+            hypothesis_id=f"h{step}",
+            step=step,
+            rejected=True,
+            evidence={
+                "action": action,
+                "matched": matched,
+                "actual": {
+                    "change_scale": "none",
+                    "changed_cells": 0,
+                    "total_cells": 100,
+                    "level_delta": 0,
+                    "state": "NOT_FINISHED",
+                },
+            },
+        )
+        messages.append(message)
+
+    lifecycle.apply(messages, next_step=3)
+
+    visible = "\n".join(item["content"] for item in provider_messages(messages))
+    assert "epistemic_evidence_workspace" in visible
+    wake = lifecycle.public_metrics()["selective_wake"]
+    assert wake["requests"] == 2
+    assert wake["activations"] == 1
+    assert wake["requests_by_reason"] == {
+        "action_focus_change": 1,
+        "objective_contradiction": 1,
+    }
+
+
+def test_selective_wake_is_inert_for_other_modes_and_validates_enabled_requests():
+    lifecycle = EpistemicTranscriptLifecycle(
+        mode="full",
+        selective_wake_live_reads=0,
+    )
+    assert lifecycle.request_wake("arbitrary disabled request") is False
+    assert lifecycle.public_metrics()["selective_wake"]["requests"] == 0
+
+    selective = EpistemicTranscriptLifecycle(
+        mode="selective",
+        ledger=EpistemicLedger(),
+    )
+    with pytest.raises(ValueError, match="unknown selective evidence wake reason"):
+        selective.request_wake("arbitrary")
+    with pytest.raises(ValueError, match="live_reads must be positive"):
+        selective.request_wake("expert_request", live_reads=0)
+    with pytest.raises(ValueError, match="selective_wake_live_reads"):
+        EpistemicTranscriptLifecycle(
+            mode="selective",
+            ledger=EpistemicLedger(),
+            selective_wake_live_reads=0,
+        )
+
+
 def test_suppress_mode_requires_a_ledger_but_full_mode_is_noop():
     with pytest.raises(ValueError, match="requires an EpistemicLedger"):
         EpistemicTranscriptLifecycle(mode="suppress")
     with pytest.raises(ValueError, match="requires an EpistemicLedger"):
         EpistemicTranscriptLifecycle(mode="evidence")
+    with pytest.raises(ValueError, match="requires an EpistemicLedger"):
+        EpistemicTranscriptLifecycle(mode="selective")
 
     lifecycle = EpistemicTranscriptLifecycle(mode="full")
     message = attributed_message("assistant", "unchanged", "model_transcript")

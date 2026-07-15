@@ -431,14 +431,19 @@ strict privacy 更适合 plan review。code review 在脱敏后可能损失太�
 
 `rule-shift` 的实验性 `evidence` 生命周期会把被证伪回合里的模型规则、预测和解释卸载成 content-free 指针。
 白名单内的运行时反馈按“已执行动作 + 实际转移”upsert 到一个有容量上限、episode-local 的工作台；重复观察只累计
-次数，不再向 transcript 追加副本。工作台不会保存模型写出的预测或规则正文。可以在覆盖 latest evaluation 后，
-把它与只留状态的 `suppress` 回执做顺序平衡配对：
+次数，不再向 transcript 追加副本。工作台不会保存模型写出的预测或规则正文。
+
+显式启用的 `selective` 生命周期仍在本地积累同一工作台，但在 provider 边界默认休眠。客观预测矛盾或 action 焦点
+变化会默认唤醒两个读取窗口；运行时还预留了 `explicit_recall`、`expert_request` 和 `task_focus_change` 三种有界请求
+原因。其他 lifecycle 不校验、也不运行唤醒策略。可以在覆盖 latest evaluation 后，把常驻注入与选择性注入做顺序
+平衡配对：
 
 ```powershell
 brain-region --config brain_region_config.json --env-file .env sandbox rule-shift-eval `
   --main-brain buzz_anthropic/claude-sonnet-5 `
-  --arms suppress,evidence `
+  --arms evidence,selective `
   --distractor-steps 2 `
+  --evidence-wake-live-reads 2 `
   --max-steps 12 `
   --repeats 2 `
   --max-total-cost-usd 0.24
@@ -449,6 +454,12 @@ brain-region --config brain_region_config.json --env-file .env sandbox rule-shif
 “action1 矛盾 → action2 覆盖 → action1 恢复”；每个 evidence run 把 8 次观察去重为 4 个 event。两对各有一臂获胜，
 且都是第二个执行臂获胜，因此没有可归因的工作台能力信号。`evidence` 继续保持显式 opt-in；下一实验应按当前 action/
 任务焦点只唤醒相关 event，不再每轮注入完整工作台。
+
+当前确定性 delayed-recall 后端已经证明：`selective` 与常驻 `evidence` 一样能找回被覆盖的 action1 证据，同时减少
+工作台注入次数和输入 token；只留状态的 `suppress` 无法恢复。2026-07-15 的首轮真实 provider 对照因 BUZZ
+Anthropic 路由连续返回 service unavailable，最终没有有效配对；一个限额的 BUZZ GPT-5.5 smoke 确实走出了 3 次
+唤醒请求、4 次注入和 4 次休眠跳过，但又受到 Chat Completions/Responses 路由间歇错误和成本门终止影响。因此两次
+真实运行都只作为传输链路诊断，不形成模型能力结论。
 
 ## 城区配送三臂评测
 

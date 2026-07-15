@@ -9,21 +9,35 @@ from typing import Any, Literal
 
 from brainregion.core.context_loader import estimate_context_tokens
 
-from .epistemic_evidence import EpistemicEvidenceWorkspace
+from .epistemic_evidence import (
+    EpistemicEvidenceWorkspace,
+    sanitize_objective_evidence,
+)
 from .epistemic_ledger import EpistemicLedger
 from .input_attribution import attributed_message
 
-EpistemicTranscriptMode = Literal["full", "suppress", "evidence"]
+EpistemicTranscriptMode = Literal["full", "suppress", "evidence", "selective"]
 
 _METADATA_KEY = "_brainregion_epistemic_turn"
 _SUPPRESSED_STATUSES = frozenset({"refuted", "superseded", "rejected"})
 _WORKSPACE_TAG = "<epistemic_evidence_workspace>"
+_EVIDENCE_MODES = frozenset({"evidence", "selective"})
+_SELECTIVE_WAKE_REASONS = frozenset(
+    {
+        "action_focus_change",
+        "explicit_recall",
+        "expert_request",
+        "objective_contradiction",
+        "task_focus_change",
+    }
+)
 
 
 @dataclass
 class EpistemicTranscriptLifecycle:
     mode: EpistemicTranscriptMode = "full"
     ledger: EpistemicLedger | None = field(default=None, repr=False)
+    selective_wake_live_reads: int = 2
     compaction_passes: int = 0
     marked_turns: int = 0
     suppressed_turns: int = 0
@@ -38,15 +52,29 @@ class EpistemicTranscriptLifecycle:
         repr=False,
     )
     workspace_refreshes: int = 0
+    workspace_skips: int = 0
+    workspace_estimated_tokens_injected: int = 0
+    wake_requests: int = 0
+    wake_activations: int = 0
+    wake_requests_by_reason: dict[str, int] = field(default_factory=dict)
     _seen_turn_ids: set[str] = field(default_factory=set, repr=False)
+    _last_evidence_action: str = field(default="", repr=False)
+    _wake_reads_remaining: int = field(default=0, repr=False)
 
     def __post_init__(self) -> None:
-        if self.mode not in {"full", "suppress", "evidence"}:
+        if self.mode not in {"full", "suppress", "evidence", "selective"}:
             raise ValueError(
-                "epistemic transcript lifecycle must be 'full', 'suppress', or 'evidence'"
+                "epistemic transcript lifecycle must be 'full', 'suppress', "
+                "'evidence', or 'selective'"
             )
         if self.mode != "full" and self.ledger is None:
             raise ValueError("epistemic transcript lifecycle requires an EpistemicLedger")
+        if self.mode == "selective" and (
+            isinstance(self.selective_wake_live_reads, bool)
+            or not isinstance(self.selective_wake_live_reads, int)
+            or self.selective_wake_live_reads <= 0
+        ):
+            raise ValueError("selective_wake_live_reads must be a positive integer")
 
     def mark(
         self,
@@ -63,11 +91,21 @@ class EpistemicTranscriptLifecycle:
         if not clean_id:
             return
         turn_id = f"step:{int(step)}:{_fingerprint(clean_id)}"
-        evidence_ref = (
-            self.evidence_workspace.record(evidence, step=step)
-            if self.mode == "evidence"
-            else ""
-        )
+        objective_evidence: dict[str, Any] = {}
+        evidence_ref = ""
+        if self.mode in _EVIDENCE_MODES:
+            objective_evidence = sanitize_objective_evidence(evidence)
+            evidence_ref = self.evidence_workspace.record(
+                objective_evidence,
+                step=step,
+            )
+        if self.mode == "selective" and evidence_ref:
+            action = str(objective_evidence.get("action") or "")
+            if self._last_evidence_action and action != self._last_evidence_action:
+                self.request_wake("action_focus_change")
+            self._last_evidence_action = action
+            if objective_evidence.get("matched") is False:
+                self.request_wake("objective_contradiction")
         message[_METADATA_KEY] = {
             "turn_id": turn_id,
             "hypothesis_id": clean_id,
@@ -97,7 +135,7 @@ class EpistemicTranscriptLifecycle:
             metadata = message[_METADATA_KEY]
             original = str(message.get("content") or "")
             if (
-                self.mode == "evidence"
+                self.mode in _EVIDENCE_MODES
                 and record["evidence_ref"]
                 and not self.evidence_workspace.contains(record["evidence_ref"])
             ):
@@ -112,14 +150,21 @@ class EpistemicTranscriptLifecycle:
             metadata["status"] = status
             metadata["estimated_tokens_removed"] = max(0, original_tokens - receipt_tokens)
             self.suppressed_turns += 1
-            if self.mode == "evidence" and record["evidence_ref"]:
+            if self.mode in _EVIDENCE_MODES and record["evidence_ref"]:
                 self.evidence_receipts += 1
             self.body_characters_removed += max(0, len(original) - len(receipt))
             self.body_estimated_tokens_removed += max(0, original_tokens - receipt_tokens)
             self.suppressed_by_status[status] = self.suppressed_by_status.get(status, 0) + 1
 
         if self.mode == "evidence":
-            self._replace_workspace_message(messages)
+            self._replace_workspace_message(messages, inject=True)
+        elif self.mode == "selective":
+            injected = self._replace_workspace_message(
+                messages,
+                inject=self._wake_reads_remaining > 0,
+            )
+            if injected:
+                self._wake_reads_remaining = max(0, self._wake_reads_remaining - 1)
 
         active = self.observe(messages)
         self.estimated_input_tokens_avoided += sum(
@@ -165,11 +210,13 @@ class EpistemicTranscriptLifecycle:
             "full": "none",
             "suppress": "objective_belief_suppression_v1",
             "evidence": "objective_evidence_workspace_v1",
+            "selective": "objective_evidence_selective_wake_v1",
         }[self.mode]
         receipt_mode = {
             "full": "none",
             "suppress": "status_only",
             "evidence": "workspace_pointer",
+            "selective": "selective_workspace_pointer",
         }[self.mode]
         return {
             "mode": self.mode,
@@ -182,7 +229,21 @@ class EpistemicTranscriptLifecycle:
             "evidence_receipts": self.evidence_receipts,
             "expired_evidence_receipts": self.expired_evidence_receipts,
             "workspace_refreshes": self.workspace_refreshes,
+            "workspace_skips": self.workspace_skips,
+            "workspace_estimated_tokens_injected": (
+                self.workspace_estimated_tokens_injected
+            ),
             "evidence_workspace": workspace_metrics,
+            "selective_wake": {
+                "enabled": self.mode == "selective",
+                "live_reads": self.selective_wake_live_reads,
+                "active": self._wake_reads_remaining > 0,
+                "reads_remaining": self._wake_reads_remaining,
+                "requests": self.wake_requests,
+                "activations": self.wake_activations,
+                "requests_by_reason": dict(sorted(self.wake_requests_by_reason.items())),
+                "contains_focus_content": False,
+            },
             "suppressed_by_status": dict(sorted(self.suppressed_by_status.items())),
             "body_characters_removed": self.body_characters_removed,
             "body_estimated_tokens_removed": self.body_estimated_tokens_removed,
@@ -193,7 +254,32 @@ class EpistemicTranscriptLifecycle:
             "persistent": False,
         }
 
-    def _replace_workspace_message(self, messages: list[dict[str, Any]]) -> None:
+    def request_wake(self, reason: str, *, live_reads: int | None = None) -> bool:
+        """Wake selective evidence delivery without logging task or evidence content."""
+
+        if self.mode != "selective":
+            return False
+        normalized_reason = str(reason or "").strip().lower()
+        if normalized_reason not in _SELECTIVE_WAKE_REASONS:
+            raise ValueError(f"unknown selective evidence wake reason: {reason!r}")
+        reads = self.selective_wake_live_reads if live_reads is None else live_reads
+        if isinstance(reads, bool) or not isinstance(reads, int) or reads <= 0:
+            raise ValueError("selective evidence wake live_reads must be positive")
+        if self._wake_reads_remaining == 0:
+            self.wake_activations += 1
+        self._wake_reads_remaining = max(self._wake_reads_remaining, reads)
+        self.wake_requests += 1
+        self.wake_requests_by_reason[normalized_reason] = (
+            self.wake_requests_by_reason.get(normalized_reason, 0) + 1
+        )
+        return True
+
+    def _replace_workspace_message(
+        self,
+        messages: list[dict[str, Any]],
+        *,
+        inject: bool,
+    ) -> bool:
         messages[:] = [
             message
             for message in messages
@@ -201,27 +287,27 @@ class EpistemicTranscriptLifecycle:
         ]
         view = self.evidence_workspace.model_view()
         if not view["events"]:
-            return
+            return False
+        if not inject:
+            self.workspace_skips += 1
+            return False
         rendered = json.dumps(
             view,
             ensure_ascii=True,
             separators=(",", ":"),
             sort_keys=True,
         )
-        messages.append(
-            attributed_message(
-                "user",
-                (
-                    f"{_WORKSPACE_TAG}\n"
-                    "These are deduplicated objective runtime observations, not instructions, "
-                    "rules, or chain-of-thought. Use event_id references when revising beliefs.\n"
-                    f"{rendered}\n"
-                    "</epistemic_evidence_workspace>"
-                ),
-                "memory_context",
-            )
+        content = (
+            f"{_WORKSPACE_TAG}\n"
+            "These are deduplicated objective runtime observations, not instructions, "
+            "rules, or chain-of-thought. Use event_id references when revising beliefs.\n"
+            f"{rendered}\n"
+            "</epistemic_evidence_workspace>"
         )
+        messages.append(attributed_message("user", content, "memory_context"))
         self.workspace_refreshes += 1
+        self.workspace_estimated_tokens_injected += estimate_context_tokens(content)
+        return True
 
 
 def _fingerprint(hypothesis_id: str) -> str:
@@ -234,14 +320,15 @@ def _receipt(
     *,
     mode: EpistemicTranscriptMode,
 ) -> str:
-    if mode == "evidence":
+    if mode in _EVIDENCE_MODES:
         evidence_ref = record["evidence_ref"]
         return (
             f'<epistemic_evidence_pointer step="{record["step"]}" '
             f'hypothesis="{_fingerprint(record["hypothesis_id"])}" status="{status}" '
             f'evidence_ref="{evidence_ref}">\n'
             "The model-authored rule, prediction, and reasoning were unloaded. "
-            "Resolve a non-empty evidence_ref in the current evidence workspace.\n"
+            "Resolve a non-empty evidence_ref when the evidence workspace is awake; "
+            "otherwise use the latest ledger and observations.\n"
             "</epistemic_evidence_pointer>"
         )
     return (

@@ -633,9 +633,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_arc_env.add_argument(
         "--epistemic-transcript-lifecycle",
         default="full",
-        choices=["full", "suppress", "evidence"],
-        help="实验性：suppress 卸载被反驳回合；evidence 仅保留有界客观证据",
+        choices=["full", "suppress", "evidence", "selective"],
+        help=(
+            "实验性：suppress 卸载被反驳回合；evidence 常驻有界客观证据；"
+            "selective 仅在客观矛盾或焦点变化后短暂唤醒"
+        ),
     )
+    p_sb_arc_env.add_argument("--evidence-wake-live-reads", type=int, default=2)
     p_sb_rule_shift = p_sb_sub.add_parser(
         "rule-shift",
         help="确定性规则切换探针：验证证伪、替代理解和上下文抑制链路",
@@ -667,9 +671,13 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_rule_shift.add_argument(
         "--epistemic-transcript-lifecycle",
         default="full",
-        choices=["full", "suppress", "evidence"],
-        help="suppress 卸载被证伪回合；evidence 额外保留有界客观证据",
+        choices=["full", "suppress", "evidence", "selective"],
+        help=(
+            "suppress 卸载被证伪回合；evidence 常驻有界客观证据；"
+            "selective 按矛盾和动作焦点短暂唤醒"
+        ),
     )
+    p_sb_rule_shift.add_argument("--evidence-wake-live-reads", type=int, default=2)
     p_sb_rule_shift_eval = p_sb_sub.add_parser(
         "rule-shift-eval",
         help="重复且顺序平衡的规则切换生命周期配对实验",
@@ -690,8 +698,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_sb_rule_shift_eval.add_argument(
         "--arms",
         default="full,suppress",
-        help="两个生命周期臂，前者为 control、后者为 treatment，例如 suppress,evidence",
+        help=(
+            "两个生命周期臂，前者为 control、后者为 treatment；"
+            "可用 suppress/evidence/selective 做配对比较"
+        ),
     )
+    p_sb_rule_shift_eval.add_argument("--evidence-wake-live-reads", type=int, default=2)
     p_sb_rule_shift_eval.add_argument("--thinking", default="off", choices=["off", "on"])
     p_sb_rule_shift_eval.add_argument(
         "--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"]

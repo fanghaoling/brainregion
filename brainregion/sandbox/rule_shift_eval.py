@@ -20,8 +20,14 @@ from .task import SandboxTask
 ARM_FULL = "full"
 ARM_SUPPRESS = "suppress"
 ARM_EVIDENCE = "evidence"
+ARM_SELECTIVE = "selective"
 RULE_SHIFT_ARMS = (ARM_FULL, ARM_SUPPRESS)
-RULE_SHIFT_LIFECYCLE_ARMS = (ARM_FULL, ARM_SUPPRESS, ARM_EVIDENCE)
+RULE_SHIFT_LIFECYCLE_ARMS = (
+    ARM_FULL,
+    ARM_SUPPRESS,
+    ARM_EVIDENCE,
+    ARM_SELECTIVE,
+)
 RULE_SHIFT_GOAL = (
     "Establish an evidence-supported action-effect rule, detect any later contradiction, "
     "and verify a replacement rule."
@@ -62,6 +68,7 @@ async def run_rule_shift_case(
     effort: str | None = None,
     tool_result_lifecycle: str = "compact",
     tool_result_live_reads: int = 0,
+    evidence_wake_live_reads: int = 2,
 ) -> dict[str, Any]:
     """Run one fresh rule-shift episode and return a content-free case record."""
 
@@ -76,6 +83,8 @@ async def run_rule_shift_case(
         max_total_cost_usd=None,
         shared_prefix_turns=0,
         bootstrap_samples=None,
+        evidence_wake_live_reads=evidence_wake_live_reads,
+        selective_wake_enabled=arm == ARM_SELECTIVE,
     )
     env = RuleShiftEnv(
         shift_after=shift_after,
@@ -116,6 +125,7 @@ async def run_rule_shift_case(
                 tool_result_lifecycle=tool_result_lifecycle,
                 tool_result_live_reads=tool_result_live_reads,
                 epistemic_transcript_lifecycle=arm,
+                epistemic_evidence_wake_live_reads=evidence_wake_live_reads,
                 initial_observation=env.observation(),
             )
         return _case_from_trajectory(trajectory, env=env, arm=arm)
@@ -143,6 +153,7 @@ async def run_rule_shift_eval(
     effort: str | None = None,
     tool_result_lifecycle: str = "compact",
     tool_result_live_reads: int = 0,
+    evidence_wake_live_reads: int = 2,
     shared_prefix_turns: int = 1,
     run_id: str = "",
     bootstrap_samples: int | None = None,
@@ -160,6 +171,8 @@ async def run_rule_shift_eval(
         max_total_cost_usd=max_total_cost_usd,
         shared_prefix_turns=shared_prefix_turns,
         bootstrap_samples=bootstrap_samples,
+        evidence_wake_live_reads=evidence_wake_live_reads,
+        selective_wake_enabled=ARM_SELECTIVE in arms,
     )
     run_id = run_id or f"rule-shift-eval-{int(time.time() * 1000)}"
     cases: list[dict[str, Any]] = []
@@ -205,6 +218,7 @@ async def run_rule_shift_eval(
                     effort=effort,
                     tool_result_lifecycle=tool_result_lifecycle,
                     tool_result_live_reads=tool_result_live_reads,
+                    evidence_wake_live_reads=evidence_wake_live_reads,
                 )
             except Exception as exc:  # noqa: BLE001 - preserve the matched matrix
                 case = _runner_error_case(arm=arm, error=exc)
@@ -246,6 +260,7 @@ async def run_rule_shift_eval(
         "effort": effort if thinking else None,
         "tool_result_lifecycle": tool_result_lifecycle,
         "tool_result_live_reads": tool_result_live_reads,
+        "evidence_wake_live_reads": evidence_wake_live_reads,
         "shared_prefix_turns": shared_prefix_turns,
         "shared_prefix_policy": "exact_first_response_before_suppression_v1",
         "arm_order_policy": "alternating_by_repeat",
@@ -338,7 +353,9 @@ def render_rule_shift_eval_summary(report: dict[str, Any]) -> str:
             f"cost=${float(summary.get('mean_cost_usd') or 0):.6f} "
             f"suppressed={summary.get('mean_suppressed_turns')} "
             f"evidence_receipts={summary.get('mean_evidence_receipts')} "
-            f"workspace_events={summary.get('mean_evidence_workspace_events')}"
+            f"workspace_events={summary.get('mean_evidence_workspace_events')} "
+            f"workspace_injections={summary.get('mean_workspace_injections')} "
+            f"wake_requests={summary.get('mean_wake_requests')}"
         )
     effect = report.get("matched_effect") or {}
     raw = effect.get("raw_deltas") or {}
@@ -486,6 +503,8 @@ def _validate_eval_args(
     max_total_cost_usd: float | None,
     shared_prefix_turns: int,
     bootstrap_samples: int | None,
+    evidence_wake_live_reads: int,
+    selective_wake_enabled: bool,
 ) -> None:
     if isinstance(repeats, bool) or not isinstance(repeats, int) or repeats <= 0:
         raise ValueError("repeats must be a positive integer")
@@ -513,6 +532,12 @@ def _validate_eval_args(
         or bootstrap_samples <= 0
     ):
         raise ValueError("bootstrap_samples must be a positive integer when provided")
+    if selective_wake_enabled and (
+        isinstance(evidence_wake_live_reads, bool)
+        or not isinstance(evidence_wake_live_reads, int)
+        or evidence_wake_live_reads <= 0
+    ):
+        raise ValueError("evidence_wake_live_reads must be a positive integer")
 
 
 def _arm_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -521,6 +546,7 @@ def _arm_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
     evidence_workspaces = [
         lifecycle.get("evidence_workspace") or {} for lifecycle in lifecycles
     ]
+    selective_wakes = [lifecycle.get("selective_wake") or {} for lifecycle in lifecycles]
     return {
         "n_runs": len(records),
         "n_valid_runs": len(valid),
@@ -546,6 +572,13 @@ def _arm_summary(records: list[dict[str, Any]]) -> dict[str, Any]:
         "mean_evidence_workspace_deduplicated": _mean(
             evidence_workspaces, "deduplicated_observations"
         ),
+        "mean_workspace_injections": _mean(lifecycles, "workspace_refreshes"),
+        "mean_workspace_skips": _mean(lifecycles, "workspace_skips"),
+        "mean_workspace_estimated_tokens_injected": _mean(
+            lifecycles, "workspace_estimated_tokens_injected"
+        ),
+        "mean_wake_requests": _mean(selective_wakes, "requests"),
+        "mean_wake_activations": _mean(selective_wakes, "activations"),
         "mean_estimated_input_tokens_avoided": _mean(
             lifecycles, "estimated_input_tokens_avoided"
         ),
@@ -759,6 +792,7 @@ def _mean(records: list[dict[str, Any]], key: str) -> float | None:
 __all__ = [
     "ARM_EVIDENCE",
     "ARM_FULL",
+    "ARM_SELECTIVE",
     "ARM_SUPPRESS",
     "RULE_SHIFT_ARMS",
     "RULE_SHIFT_LIFECYCLE_ARMS",

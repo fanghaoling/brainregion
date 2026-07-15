@@ -1000,6 +1000,9 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
                 tool_result_lifecycle=args.tool_result_lifecycle,
                 tool_result_live_reads=int(args.tool_result_live_reads),
                 epistemic_transcript_lifecycle=args.epistemic_transcript_lifecycle,
+                epistemic_evidence_wake_live_reads=int(
+                    args.evidence_wake_live_reads
+                ),
                 initial_observation=env.observation(),
             )
         snapshot = env.snapshot()
@@ -1110,6 +1113,7 @@ async def run_rule_shift(args: argparse.Namespace) -> dict[str, Any]:
             effort=args.effort,
             tool_result_lifecycle=args.tool_result_lifecycle,
             tool_result_live_reads=int(args.tool_result_live_reads),
+            evidence_wake_live_reads=int(args.evidence_wake_live_reads),
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc
@@ -1176,6 +1180,7 @@ async def run_rule_shift_evaluation(args: argparse.Namespace) -> dict[str, Any]:
             effort=args.effort,
             tool_result_lifecycle=args.tool_result_lifecycle,
             tool_result_live_reads=int(args.tool_result_live_reads),
+            evidence_wake_live_reads=int(args.evidence_wake_live_reads),
             shared_prefix_turns=int(args.shared_prefix_turns),
             bootstrap_samples=args.bootstrap_samples,
             arms=tuple(part.strip() for part in args.arms.split(",")),
