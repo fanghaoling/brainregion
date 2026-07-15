@@ -12,8 +12,16 @@ from typing import Any, Literal
 
 TaskStatus = Literal["queued", "working", "done", "blocked", "cancelled"]
 AssignmentStatus = Literal["queued", "working", "done", "blocked", "cancelled"]
+EvidenceWakeReason = Literal["explicit_recall", "expert_request", "task_focus_change"]
+EvidenceWakeSource = Literal["main_brain", "region_expert", "runtime_policy", "mcp_request"]
 
 _STATUSES = frozenset({"queued", "working", "done", "blocked", "cancelled"})
+_EVIDENCE_WAKE_REASONS = frozenset(
+    {"explicit_recall", "expert_request", "task_focus_change"}
+)
+_EVIDENCE_WAKE_SOURCES = frozenset(
+    {"main_brain", "region_expert", "runtime_policy", "mcp_request"}
+)
 
 
 def _required_text(value: Any, name: str, *, max_length: int = 2000) -> str:
@@ -58,6 +66,13 @@ def _positive_int(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
         raise ValueError(f"{name} must be a positive integer")
     return value
+
+
+def _bounded_positive_int(value: Any, name: str, *, maximum: int) -> int:
+    result = _positive_int(value, name)
+    if result > maximum:
+        raise ValueError(f"{name} cannot exceed {maximum}")
+    return result
 
 
 @dataclass(frozen=True)
@@ -224,14 +239,54 @@ class ExpertAssignment:
         }
 
 
+@dataclass(frozen=True)
+class EvidenceWakeRequest:
+    """Content-free request to expose evidence to one exact expert assignment."""
+
+    request_id: str
+    task_id: str
+    assignment_id: str
+    region: str
+    reason: EvidenceWakeReason
+    source: EvidenceWakeSource
+    ttl_reads: int
+    remaining_reads: int
+    created_sequence: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "request_id": self.request_id,
+            "task_id": self.task_id,
+            "assignment_id": self.assignment_id,
+            "region": self.region,
+            "reason": self.reason,
+            "source": self.source,
+            "ttl_reads": self.ttl_reads,
+            "remaining_reads": self.remaining_reads,
+            "created_sequence": self.created_sequence,
+            "contains_context_content": False,
+        }
+
+
 class TaskCoordinationBoard:
     """Thread-safe task and assignment registry without private context."""
 
-    def __init__(self, *, max_tasks: int = 256, max_assignments: int = 1024) -> None:
+    def __init__(
+        self,
+        *,
+        max_tasks: int = 256,
+        max_assignments: int = 1024,
+        max_evidence_wakes: int = 4096,
+    ) -> None:
         self._max_tasks = _positive_int(max_tasks, "max_tasks")
         self._max_assignments = _positive_int(max_assignments, "max_assignments")
+        self._max_evidence_wakes = _positive_int(
+            max_evidence_wakes, "max_evidence_wakes"
+        )
         self._tasks: dict[str, TaskSpec] = {}
         self._assignments: dict[str, dict[str, ExpertAssignment]] = {}
+        self._evidence_wakes: dict[str, dict[str, list[EvidenceWakeRequest]]] = {}
+        self._wake_sequence = 0
         self._lock = RLock()
 
     def create_task(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -268,17 +323,144 @@ class TaskCoordinationBoard:
             self._assignments[task_id][assignment_id] = updated
         return updated.to_dict()
 
+    def request_evidence_wake(
+        self,
+        task_id: str,
+        assignment_id: str,
+        *,
+        reason: str,
+        source: str,
+        ttl_reads: int = 1,
+    ) -> dict[str, Any]:
+        """Register a bounded wake for one assignment without accepting context text."""
+
+        task_id = _required_text(task_id, "task_id", max_length=200)
+        assignment_id = _required_text(
+            assignment_id, "assignment_id", max_length=200
+        )
+        normalized_reason = str(reason or "").strip().casefold()
+        if normalized_reason not in _EVIDENCE_WAKE_REASONS:
+            raise ValueError(
+                "reason must be one of " f"{sorted(_EVIDENCE_WAKE_REASONS)}"
+            )
+        normalized_source = str(source or "").strip().casefold()
+        if normalized_source not in _EVIDENCE_WAKE_SOURCES:
+            raise ValueError(
+                "source must be one of " f"{sorted(_EVIDENCE_WAKE_SOURCES)}"
+            )
+        ttl_reads = _bounded_positive_int(ttl_reads, "ttl_reads", maximum=32)
+        with self._lock:
+            assignment = self._assignments.get(task_id, {}).get(assignment_id)
+            if assignment is None:
+                raise ValueError(f"unknown assignment: {assignment_id}")
+            active_wakes = sum(
+                len(requests)
+                for assignments in self._evidence_wakes.values()
+                for requests in assignments.values()
+            )
+            if active_wakes >= self._max_evidence_wakes:
+                raise RuntimeError("evidence wake capacity exceeded")
+            self._wake_sequence += 1
+            request = EvidenceWakeRequest(
+                request_id=f"wake-{self._wake_sequence:08d}",
+                task_id=task_id,
+                assignment_id=assignment_id,
+                region=assignment.region,
+                reason=normalized_reason,  # type: ignore[arg-type]
+                source=normalized_source,  # type: ignore[arg-type]
+                ttl_reads=ttl_reads,
+                remaining_reads=ttl_reads,
+                created_sequence=self._wake_sequence,
+            )
+            self._evidence_wakes.setdefault(task_id, {}).setdefault(
+                assignment_id, []
+            ).append(request)
+        return request.to_dict()
+
+    def consume_evidence_wakes(
+        self, task_id: str, assignment_id: str
+    ) -> dict[str, Any]:
+        """Deliver and age only wakes owned by the exact task/assignment pair."""
+
+        task_id = _required_text(task_id, "task_id", max_length=200)
+        assignment_id = _required_text(
+            assignment_id, "assignment_id", max_length=200
+        )
+        with self._lock:
+            assignment = self._assignments.get(task_id, {}).get(assignment_id)
+            if assignment is None:
+                raise ValueError(f"unknown assignment: {assignment_id}")
+            requests = self._evidence_wakes.get(task_id, {}).get(assignment_id, [])
+            delivered: list[EvidenceWakeRequest] = []
+            surviving: list[EvidenceWakeRequest] = []
+            for request in requests:
+                updated = replace(
+                    request, remaining_reads=max(0, request.remaining_reads - 1)
+                )
+                delivered.append(updated)
+                if updated.remaining_reads > 0:
+                    surviving.append(updated)
+            task_wakes = self._evidence_wakes.get(task_id)
+            if task_wakes is not None:
+                if surviving:
+                    task_wakes[assignment_id] = surviving
+                else:
+                    task_wakes.pop(assignment_id, None)
+                if not task_wakes:
+                    self._evidence_wakes.pop(task_id, None)
+        return {
+            "task_id": task_id,
+            "assignment_id": assignment_id,
+            "region": assignment.region,
+            "deliveries": [request.to_dict() for request in delivered],
+            "count": len(delivered),
+            "contains_context_content": False,
+        }
+
+    def clear_evidence_wakes(
+        self, task_id: str, *, assignment_id: str = ""
+    ) -> dict[str, Any]:
+        """Unload pending wake metadata for one task or exact assignment."""
+
+        task_id = _required_text(task_id, "task_id", max_length=200)
+        assignment_id = _optional_text(
+            assignment_id, "assignment_id", max_length=200
+        )
+        with self._lock:
+            if assignment_id:
+                task_wakes = self._evidence_wakes.get(task_id, {})
+                removed = len(task_wakes.pop(assignment_id, []))
+                if not task_wakes:
+                    self._evidence_wakes.pop(task_id, None)
+            else:
+                removed = sum(
+                    len(requests)
+                    for requests in self._evidence_wakes.pop(task_id, {}).values()
+                )
+        return {
+            "task_id": task_id,
+            "assignment_id": assignment_id,
+            "removed_evidence_wakes": removed,
+        }
+
     def status(self, task_id: str) -> dict[str, Any]:
         task_id = _required_text(task_id, "task_id", max_length=200)
         with self._lock:
             task = self._tasks.get(task_id)
             assignments = list(self._assignments.get(task_id, {}).values())
+            evidence_wakes = [
+                request
+                for requests in self._evidence_wakes.get(task_id, {}).values()
+                for request in requests
+            ]
         if task is None:
             raise ValueError(f"unknown task: {task_id}")
         return {
             "task": task.to_dict(),
             "assignments": [assignment.to_dict() for assignment in assignments],
             "assignment_count": len(assignments),
+            "evidence_wakes": [request.to_dict() for request in evidence_wakes],
+            "evidence_wake_count": len(evidence_wakes),
             "contains_context_content": False,
         }
 
@@ -287,15 +469,23 @@ class TaskCoordinationBoard:
         with self._lock:
             removed_task = self._tasks.pop(task_id, None) is not None
             removed_assignments = len(self._assignments.pop(task_id, {}))
+            removed_evidence_wakes = sum(
+                len(requests)
+                for requests in self._evidence_wakes.pop(task_id, {}).values()
+            )
         return {
             "task_id": task_id,
             "removed_task": removed_task,
             "removed_assignments": removed_assignments,
+            "removed_evidence_wakes": removed_evidence_wakes,
         }
 
 
 __all__ = [
     "AssignmentStatus",
+    "EvidenceWakeReason",
+    "EvidenceWakeRequest",
+    "EvidenceWakeSource",
     "ExpertAssignment",
     "MemoryRequest",
     "TaskCoordinationBoard",

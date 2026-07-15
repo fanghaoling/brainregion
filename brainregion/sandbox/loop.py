@@ -1514,6 +1514,8 @@ async def run_agent(
     epistemic_transcript_lifecycle: str = "full",
     epistemic_evidence_wake_live_reads: int = 2,
     epistemic_evidence_max_selected_events: int = 4,
+    epistemic_evidence_assignment_id: str = "",
+    epistemic_evidence_wake_source: Any = None,
     system_prompt: str | None = None,
     verify_fn: Callable[..., dict] | None = None,
     memory_region: Any = None,
@@ -1623,6 +1625,9 @@ async def run_agent(
         ledger=epistemic_ledger,
         selective_wake_live_reads=epistemic_evidence_wake_live_reads,
         selective_max_events=epistemic_evidence_max_selected_events,
+        task_id=task.id,
+        assignment_id=epistemic_evidence_assignment_id,
+        evidence_wake_source=epistemic_evidence_wake_source,
     )
     _recall_count = 0
     _max_recalls = int(max_recall_calls) if max_recall_calls is not None else int(max_steps)

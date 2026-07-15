@@ -107,6 +107,43 @@ def test_workspace_clear_also_unloads_task_metadata(monkeypatch):
     assert cleared["removed_assignments"] == 1
 
 
+def test_mcp_evidence_wake_is_structured_and_assignment_scoped(monkeypatch):
+    from brainregion import server
+
+    monkeypatch.setattr(server, "_task_coordination_board", TaskCoordinationBoard())
+    monkeypatch.setattr(server, "_region_coordination_board", RegionCoordinationBoard())
+    server.create_task(task_id="root", goal="g")
+    server.delegate_task(
+        task_id="root",
+        assignment_id="parser",
+        region="debugging",
+        question="q",
+    )
+
+    requested = server.request_evidence_wake(
+        task_id="root",
+        assignment_id="parser",
+        reason="explicit_recall",
+        ttl_reads=2,
+    )
+    status = server.task_status("root")
+
+    assert requested["wake"]["source"] == "mcp_request"
+    assert requested["wake"]["region"] == "debugging"
+    assert requested["wake"]["remaining_reads"] == 2
+    assert requested["contains_context_content"] is False
+    assert requested["authorization_boundary"] is False
+    assert status["evidence_wake_count"] == 1
+    assert "question" not in json.dumps(requested)
+
+    cleared = server.workspace_context(
+        "root", operation="clear", assignment_id="parser"
+    )
+
+    assert cleared["removed_evidence_wakes"] == 1
+    assert server.task_status("root")["evidence_wake_count"] == 0
+
+
 def test_task_status_never_contains_workspace_context(monkeypatch):
     from brainregion import server
 

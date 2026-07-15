@@ -103,6 +103,83 @@ def test_task_board_rejects_unknown_tasks_duplicates_and_bad_status():
         board.set_assignment_status("root", "a", "sleeping")
 
 
+def test_evidence_wakes_are_assignment_scoped_and_age_only_on_matching_reads():
+    board = TaskCoordinationBoard()
+    board.create_task({"task_id": "root", "goal": "g"})
+    board.delegate(
+        "root",
+        {"assignment_id": "parser", "region": "debugging", "question": "q1"},
+    )
+    board.delegate(
+        "root",
+        {"assignment_id": "architecture", "region": "review", "question": "q2"},
+    )
+    parser_wake = board.request_evidence_wake(
+        "root",
+        "parser",
+        reason="expert_request",
+        source="region_expert",
+        ttl_reads=2,
+    )
+    board.request_evidence_wake(
+        "root",
+        "architecture",
+        reason="task_focus_change",
+        source="runtime_policy",
+        ttl_reads=1,
+    )
+
+    architecture = board.consume_evidence_wakes("root", "architecture")
+    status = board.status("root")
+
+    assert architecture["count"] == 1
+    assert architecture["deliveries"][0]["region"] == "review"
+    assert architecture["deliveries"][0]["remaining_reads"] == 0
+    assert status["evidence_wake_count"] == 1
+    assert status["evidence_wakes"][0]["request_id"] == parser_wake["request_id"]
+    assert status["evidence_wakes"][0]["remaining_reads"] == 2
+
+    first_parser = board.consume_evidence_wakes("root", "parser")
+    second_parser = board.consume_evidence_wakes("root", "parser")
+
+    assert first_parser["deliveries"][0]["remaining_reads"] == 1
+    assert second_parser["deliveries"][0]["remaining_reads"] == 0
+    assert board.status("root")["evidence_wake_count"] == 0
+
+
+def test_evidence_wake_contract_rejects_unowned_or_unbounded_requests():
+    board = TaskCoordinationBoard()
+    board.create_task({"task_id": "root", "goal": "g"})
+    board.delegate(
+        "root",
+        {"assignment_id": "a", "region": "debugging", "question": "q"},
+    )
+
+    with pytest.raises(ValueError, match="unknown assignment"):
+        board.request_evidence_wake(
+            "root",
+            "missing",
+            reason="expert_request",
+            source="region_expert",
+        )
+    with pytest.raises(ValueError, match="reason must be one of"):
+        board.request_evidence_wake(
+            "root", "a", reason="free form task text", source="region_expert"
+        )
+    with pytest.raises(ValueError, match="source must be one of"):
+        board.request_evidence_wake(
+            "root", "a", reason="expert_request", source="unknown_model"
+        )
+    with pytest.raises(ValueError, match="cannot exceed 32"):
+        board.request_evidence_wake(
+            "root",
+            "a",
+            reason="expert_request",
+            source="region_expert",
+            ttl_reads=33,
+        )
+
+
 def test_memory_request_is_metadata_only_and_fail_fast():
     request = MemoryRequest.from_dict(None, default_region="security")
 
@@ -139,5 +216,6 @@ def test_task_clear_removes_only_selected_task():
         "task_id": "a",
         "removed_task": True,
         "removed_assignments": 0,
+        "removed_evidence_wakes": 0,
     }
     assert board.status("b")["task"]["goal"] == "B"

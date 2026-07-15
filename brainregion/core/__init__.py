@@ -34,6 +34,7 @@ from .region_expert import RegionExpertEngine, RegionExpertResult
 from .document import DocumentType, ReviewDocument
 from .engine import ReviewEngine
 from .task_coordination import (
+    EvidenceWakeRequest,
     ExpertAssignment,
     MemoryRequest,
     TaskCoordinationBoard,
@@ -67,6 +68,7 @@ __all__ = [
     "RegionReport",
     "RegionExpertEngine",
     "RegionExpertResult",
+    "EvidenceWakeRequest",
     "ExpertAssignment",
     "MemoryRequest",
     "TaskCoordinationBoard",

@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from brainregion.core.task_coordination import TaskCoordinationBoard
 from brainregion.sandbox.epistemic_ledger import EpistemicLedger
 from brainregion.sandbox.epistemic_evidence import EpistemicEvidenceWorkspace
 from brainregion.sandbox.epistemic_transcript import EpistemicTranscriptLifecycle
@@ -290,6 +291,136 @@ def test_selective_wake_is_inert_for_other_modes_and_validates_enabled_requests(
             mode="selective",
             ledger=EpistemicLedger(),
             selective_max_events=0,
+        )
+
+
+def test_external_wake_delivery_is_assignment_scoped_with_provider_read_ttl():
+    board = TaskCoordinationBoard()
+    board.create_task({"task_id": "root", "goal": "g"})
+    board.delegate(
+        "root",
+        {"assignment_id": "parser", "region": "debugging", "question": "q1"},
+    )
+    board.delegate(
+        "root",
+        {"assignment_id": "architecture", "region": "review", "question": "q2"},
+    )
+
+    def lifecycle_for(assignment_id: str, action: str):
+        lifecycle = EpistemicTranscriptLifecycle(
+            mode="selective",
+            ledger=EpistemicLedger(),
+            task_id="root",
+            assignment_id=assignment_id,
+            evidence_wake_source=board,
+        )
+        message = attributed_message(
+            "assistant", f"private {assignment_id}", "model_transcript"
+        )
+        lifecycle.mark(
+            message,
+            hypothesis_id=f"{assignment_id}-hypothesis",
+            step=0,
+            rejected=True,
+            evidence={
+                "action": action,
+                "matched": True,
+                "actual": {
+                    "change_scale": "local",
+                    "changed_cells": 1,
+                    "total_cells": 10,
+                    "level_delta": 0,
+                    "state": "NOT_FINISHED",
+                },
+            },
+        )
+        return lifecycle, [message]
+
+    parser, parser_messages = lifecycle_for("parser", "parse")
+    architecture, architecture_messages = lifecycle_for(
+        "architecture", "inspect_boundary"
+    )
+    board.request_evidence_wake(
+        "root",
+        "parser",
+        reason="expert_request",
+        source="region_expert",
+        ttl_reads=2,
+    )
+
+    architecture.apply(architecture_messages, next_step=1)
+
+    assert architecture.public_metrics()["external_wake_delivery"]["deliveries"] == 0
+    assert board.status("root")["evidence_wakes"][0]["remaining_reads"] == 2
+    assert "epistemic_evidence_workspace" not in "\n".join(
+        item["content"] for item in provider_messages(architecture_messages)
+    )
+
+    board.request_evidence_wake(
+        "root",
+        "architecture",
+        reason="task_focus_change",
+        source="runtime_policy",
+    )
+    architecture.apply(architecture_messages, next_step=2)
+    parser.apply(parser_messages, next_step=1)
+    parser.apply(parser_messages, next_step=2)
+
+    assert "inspect_boundary" in "\n".join(
+        item["content"] for item in provider_messages(architecture_messages)
+    )
+    assert "parse" in "\n".join(
+        item["content"] for item in provider_messages(parser_messages)
+    )
+    assert board.status("root")["evidence_wake_count"] == 0
+
+    parser.apply(parser_messages, next_step=3)
+    assert "epistemic_evidence_workspace" not in "\n".join(
+        item["content"] for item in provider_messages(parser_messages)
+    )
+    parser_delivery = parser.public_metrics()["external_wake_delivery"]
+    assert parser_delivery == {
+        "enabled": True,
+        "configured": True,
+        "task_id": "root",
+        "assignment_id": "parser",
+        "batches": 2,
+        "deliveries": 2,
+        "deliveries_by_reason": {"expert_request": 2},
+        "deliveries_by_source": {"region_expert": 2},
+        "contains_context_content": False,
+        "authorization_boundary": False,
+    }
+
+
+def test_external_wake_source_is_not_touched_when_selective_mode_is_disabled():
+    class ExplodingWakeSource:
+        calls = 0
+
+        def consume_evidence_wakes(self, task_id: str, assignment_id: str) -> dict:
+            self.calls += 1
+            raise AssertionError("disabled lifecycle touched wake source")
+
+    source = ExplodingWakeSource()
+    lifecycle = EpistemicTranscriptLifecycle(
+        mode="full",
+        evidence_wake_source=source,
+    )
+    message = attributed_message("assistant", "unchanged", "model_transcript")
+
+    lifecycle.apply([message], next_step=1)
+
+    assert source.calls == 0
+    assert lifecycle.public_metrics()["external_wake_delivery"]["configured"] is False
+
+
+def test_selective_external_wake_requires_an_exact_assignment_binding():
+    with pytest.raises(ValueError, match="requires task_id and assignment_id"):
+        EpistemicTranscriptLifecycle(
+            mode="selective",
+            ledger=EpistemicLedger(),
+            task_id="root",
+            evidence_wake_source=TaskCoordinationBoard(),
         )
 
 

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, Protocol
 
 from brainregion.core.context_loader import estimate_context_tokens
 
@@ -33,12 +33,23 @@ _SELECTIVE_WAKE_REASONS = frozenset(
 )
 
 
+class EvidenceWakeSource(Protocol):
+    """Narrow runtime boundary for assignment-scoped, content-free wake delivery."""
+
+    def consume_evidence_wakes(
+        self, task_id: str, assignment_id: str
+    ) -> dict[str, Any]: ...
+
+
 @dataclass
 class EpistemicTranscriptLifecycle:
     mode: EpistemicTranscriptMode = "full"
     ledger: EpistemicLedger | None = field(default=None, repr=False)
     selective_wake_live_reads: int = 2
     selective_max_events: int = 4
+    task_id: str = ""
+    assignment_id: str = ""
+    evidence_wake_source: EvidenceWakeSource | None = field(default=None, repr=False)
     compaction_passes: int = 0
     marked_turns: int = 0
     suppressed_turns: int = 0
@@ -65,6 +76,10 @@ class EpistemicTranscriptLifecycle:
     wake_requests: int = 0
     wake_activations: int = 0
     wake_requests_by_reason: dict[str, int] = field(default_factory=dict)
+    external_wake_delivery_batches: int = 0
+    external_wake_deliveries: int = 0
+    external_wake_deliveries_by_reason: dict[str, int] = field(default_factory=dict)
+    external_wake_deliveries_by_source: dict[str, int] = field(default_factory=dict)
     _seen_turn_ids: set[str] = field(default_factory=set, repr=False)
     _last_evidence_action: str = field(default="", repr=False)
     _focus_lineage: list[str] = field(default_factory=list, repr=False)
@@ -90,6 +105,13 @@ class EpistemicTranscriptLifecycle:
             or self.selective_max_events <= 0
         ):
             raise ValueError("selective_max_events must be a positive integer")
+        if self.mode == "selective" and self.evidence_wake_source is not None:
+            self.task_id = str(self.task_id or "").strip()
+            self.assignment_id = str(self.assignment_id or "").strip()
+            if not self.task_id or not self.assignment_id:
+                raise ValueError(
+                    "selective evidence wake source requires task_id and assignment_id"
+                )
 
     def mark(
         self,
@@ -140,6 +162,8 @@ class EpistemicTranscriptLifecycle:
         records = self.observe(messages)
         if self.mode == "full":
             return
+        if self.mode == "selective":
+            self._consume_external_wakes()
         self.compaction_passes += 1
         for record in records:
             if record["compacted"]:
@@ -261,6 +285,26 @@ class EpistemicTranscriptLifecycle:
                 "requests_by_reason": dict(sorted(self.wake_requests_by_reason.items())),
                 "contains_focus_content": False,
             },
+            "external_wake_delivery": {
+                "enabled": self.mode == "selective",
+                "configured": (
+                    self.mode == "selective" and self.evidence_wake_source is not None
+                ),
+                "task_id": self.task_id if self.mode == "selective" else "",
+                "assignment_id": (
+                    self.assignment_id if self.mode == "selective" else ""
+                ),
+                "batches": self.external_wake_delivery_batches,
+                "deliveries": self.external_wake_deliveries,
+                "deliveries_by_reason": dict(
+                    sorted(self.external_wake_deliveries_by_reason.items())
+                ),
+                "deliveries_by_source": dict(
+                    sorted(self.external_wake_deliveries_by_source.items())
+                ),
+                "contains_context_content": False,
+                "authorization_boundary": False,
+            },
             "event_attention": {
                 "enabled": self.mode == "selective",
                 "max_selected_events": self.selective_max_events,
@@ -303,6 +347,39 @@ class EpistemicTranscriptLifecycle:
             self.wake_requests_by_reason.get(normalized_reason, 0) + 1
         )
         return True
+
+    def _consume_external_wakes(self) -> None:
+        if self.evidence_wake_source is None:
+            return
+        batch = self.evidence_wake_source.consume_evidence_wakes(
+            self.task_id, self.assignment_id
+        )
+        if str(batch.get("task_id") or "") != self.task_id or str(
+            batch.get("assignment_id") or ""
+        ) != self.assignment_id:
+            raise ValueError("evidence wake delivery identity mismatch")
+        deliveries = batch.get("deliveries") or []
+        if not isinstance(deliveries, list):
+            raise ValueError("evidence wake deliveries must be an array")
+        if deliveries:
+            self.external_wake_delivery_batches += 1
+        for delivery in deliveries:
+            if not isinstance(delivery, dict):
+                raise ValueError("evidence wake delivery must be an object")
+            if str(delivery.get("task_id") or "") != self.task_id or str(
+                delivery.get("assignment_id") or ""
+            ) != self.assignment_id:
+                raise ValueError("evidence wake delivery identity mismatch")
+            reason = str(delivery.get("reason") or "").strip().casefold()
+            source = str(delivery.get("source") or "").strip().casefold()
+            self.request_wake(reason, live_reads=1)
+            self.external_wake_deliveries += 1
+            self.external_wake_deliveries_by_reason[reason] = (
+                self.external_wake_deliveries_by_reason.get(reason, 0) + 1
+            )
+            self.external_wake_deliveries_by_source[source] = (
+                self.external_wake_deliveries_by_source.get(source, 0) + 1
+            )
 
     def _replace_workspace_message(
         self,

@@ -1712,6 +1712,32 @@ def delegate_task(
 
 
 @mcp.tool()
+def request_evidence_wake(
+    task_id: str,
+    assignment_id: str,
+    reason: str,
+    ttl_reads: int = 1,
+) -> dict:
+    """Wake selective evidence for one exact assignment for bounded provider reads.
+
+    This records routing provenance only. It accepts no context body and provides
+    architectural delivery isolation, not caller authentication.
+    """
+    wake = _task_coordination_board.request_evidence_wake(
+        task_id,
+        assignment_id,
+        reason=reason,
+        source="mcp_request",
+        ttl_reads=ttl_reads,
+    )
+    return {
+        "wake": wake,
+        "contains_context_content": False,
+        "authorization_boundary": False,
+    }
+
+
+@mcp.tool()
 def task_status(task_id: str) -> dict:
     """Inspect task assignments plus public report counts and latest decisions."""
     status = _task_coordination_board.status(task_id)
@@ -1999,7 +2025,19 @@ def workspace_context(
         task_result = (
             _task_coordination_board.clear(task_id) if not assignment_id else {}
         )
-        return {**context_result, **coordination_result, **task_result}
+        wake_result = (
+            _task_coordination_board.clear_evidence_wakes(
+                task_id, assignment_id=assignment_id
+            )
+            if assignment_id
+            else {}
+        )
+        return {
+            **context_result,
+            **coordination_result,
+            **task_result,
+            **wake_result,
+        }
     if operation == "publish_report":
         report_data = dict(report or {})
         if assignment_id:
