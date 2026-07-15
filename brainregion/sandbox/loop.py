@@ -45,6 +45,7 @@ from .effort_routing import (
     PhaseEffortShadow,
     disabled_effort_shadow_metrics,
 )
+from .epistemic_transcript import EpistemicTranscriptLifecycle
 from .input_attribution import (
     attributed_message,
     capture_input_attribution,
@@ -451,6 +452,7 @@ class Trajectory:
     phase_controller: PhaseController | None = None
     effort_routing_shadow: PhaseEffortShadow | None = None
     tool_result_lifecycle: dict[str, Any] = field(default_factory=dict)
+    epistemic_transcript_lifecycle: dict[str, Any] = field(default_factory=dict)
     region_workbench: dict[str, Any] = field(
         default_factory=lambda: {
             "enabled": False,
@@ -561,6 +563,7 @@ class Trajectory:
                 else disabled_effort_shadow_metrics()
             ),
             "tool_result_lifecycle": dict(self.tool_result_lifecycle),
+            "epistemic_transcript_lifecycle": dict(self.epistemic_transcript_lifecycle),
             "region_workbench": dict(self.region_workbench),
             "iterations": ([it.to_dict() for it in self.iterations]
                            if self.iterations is not None else None),
@@ -1508,6 +1511,7 @@ async def run_agent(
     cognitive_checkpoint_period: int = 3,
     tool_result_lifecycle: str = "full",
     tool_result_live_reads: int = 3,
+    epistemic_transcript_lifecycle: str = "full",
     system_prompt: str | None = None,
     verify_fn: Callable[..., dict] | None = None,
     memory_region: Any = None,
@@ -1611,6 +1615,11 @@ async def run_agent(
     # Phase D.2 记忆脑区(env 模式,有状态):region 自维护 pose/movement_log/rough_map;此处仅 recall 计数。
     # _env 经 ContextVar(runner 的 scoped_env 已设);非 env 模式 _env=None → region 特性全 no-op。
     _env = _current_env.get()
+    epistemic_ledger = getattr(_env, "epistemic_ledger", None)
+    belief_lifecycle = EpistemicTranscriptLifecycle(
+        mode=epistemic_transcript_lifecycle,  # type: ignore[arg-type]
+        ledger=epistemic_ledger,
+    )
     _recall_count = 0
     _max_recalls = int(max_recall_calls) if max_recall_calls is not None else int(max_steps)
     _plan_count = 0
@@ -2117,6 +2126,7 @@ async def run_agent(
                 )
 
             result_lifecycle.apply(messages, next_step=step)
+            belief_lifecycle.apply(messages, next_step=step)
             messages = _trim_transcript(messages, cap_chars)
             phase_at_call = phase_controller.phase.value
             effort_shadow_decision = None
@@ -2541,9 +2551,18 @@ async def run_agent(
                     "difficulty_score": round(phase_controller.difficulty.score, 3),
                 },
             )
-            messages.append(
-                attributed_message("assistant", resp.content, "model_transcript")
+            assistant_message = attributed_message(
+                "assistant", resp.content, "model_transcript"
             )
+            epistemic_update = call.args.get("epistemic")
+            if call.tool == "act" and isinstance(epistemic_update, dict):
+                belief_lifecycle.mark(
+                    assistant_message,
+                    hypothesis_id=str(epistemic_update.get("hypothesis_id") or ""),
+                    step=step,
+                    rejected=bool(exec_err),
+                )
+            messages.append(assistant_message)
             # tool-result 当不可信数据:固定围栏(review gpt-9)。
             # Phase 4.2 visual_ephemeral:act/observe 拆 visual(outcome 持久 <tool_result> + visual 剥 <visual>);
             # 非 ephemeral 或非视觉工具 → 标准 <tool_result>(零回归)。
@@ -2586,6 +2605,8 @@ async def run_agent(
 
         result_lifecycle.observe(messages)
         traj.tool_result_lifecycle = result_lifecycle.public_metrics()
+        belief_lifecycle.observe(messages)
+        traj.epistemic_transcript_lifecycle = belief_lifecycle.public_metrics()
         traj.n_steps = len(traj.steps)
         # verify:tests-green 定 solved(客观)。预算/解析失败优先于 tests_fail 作 solve_status。
         if verify_fn is not None:  # Phase A env 注入:env-grounded verify(tests_green := env.solved)

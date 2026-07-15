@@ -933,6 +933,10 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
         raise SystemExit("--max-steps must be positive")
     if float(args.max_cost_usd) <= 0:
         raise SystemExit("--max-cost-usd must be positive")
+    if args.epistemic_transcript_lifecycle != "full" and not args.epistemic_ledger:
+        raise SystemExit(
+            "--epistemic-transcript-lifecycle suppress requires --epistemic-ledger"
+        )
 
     backend, registry = _build_backend(
         dd,
@@ -987,6 +991,7 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
                 visual_ephemeral=True,
                 tool_result_lifecycle=args.tool_result_lifecycle,
                 tool_result_live_reads=int(args.tool_result_live_reads),
+                epistemic_transcript_lifecycle=args.epistemic_transcript_lifecycle,
                 initial_observation=env.observation(),
             )
         snapshot = env.snapshot()
@@ -996,7 +1001,8 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
         for progress in progress_trace:
             operation = str(progress.get("operation") or "model_turn")
             operation_counts[operation] = operation_counts.get(operation, 0) + 1
-        environment_actions = operation_counts.get("act", 0)
+        environment_action_attempts = operation_counts.get("act", 0)
+        environment_actions = len(env.action_trace)
         error_steps = sum(bool(progress.get("error")) for progress in progress_trace)
         error_kind_counts: dict[str, int] = {}
         for progress in progress_trace:
@@ -1008,9 +1014,13 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
         result = {
             "run_id": run_id,
             "mode": (
-                "arc_agi_3_epistemic_ledger"
-                if epistemic_ledger is not None
-                else "arc_agi_3_public_baseline"
+                "arc_agi_3_epistemic_transcript"
+                if args.epistemic_transcript_lifecycle == "suppress"
+                else (
+                    "arc_agi_3_epistemic_ledger"
+                    if epistemic_ledger is not None
+                    else "arc_agi_3_public_baseline"
+                )
             ),
             "game_id": snapshot.get("game_id"),
             "model": model,
@@ -1020,6 +1030,7 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
             "levels_completed": snapshot.get("levels_completed"),
             "win_levels": snapshot.get("win_levels"),
             "environment_actions": environment_actions,
+            "environment_action_attempts": environment_action_attempts,
             "model_steps": trajectory.n_steps,
             "operation_counts": operation_counts,
             "error_steps": error_steps,
@@ -1039,6 +1050,9 @@ async def run_arc_env(args: argparse.Namespace) -> dict[str, Any]:
             "usage": normalized_usage,
             "input_attribution": trajectory.main_input_attribution,
             "tool_result_lifecycle": trajectory.tool_result_lifecycle,
+            "epistemic_transcript_lifecycle": (
+                trajectory.epistemic_transcript_lifecycle
+            ),
             "epistemic_ledger": (
                 epistemic_ledger.public_metrics()
                 if epistemic_ledger is not None

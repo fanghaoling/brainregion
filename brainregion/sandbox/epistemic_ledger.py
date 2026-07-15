@@ -8,8 +8,18 @@ from typing import Any
 
 
 _LIVE_STATUSES = frozenset({"open", "candidate", "supported"})
-_FRAME_CHANGE_VALUES = frozenset({"changed", "unchanged"})
+_CHANGE_SCALE_VALUES = frozenset({"none", "local", "regional", "global"})
 _STATE_VALUES = frozenset({"", "NOT_FINISHED", "WIN", "GAME_OVER"})
+_PLACEHOLDER_RULES = frozenset(
+    {
+        "bounded public rule",
+        "concrete_rule",
+        "falsifiable rule",
+        "your falsifiable rule",
+        "your rule",
+        "placeholder",
+    }
+)
 
 
 def _bounded_text(value: Any, name: str, *, max_length: int, required: bool = True) -> str:
@@ -29,7 +39,7 @@ def _strict_fields(value: dict[str, Any], allowed: set[str], name: str) -> None:
 
 @dataclass(frozen=True)
 class PredictionSpec:
-    frame_change: str
+    change_scale: str
     level_delta: int
     state: str = ""
 
@@ -37,13 +47,13 @@ class PredictionSpec:
     def from_dict(cls, raw: Any) -> "PredictionSpec":
         if not isinstance(raw, dict):
             raise ValueError("epistemic predicts must be an object")
-        _strict_fields(raw, {"frame_change", "level_delta", "state"}, "epistemic predicts")
-        frame_change = _bounded_text(
-            raw.get("frame_change"), "epistemic predicts.frame_change", max_length=20
+        _strict_fields(raw, {"change_scale", "level_delta", "state"}, "epistemic predicts")
+        change_scale = _bounded_text(
+            raw.get("change_scale"), "epistemic predicts.change_scale", max_length=20
         ).lower()
-        if frame_change not in _FRAME_CHANGE_VALUES:
+        if change_scale not in _CHANGE_SCALE_VALUES:
             raise ValueError(
-                "epistemic predicts.frame_change must be 'changed' or 'unchanged'"
+                "epistemic predicts.change_scale must be none, local, regional, or global"
             )
         level_delta = raw.get("level_delta")
         if isinstance(level_delta, bool) or not isinstance(level_delta, int):
@@ -60,11 +70,11 @@ class PredictionSpec:
             raise ValueError(
                 "epistemic predicts.state must be empty, NOT_FINISHED, WIN, or GAME_OVER"
             )
-        return cls(frame_change=frame_change, level_delta=level_delta, state=state)
+        return cls(change_scale=change_scale, level_delta=level_delta, state=state)
 
     def to_dict(self) -> dict[str, Any]:
         return {
-            "frame_change": self.frame_change,
+            "change_scale": self.change_scale,
             "level_delta": self.level_delta,
             "state": self.state,
         }
@@ -143,8 +153,20 @@ class EpistemicLedger:
         hypothesis_id = _bounded_text(
             raw.get("hypothesis_id"), "epistemic hypothesis_id", max_length=80
         )
+        if hypothesis_id == "STABLE_ID" or "<" in hypothesis_id or ">" in hypothesis_id:
+            raise ValueError("epistemic hypothesis_id must replace the schema placeholder")
         rule = _bounded_text(raw.get("rule"), "epistemic rule", max_length=400)
+        normalized_rule = " ".join(rule.casefold().split())
+        if (
+            normalized_rule in _PLACEHOLDER_RULES
+            or "<" in rule
+            or ">" in rule
+            or "..." in rule
+        ):
+            raise ValueError("epistemic rule must be a concrete falsifiable claim, not placeholder text")
         scope = _bounded_text(raw.get("scope"), "epistemic scope", max_length=120)
+        if scope == "APPLICABILITY" or "<" in scope or ">" in scope:
+            raise ValueError("epistemic scope must replace the schema placeholder")
         replaces = _bounded_text(
             raw.get("replaces", ""), "epistemic replaces", max_length=80, required=False
         )
@@ -161,10 +183,31 @@ class EpistemicLedger:
                 raise ValueError(
                     "a refuted or superseded hypothesis requires a new hypothesis_id"
                 )
-            if replaces and replaces != existing.replaces:
+            if replaces != existing.replaces:
                 raise ValueError("an existing epistemic hypothesis cannot change replaces")
-        elif len(self.hypotheses) >= self.max_hypotheses:
-            raise ValueError("epistemic ledger hypothesis limit reached")
+        else:
+            normalized_scope = " ".join(scope.casefold().split())
+            duplicate = next(
+                (
+                    item
+                    for item in self.hypotheses.values()
+                    if " ".join(item.rule.casefold().split()) == normalized_rule
+                    and " ".join(item.scope.casefold().split()) == normalized_scope
+                ),
+                None,
+            )
+            if duplicate is not None:
+                if duplicate.status in _LIVE_STATUSES:
+                    raise ValueError(
+                        "duplicate live epistemic rule; reuse hypothesis_id "
+                        f"{duplicate.hypothesis_id!r} to accumulate evidence"
+                    )
+                raise ValueError(
+                    f"epistemic rule matches {duplicate.status} hypothesis "
+                    f"{duplicate.hypothesis_id!r}; revise the rule instead of reviving it"
+                )
+            if len(self.hypotheses) >= self.max_hypotheses:
+                raise ValueError("epistemic ledger hypothesis limit reached")
 
         if replaces:
             if replaces == hypothesis_id:
@@ -186,7 +229,9 @@ class EpistemicLedger:
         self,
         prepared: PreparedPrediction,
         *,
-        frame_changed: bool,
+        change_scale: str,
+        changed_cells: int,
+        total_cells: int,
         level_delta: int,
         state: str,
     ) -> dict[str, Any]:
@@ -203,9 +248,15 @@ class EpistemicLedger:
             self.hypotheses[hypothesis.hypothesis_id] = hypothesis
 
         actual_state = _bounded_text(state, "epistemic actual state", max_length=20).upper()
-        expected_changed = prepared.predicts.frame_change == "changed"
+        actual_change_scale = _bounded_text(
+            change_scale,
+            "epistemic actual change_scale",
+            max_length=20,
+        ).lower()
+        if actual_change_scale not in _CHANGE_SCALE_VALUES:
+            raise ValueError("epistemic actual change_scale is invalid")
         matched = (
-            bool(frame_changed) == expected_changed
+            actual_change_scale == prepared.predicts.change_scale
             and int(level_delta) == prepared.predicts.level_delta
             and (not prepared.predicts.state or actual_state == prepared.predicts.state)
         )
@@ -238,7 +289,9 @@ class EpistemicLedger:
             "matched": matched,
             "expected": prepared.predicts.to_dict(),
             "actual": {
-                "frame_change": "changed" if frame_changed else "unchanged",
+                "change_scale": actual_change_scale,
+                "changed_cells": int(changed_cells),
+                "total_cells": int(total_cells),
                 "level_delta": int(level_delta),
                 "state": actual_state,
             },
@@ -283,7 +336,7 @@ class EpistemicLedger:
             if item.status not in _LIVE_STATUSES
         ]
         return {
-            "policy": "prediction_gated_episode_v1",
+            "policy": "prediction_gated_episode_v2",
             "active_hypotheses": active,
             "suppressed_hypotheses": suppressed,
             "last_evaluation": dict(self._last_evaluation or {}),
@@ -295,10 +348,11 @@ class EpistemicLedger:
             status_counts[hypothesis.status] = status_counts.get(hypothesis.status, 0) + 1
         return {
             "enabled": True,
-            "policy": "prediction_gated_episode_v1",
+            "policy": "prediction_gated_episode_v2",
             "verification_threshold": self.verification_threshold,
             "hypotheses": len(self.hypotheses),
             "status_counts": dict(sorted(status_counts.items())),
+            "supported_hypotheses": status_counts.get("supported", 0),
             "predictions": self.predictions,
             "predictions_matched": self.predictions_matched,
             "prediction_accuracy": (

@@ -10,7 +10,7 @@ def _claim(
     *,
     rule: str = "action1 advances the marker",
     replaces: str = "",
-    frame_change: str = "changed",
+    change_scale: str = "local",
     level_delta: int = 0,
     state: str = "NOT_FINISHED",
 ) -> dict:
@@ -20,18 +20,20 @@ def _claim(
         "scope": "current level",
         "replaces": replaces,
         "predicts": {
-            "frame_change": frame_change,
+            "change_scale": change_scale,
             "level_delta": level_delta,
             "state": state,
         },
     }
 
 
-def _resolve(ledger: EpistemicLedger, raw: dict, *, changed: bool = True):
+def _resolve(ledger: EpistemicLedger, raw: dict, *, change_scale: str = "local"):
     prepared = ledger.prepare(raw, action="action1")
     return ledger.resolve(
         prepared,
-        frame_changed=changed,
+        change_scale=change_scale,
+        changed_cells=1 if change_scale != "none" else 0,
+        total_cells=100,
         level_delta=0,
         state="NOT_FINISHED",
     )
@@ -46,12 +48,13 @@ def test_hypothesis_requires_two_observed_matches_before_support():
     assert first["matched"] is True and first["status"] == "open"
     assert second["matched"] is True and second["status"] == "supported"
     assert ledger.public_metrics()["prediction_accuracy"] == 1.0
+    assert ledger.public_metrics()["supported_hypotheses"] == 1
 
 
 def test_surprise_refutes_claim_and_hides_rule_from_working_set():
     ledger = EpistemicLedger()
 
-    result = _resolve(ledger, _claim("wrong"), changed=False)
+    result = _resolve(ledger, _claim("wrong"), change_scale="none")
     view = ledger.working_view()
 
     assert result["matched"] is False and result["status"] == "refuted"
@@ -84,7 +87,7 @@ def test_candidate_that_later_fails_is_counted_without_suppressing_old_claim():
     replacement = _claim("new", rule="action1 always changes the frame", replaces="old")
 
     _resolve(ledger, replacement)
-    failed = _resolve(ledger, replacement, changed=False)
+    failed = _resolve(ledger, replacement, change_scale="none")
 
     assert failed["status"] == "refuted"
     assert ledger.hypotheses["old"].status == "open"
@@ -107,6 +110,27 @@ def test_replacement_must_reference_existing_hypothesis():
 
     with pytest.raises(ValueError, match="reference an existing"):
         ledger.prepare(_claim("new", replaces="missing"), action="action1")
+
+
+def test_placeholder_and_duplicate_live_rules_are_rejected():
+    ledger = EpistemicLedger()
+
+    with pytest.raises(ValueError, match="placeholder"):
+        ledger.prepare(_claim("h1", rule="bounded public rule"), action="action1")
+    with pytest.raises(ValueError, match="schema placeholder"):
+        ledger.prepare(_claim("STABLE_ID"), action="action1")
+
+    _resolve(ledger, _claim("h1"))
+    with pytest.raises(ValueError, match="reuse hypothesis_id 'h1'"):
+        ledger.prepare(_claim("h2"), action="action1")
+
+
+def test_exact_refuted_rule_cannot_be_revived_under_a_new_id():
+    ledger = EpistemicLedger()
+    _resolve(ledger, _claim("wrong"), change_scale="none")
+
+    with pytest.raises(ValueError, match="matches refuted hypothesis 'wrong'"):
+        ledger.prepare(_claim("same-wrong-rule"), action="action1")
 
 
 def test_reset_removes_episode_state_and_metrics():

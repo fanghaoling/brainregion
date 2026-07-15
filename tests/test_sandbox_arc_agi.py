@@ -6,11 +6,12 @@ from dataclasses import dataclass
 
 import pytest
 
-from brainregion.sandbox.envs.arc_agi import ArcAgiEnv
+from brainregion.sandbox.envs.arc_agi import ArcAgiEnv, _frame_change_summary
 from brainregion.sandbox.epistemic_ledger import EpistemicLedger
 from brainregion.sandbox.isolation import cleanup_run_dir, make_run_dir
 from brainregion.sandbox.loop import ToolCall, dispatch_tool, run_agent, scoped_env
 from brainregion.sandbox.task import SandboxTask
+from brainregion.sandbox.cli import run_arc_env
 from brainregion.cli import build_parser
 
 
@@ -99,6 +100,22 @@ class _Backend:
         return _Response(json.dumps({"thought": "environment won", "done": True, "answer": "done"}))
 
 
+def test_frame_change_summary_is_resolution_relative():
+    before = [[0 for _x in range(10)] for _y in range(10)]
+
+    def changed_frame(count: int) -> _Frame:
+        after = [row[:] for row in before]
+        for index in range(count):
+            after[index // 10][index % 10] = 1
+        return _Frame(grid=after)
+
+    initial = _Frame(grid=before)
+    assert _frame_change_summary(initial, changed_frame(0)) == (0, 100, "none")
+    assert _frame_change_summary(initial, changed_frame(2)) == (2, 100, "local")
+    assert _frame_change_summary(initial, changed_frame(10)) == (10, 100, "regional")
+    assert _frame_change_summary(initial, changed_frame(30)) == (30, 100, "global")
+
+
 def test_arc_adapter_encodes_frame_and_dynamic_action_contract_without_sdk_import():
     wrapper = _Wrapper(_Frame(), [_Action("ACTION1"), _Action("ACTION6", complex_action=True)], [])
     env = ArcAgiEnv(wrapper=wrapper, game_id="fake")
@@ -148,6 +165,8 @@ def test_arc_adapter_validates_complex_data_and_tracks_level_reward():
             "action": "action6",
             "uses_data": True,
             "frame_changed": False,
+            "changed_cells": 0,
+            "change_scale": "none",
             "frame_hash": env.action_trace[0]["frame_hash"],
             "state": "WIN",
             "levels_completed": 2,
@@ -209,6 +228,7 @@ def test_arc_env_cli_is_explicit_and_bounded():
     assert args.max_cost_usd == 0.05
     assert args.thinking == "off"
     assert args.epistemic_ledger is False
+    assert args.epistemic_transcript_lifecycle == "full"
 
 
 def test_run_agent_does_not_require_gridworld_private_position():
@@ -304,7 +324,7 @@ def _epistemic_claim(hypothesis_id: str = "h1") -> dict:
         "scope": "current level",
         "replaces": "",
         "predicts": {
-            "frame_change": "changed",
+            "change_scale": "local",
             "level_delta": 0,
             "state": "NOT_FINISHED",
         },
@@ -394,7 +414,13 @@ def test_arc_epistemic_prompt_is_opt_in_and_keeps_runtime_authority():
     prompt = treatment.build_system_prompt("go")
     assert "args must also contain an epistemic object" in prompt
     assert "The runtime, not you, decides" in prompt
-    assert '"args":{"action":"action1","epistemic":' in prompt
+    assert "Reuse the same hypothesis_id" in prompt
+    assert "copying its rule and scope exactly" in prompt
+    assert "local for at most 2%" in prompt
+    assert "global for more than 25%" in prompt
+    assert "bounded public rule" not in prompt
+    assert '"tool":"act"' in prompt
+    assert '"epistemic":{"hypothesis_id":"STABLE_ID"' in prompt
 
 
 def test_arc_cli_enables_episode_local_epistemic_ledger_explicitly():
@@ -405,7 +431,26 @@ def test_arc_cli_enables_episode_local_epistemic_ledger_explicitly():
             "--main-brain",
             "buzz_anthropic/claude-sonnet-5",
             "--epistemic-ledger",
+            "--epistemic-transcript-lifecycle",
+            "suppress",
         ]
     )
 
     assert args.epistemic_ledger is True
+    assert args.epistemic_transcript_lifecycle == "suppress"
+
+
+def test_arc_cli_rejects_transcript_suppression_without_ledger():
+    args = build_parser().parse_args(
+        [
+            "sandbox",
+            "arc-env",
+            "--main-brain",
+            "fake/model",
+            "--epistemic-transcript-lifecycle",
+            "suppress",
+        ]
+    )
+
+    with pytest.raises(SystemExit, match="requires --epistemic-ledger"):
+        asyncio.run(run_arc_env(args))

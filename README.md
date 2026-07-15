@@ -664,12 +664,21 @@ brain-region sandbox arc-env `
   --epistemic-ledger
 ```
 
-The model attaches one public rule and one observable prediction to each action. The runtime checks frame change,
-level delta, and state; the model cannot mark its own rule as supported. A replacement rule must match at least two
+The model attaches one public rule and one observable prediction to each action. The runtime checks spatial change
+scale, level delta, and state; the model cannot mark its own rule as supported. Placeholder and duplicate live rules
+are rejected so repeated tests accumulate on a stable hypothesis id. A replacement rule must match at least two
 executed transitions before the old rule is superseded. Refuted rule bodies leave the working view while a
 content-free tombstone remains, and the entire ledger is discarded when the episode resets. Reports expose only
 counts and prediction accuracy, not rule text or reasoning. Compare this flag through matched runs; it is an
 experimental scaffold, not a production memory or insight-promotion path.
+
+Change scale is resolution-relative: `none` means zero changed cells, `local` is at most 2% of the frame,
+`regional` is more than 2% and at most 25%, and `global` is more than 25%.
+
+To isolate active suppression from the ledger itself, add
+`--epistemic-transcript-lifecycle suppress` as a separate matched arm. Before the next model request, this mode
+replaces only assistant turns tied to refuted, superseded, or runtime-rejected hypotheses with content-free receipts.
+Open and supported hypotheses remain untouched, and the default `full` mode never rewrites model transcript.
 
 This command is a public-environment architecture probe, not an official ARC-AGI-3 score. It does not encode game
 rules or enable long-term memory, strategy, navigation, or benchmark-specific hints. Add Regions only through matched
