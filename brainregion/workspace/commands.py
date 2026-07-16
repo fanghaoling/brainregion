@@ -16,6 +16,7 @@ from typing import Any
 from brainregion.runtime import emit_event
 
 from .files import _allowed_roots, _is_relative_to, _resolve_target
+from .processes import run_process_tree
 
 DEFAULT_TIMEOUT_SEC = 60
 HARD_TIMEOUT_SEC = 300
@@ -144,32 +145,26 @@ def workspace_run_check(
     started = time.perf_counter()
     timed_out = False
     launch_error: str | None = None
+    process_tree_cleanup = "not_needed"
+    cleanup_error: str | None = None
     exit_code: int | None
     stdout = ""
     stderr = ""
     stdout_truncated = False
     stderr_truncated = False
     try:
-        completed = subprocess.run(
+        completed = run_process_tree(
             command,
             cwd=str(cwd_path),
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             timeout=timeout_sec,
-            shell=False,
             env=os.environ.copy(),
-            check=False,
         )
         exit_code = completed.returncode
+        timed_out = completed.timed_out
+        process_tree_cleanup = completed.cleanup_status
+        cleanup_error = completed.cleanup_error
         stdout, stdout_truncated = _cap_output(completed.stdout, max_output_chars)
         stderr, stderr_truncated = _cap_output(completed.stderr, max_output_chars)
-    except subprocess.TimeoutExpired as exc:
-        timed_out = True
-        exit_code = None
-        stdout, stdout_truncated = _cap_output(exc.stdout, max_output_chars)
-        stderr, stderr_truncated = _cap_output(exc.stderr, max_output_chars)
     except (subprocess.SubprocessError, OSError) as exc:
         # Missing/unrunnable executable or other launch failure: return a clean
         # failed status instead of bubbling up and crashing the MCP call.
@@ -193,6 +188,8 @@ def workspace_run_check(
         "exit_code": exit_code,
         "duration_ms": duration_ms,
         "timed_out": timed_out,
+        "process_tree_cleanup": process_tree_cleanup,
+        "cleanup_error": cleanup_error,
         "launch_error": launch_error,
         "stdout_chars": len(stdout),
         "stderr_chars": len(stderr),
@@ -210,6 +207,8 @@ def workspace_run_check(
         "exit_code": exit_code,
         "duration_ms": duration_ms,
         "timeout_sec": timeout_sec,
+        "process_tree_cleanup": process_tree_cleanup,
+        "cleanup_error": cleanup_error,
         "launch_error": launch_error,
         "stdout": stdout,
         "stderr": stderr,

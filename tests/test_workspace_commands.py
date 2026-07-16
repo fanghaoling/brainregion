@@ -5,6 +5,7 @@ import sys
 import pytest
 
 from brainregion.workspace.commands import workspace_run_check
+from brainregion.workspace.processes import ProcessTreeResult
 
 
 @pytest.fixture()
@@ -111,7 +112,7 @@ def test_workspace_run_check_surfaces_missing_executable(workspace_root, monkeyp
     def boom(*args, **kwargs):
         raise FileNotFoundError("[Errno 2] No such file or directory: 'pytest'")
 
-    monkeypatch.setattr("brainregion.workspace.commands.subprocess.run", boom)
+    monkeypatch.setattr("brainregion.workspace.commands.run_process_tree", boom)
 
     result = workspace_run_check([sys.executable, "-m", "pytest", "--version"])
 
@@ -120,6 +121,26 @@ def test_workspace_run_check_surfaces_missing_executable(workspace_root, monkeyp
     assert result["exit_code"] is None
     assert "FileNotFoundError" in result["launch_error"]
     assert "FileNotFoundError" in result["stderr"]
+
+
+def test_workspace_run_check_reports_process_tree_cleanup(workspace_root, monkeypatch):
+    def timeout(*args, **kwargs):
+        return ProcessTreeResult(
+            returncode=None,
+            stdout="partial output",
+            stderr="",
+            timed_out=True,
+            cleanup_status="terminated",
+        )
+
+    monkeypatch.setattr("brainregion.workspace.commands.run_process_tree", timeout)
+
+    result = workspace_run_check([sys.executable, "-m", "pytest", "-q"])
+
+    assert result["status"] == "timeout"
+    assert result["process_tree_cleanup"] == "terminated"
+    assert result["cleanup_error"] is None
+    assert result["stdout"] == "partial output"
 
 
 def test_server_workspace_run_check_delegates(workspace_root):
