@@ -77,7 +77,11 @@ def _effort_kwargs(model: str, effort: str | None, thinking: bool | None = None)
                 kwargs["extra_body"] = {"output_config": {"effort": effort}}
             return kwargs
         return {}
-    if re.match(r"(?:o[1-9]|gpt-5)", short):
+    if short.startswith("gpt-5"):
+        if thinking is False:
+            return {"reasoning_effort": "none"}
+        return {"reasoning_effort": effort} if effort else {}
+    if re.match(r"o[1-9]", short):
         return {"reasoning_effort": effort} if effort else {}
     return {}
 

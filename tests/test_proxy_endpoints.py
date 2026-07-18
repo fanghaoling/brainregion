@@ -497,6 +497,53 @@ def test_backend_responses_mode_retries_without_json_format(monkeypatch):
     assert "text" not in calls[1]
 
 
+def test_backend_responses_mode_explicitly_disables_gpt5_reasoning(monkeypatch):
+    calls = []
+
+    class _Usage:
+        def model_dump(self):
+            return {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+
+    class _Resp:
+        output_text = "{}"
+        usage = _Usage()
+        _hidden_params = {}
+
+    async def fake_aresponses(**kwargs):
+        calls.append(kwargs)
+        return _Resp()
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "aresponses", fake_aresponses)
+    backend = LiteLLMBackend(
+        endpoint_registry={
+            "r": {
+                "provider": "openai",
+                "base_url": "https://x/v1",
+                "api_key": "k",
+                "headers": {},
+                "timeout": None,
+                "api_mode": "responses",
+            }
+        }
+    )
+
+    response = asyncio.run(
+        backend.complete(
+            model="gpt-5.4-mini",
+            system="s",
+            user="u",
+            endpoint_id="r",
+            thinking=False,
+            effort="high",
+        )
+    )
+
+    assert response.error is None
+    assert calls[0]["reasoning_effort"] == "none"
+
+
 def test_backend_anthropic_prefix(monkeypatch):
     cap = _patch_litellm(monkeypatch)
     reg = {"r": {"provider": "anthropic", "base_url": "https://open.bigmodel.cn/api/anthropic",

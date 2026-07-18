@@ -45,6 +45,16 @@ def test_effort_kwargs_mapping():
     # OpenAI o 系列: reasoning_effort
     assert _effort_kwargs("o3-mini", "high") == {"reasoning_effort": "high"}
     assert _effort_kwargs("o4-mini", "low") == {"reasoning_effort": "low"}
+    assert _effort_kwargs("gpt-5.5", "medium", thinking=True) == {
+        "reasoning_effort": "medium"
+    }
+    assert _effort_kwargs("openai/gpt-5.4-mini", None, thinking=False) == {
+        "reasoning_effort": "none"
+    }
+    assert _effort_kwargs("gpt-5.5", "high", thinking=False) == {
+        "reasoning_effort": "none"
+    }
+    assert _effort_kwargs("gpt-5.5", None, thinking=None) == {}
     # 非推理模型: 不传（litellm 不会报错，effort 无效）
     assert _effort_kwargs("gpt-4o", "high") == {}
     assert _effort_kwargs("zai/glm-5.2", "high") == {}
