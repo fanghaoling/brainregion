@@ -287,6 +287,8 @@ _PROFILE_KEYS = {
     "speed_score",
     "structured_output_score",
     "context_score",
+    "context_window_tokens",
+    "context_window_source",
     "tags",
     "capabilities",
     "notes",
@@ -339,6 +341,17 @@ def _normalize_profile(profile: dict | None) -> dict:
                 normalized[key] = round(max(0.0, min(1.0, float(value))), 3)
             except Exception:  # noqa: BLE001
                 continue
+        elif key == "context_window_tokens":
+            if isinstance(value, bool):
+                continue
+            if isinstance(value, int):
+                parsed = value
+            elif isinstance(value, str) and value.strip().isdigit():
+                parsed = int(value.strip())
+            else:
+                continue
+            if parsed > 0:
+                normalized[key] = parsed
         elif key in ("tags", "capabilities"):
             normalized[key] = _as_profile_list(value)
         elif key in _PROFILE_KEYS or key == "profile_source":
@@ -354,13 +367,16 @@ def _merge_profiles(*profiles: dict | None) -> dict:
         if not normalized:
             continue
         source = normalized.pop("profile_source", None)
-        if source:
-            sources.extend(_as_profile_list(source))
+        source_labels = _as_profile_list(source)
+        if source_labels:
+            sources.extend(source_labels)
         for key, value in normalized.items():
             if key in ("tags", "capabilities"):
                 merged[key] = _as_profile_list(merged.get(key, []) + _as_profile_list(value))
             else:
                 merged[key] = value
+                if key == "context_window_tokens" and source_labels:
+                    merged["context_window_source"] = source_labels[-1]
     if sources:
         merged["profile_source"] = _as_profile_list(sources)
     return merged

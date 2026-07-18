@@ -218,6 +218,28 @@ def test_empty_expert_view_requests_context_without_calling_model():
     assert board.inbox("expert-task")["count"] == 0
 
 
+def test_expert_reports_when_workspace_view_was_truncated_before_model_call():
+    workspace, board = _runtime("Evidence that cannot fit behind a one-token view budget.")
+    backend = _Backend(_response())
+
+    result = asyncio.run(
+        RegionExpertEngine(backend=backend).run(
+            workspace=workspace,
+            coordination=board,
+            task_id="expert-task",
+            region="debugging",
+            task="Inspect the bounded evidence.",
+            model="expert-model",
+            max_context_tokens=1,
+        )
+    ).to_dict()
+
+    assert result["model_called"] is False
+    assert result["context"]["estimated_tokens"] == 0
+    assert result["context"]["truncated"] is True
+    assert backend.calls == []
+
+
 def test_expert_reads_and_reports_only_its_assignment_channel():
     workspace = CognitiveWorkspace()
     board = RegionCoordinationBoard()

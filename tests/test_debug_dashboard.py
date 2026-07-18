@@ -2,9 +2,11 @@ from __future__ import annotations
 
 from brainregion.viz.debug_server import (
     DebugDashboardOptions,
+    build_context_pressure_payload,
     build_debug_dashboard_html,
     build_model_calls_payload,
     build_snapshot_payload,
+    summarize_context_pressure_events,
     summarize_model_events,
 )
 
@@ -29,10 +31,13 @@ def test_debug_dashboard_html_is_self_contained():
     assert "/api/events/stream" in html
     assert "/api/events?limit=50" in html
     assert "/api/models?limit=5000&recent=20" in html
+    assert "/api/context-pressure?limit=5000&recent=20" in html
     assert "模型调用面板" in html
     assert "model-summary" in html
     assert "model-rows" in html
     assert "recent-model-calls" in html
+    assert "context-pressure-summary" in html
+    assert "context-pressure-rows" in html
     assert "function esc" in html
     assert "esc(r.region)" in html
     assert "esc(tools)" in html
@@ -182,6 +187,121 @@ def test_build_model_calls_payload_reads_runtime_events(monkeypatch):
     assert payload["debug"]["event_limit"] == 50
     assert payload["debug"]["recent_limit"] == 3
     assert payload["totals"]["started_calls"] == 1
+
+
+def test_context_pressure_summary_groups_content_free_region_model_samples():
+    events = [
+        {
+            "sequence": 4,
+            "timestamp": "2026-01-01T00:00:04Z",
+            "type": "context.pressure_observed",
+            "task_id": "task-1",
+            "assignment_id": "debug-1",
+            "region_id": "debugging",
+            "model": "expert-model",
+            "endpoint_id": "relay",
+            "payload": {
+                "region": "debugging",
+                "model": "expert-model",
+                "endpoint_id": "relay",
+                "pressure_score": 0.72,
+                "pressure_band": "strained",
+                "context_fill_ratio": 0.9,
+                "model_window_fill_ratio": 0.65,
+                "model_capacity_known": True,
+                "model_called": True,
+                "context_truncated": True,
+                "input_tokens": 650,
+                "high_pressure_streak": 1,
+                "signals": ["context_truncated"],
+                "context_content_returned": False,
+            },
+        },
+        {
+            "sequence": 5,
+            "timestamp": "2026-01-01T00:00:05Z",
+            "type": "context.pressure_observed",
+            "task_id": "task-2",
+            "assignment_id": "debug-2",
+            "region_id": "debugging",
+            "model": "expert-model",
+            "endpoint_id": "relay",
+            "payload": {
+                "region": "debugging",
+                "model": "expert-model",
+                "endpoint_id": "relay",
+                "pressure_score": 0.2,
+                "pressure_band": "normal",
+                "context_fill_ratio": 0.3,
+                "model_window_fill_ratio": 0.2,
+                "model_capacity_known": True,
+                "model_called": True,
+                "context_truncated": False,
+                "input_tokens": 200,
+                "high_pressure_streak": 0,
+                "signals": [],
+                "context_content_returned": False,
+            },
+        },
+    ]
+
+    payload = summarize_context_pressure_events(events, recent_limit=1)
+
+    assert payload["totals"] == {
+        "sample_count": 2,
+        "high_pressure_samples": 1,
+        "truncation_count": 1,
+        "capacity_known_count": 2,
+        "model_call_count": 2,
+        "capacity_coverage_rate": 1.0,
+    }
+    row = payload["region_models"][0]
+    assert row["region"] == "debugging"
+    assert row["sample_count"] == 2
+    assert row["peak_pressure_score"] == 0.72
+    assert row["latest_pressure_band"] == "normal"
+    assert payload["recent"][0]["assignment_id"] == "debug-2"
+    assert payload["contains_context_content"] is False
+
+
+def test_build_context_pressure_payload_reads_runtime_events(monkeypatch):
+    captured = {}
+
+    def fake_list_events(*, after_sequence, limit):
+        captured["after_sequence"] = after_sequence
+        captured["limit"] = limit
+        return []
+
+    monkeypatch.setattr("brainregion.viz.debug_server.list_events", fake_list_events)
+
+    payload = build_context_pressure_payload(
+        {"after": ["8"], "limit": ["60"], "recent": ["4"]}
+    )
+
+    assert captured == {"after_sequence": 8, "limit": 60}
+    assert payload["debug"]["recent_limit"] == 4
+    assert payload["totals"]["sample_count"] == 0
+
+
+def test_context_pressure_capacity_coverage_ignores_skipped_model_calls():
+    events = [
+        {
+            "sequence": 1,
+            "type": "context.pressure_observed",
+            "payload": {
+                "region": "planning",
+                "model": "expert-model",
+                "model_called": False,
+                "model_capacity_known": True,
+            },
+        }
+    ]
+
+    payload = summarize_context_pressure_events(events)
+
+    assert payload["totals"]["capacity_known_count"] == 0
+    assert payload["totals"]["model_call_count"] == 0
+    assert payload["totals"]["capacity_coverage_rate"] is None
 
 
 def test_cli_debug_subcommand_wires_to_dashboard(monkeypatch):

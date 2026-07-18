@@ -18,6 +18,23 @@ from .delegation import (
     summarize_delegation_records,
 )
 from .runner import DEFAULT_VARIANTS, build_engines, run_eval
+from .context_pressure import (
+    CONTEXT_PRESSURE_ARMS,
+    ContextPressureProbeSpec,
+    render_context_pressure_eval_summary,
+    render_context_stability_summary,
+    run_context_pressure_eval,
+    run_context_stability_control,
+    summarize_context_pressure_records,
+    summarize_context_stability_records,
+)
+from .context_interference import (
+    CONTEXT_INTERFERENCE_ARMS,
+    MemoryInterferenceSpec,
+    render_context_interference_summary,
+    run_context_interference_eval,
+    summarize_context_interference_records,
+)
 from .schema import (
     BlindJudgement,
     EvalCaseRecord,
@@ -38,8 +55,21 @@ __all__ = [
     "run_delegation_eval",
     "summarize_delegation_records",
     "DEFAULT_VARIANTS",
+    "CONTEXT_PRESSURE_ARMS",
+    "ContextPressureProbeSpec",
+    "CONTEXT_INTERFERENCE_ARMS",
+    "MemoryInterferenceSpec",
+    "render_context_interference_summary",
+    "render_context_pressure_eval_summary",
+    "render_context_stability_summary",
     "build_engines",
     "run_eval",
+    "run_context_pressure_eval",
+    "run_context_stability_control",
+    "run_context_interference_eval",
+    "summarize_context_interference_records",
+    "summarize_context_pressure_records",
+    "summarize_context_stability_records",
     "BlindJudgement",
     "EvalCaseRecord",
     "EvalLedgerEntry",

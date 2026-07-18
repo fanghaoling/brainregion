@@ -28,6 +28,12 @@ from .context_loader import (
     estimate_context_tokens,
     load_activation_context,
 )
+from .context_pressure import (
+    ContextPressureBand,
+    ContextPressureObserver,
+    ContextPressureSample,
+    disabled_context_pressure_metrics,
+)
 from .cognitive_workspace import CognitiveWorkspace, WorkspaceDelivery, WorkspaceView
 from .region_reporting import (
     EscalationPolicy,
@@ -68,6 +74,10 @@ __all__ = [
     "plan_activation",
     "ActivatedContext",
     "ContextLoadRecord",
+    "ContextPressureBand",
+    "ContextPressureObserver",
+    "ContextPressureSample",
+    "disabled_context_pressure_metrics",
     "CognitiveWorkspace",
     "WorkspaceDelivery",
     "EscalationPolicy",

@@ -723,6 +723,83 @@ def build_parser() -> argparse.ArgumentParser:
         help="在 suppression 最早生效前精确共享的模型回合数",
     )
     p_sb_rule_shift_eval.add_argument("--out", default=None, help="报告目录")
+    p_sb_context_pressure = p_sb_sub.add_parser(
+        "context-pressure-eval",
+        help="Explicit bounded low/high synthetic context-recall A/B",
+    )
+    p_sb_context_pressure.add_argument(
+        "--main-brain", default=None, help="Model route under test"
+    )
+    p_sb_context_pressure.add_argument(
+        "--context-window-tokens",
+        type=int,
+        default=None,
+        help="Verified capacity override; otherwise read the resolved model profile",
+    )
+    p_sb_context_pressure.add_argument("--repeats", type=int, default=2)
+    p_sb_context_pressure.add_argument("--low-fill-ratio", type=float, default=0.05)
+    p_sb_context_pressure.add_argument("--high-fill-ratio", type=float, default=0.25)
+    p_sb_context_pressure.add_argument(
+        "--needle-positions",
+        default="middle",
+        help="Comma-separated early,middle,late positions",
+    )
+    p_sb_context_pressure.add_argument(
+        "--max-probe-tokens", type=int, default=32000
+    )
+    p_sb_context_pressure.add_argument(
+        "--max-total-probe-tokens", type=int, default=100000
+    )
+    p_sb_context_pressure.add_argument("--max-tokens", type=int, default=128)
+    p_sb_context_pressure.add_argument("--out", default=None, help="Report directory")
+    p_sb_context_stability = p_sb_sub.add_parser(
+        "context-stability-control",
+        help="Repeat one identical synthetic prompt to detect request-order drift",
+    )
+    p_sb_context_stability.add_argument(
+        "--main-brain", default=None, help="Model route under test"
+    )
+    p_sb_context_stability.add_argument(
+        "--target-input-tokens", type=int, default=2000
+    )
+    p_sb_context_stability.add_argument("--repeats", type=int, default=3)
+    p_sb_context_stability.add_argument(
+        "--needle-position",
+        default="middle",
+        choices=["early", "middle", "late"],
+    )
+    p_sb_context_stability.add_argument(
+        "--context-window-tokens",
+        type=int,
+        default=None,
+        help="Optional verified capacity for pressure ratios; not required",
+    )
+    p_sb_context_stability.add_argument(
+        "--max-total-probe-tokens", type=int, default=10000
+    )
+    p_sb_context_stability.add_argument("--max-tokens", type=int, default=128)
+    p_sb_context_stability.add_argument("--out", default=None, help="Report directory")
+    p_sb_context_interference = p_sb_sub.add_parser(
+        "context-interference-eval",
+        help="Matched clean versus stale/similar memory interference A/B",
+    )
+    p_sb_context_interference.add_argument(
+        "--main-brain", default=None, help="Model route under test"
+    )
+    p_sb_context_interference.add_argument(
+        "--target-input-tokens", type=int, default=4000
+    )
+    p_sb_context_interference.add_argument("--repeats", type=int, default=3)
+    p_sb_context_interference.add_argument(
+        "--max-total-probe-tokens", type=int, default=30000
+    )
+    p_sb_context_interference.add_argument("--max-tokens", type=int, default=128)
+    p_sb_context_interference.add_argument(
+        "--load-match-tolerance", type=float, default=0.05
+    )
+    p_sb_context_interference.add_argument(
+        "--out", default=None, help="Report directory"
+    )
     p_sb_env.add_argument("--wall-density", type=float, default=None,
                           help="随机墙密度(0..0.6,占可放格比例;启用需配 --wall-seed)")
     p_sb_env.add_argument("--wall-seed", type=int, default=None,
@@ -1385,6 +1462,12 @@ def main() -> None:
             asyncio.run(sandbox_cli.run_rule_shift(args))
         elif args.sandbox_command == "rule-shift-eval":
             asyncio.run(sandbox_cli.run_rule_shift_evaluation(args))
+        elif args.sandbox_command == "context-pressure-eval":
+            asyncio.run(sandbox_cli.run_context_pressure_evaluation(args))
+        elif args.sandbox_command == "context-stability-control":
+            asyncio.run(sandbox_cli.run_context_stability_evaluation(args))
+        elif args.sandbox_command == "context-interference-eval":
+            asyncio.run(sandbox_cli.run_context_interference_evaluation(args))
         elif args.sandbox_command == "env-eval":
             asyncio.run(sandbox_cli.run_env_eval(args))
         elif args.sandbox_command == "delivery-eval":

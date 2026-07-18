@@ -81,6 +81,7 @@ class AssignmentExpertResult:
                 "context": {
                     "blocks_used": 0,
                     "estimated_tokens": 0,
+                    "truncated": False,
                     "private_context_returned": False,
                 },
                 "usage": {},

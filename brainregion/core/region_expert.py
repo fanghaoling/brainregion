@@ -160,6 +160,7 @@ class RegionExpertResult:
     parse_ok: bool
     error: str
     model_called: bool
+    context_truncated: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -172,6 +173,7 @@ class RegionExpertResult:
             "context": {
                 "blocks_used": self.context_blocks_used,
                 "estimated_tokens": self.context_tokens_estimated,
+                "truncated": self.context_truncated,
                 "private_context_returned": False,
             },
             "usage": dict(self.usage),
@@ -269,6 +271,7 @@ class RegionExpertEngine:
                 parse_ok=True,
                 error="",
                 model_called=False,
+                context_truncated=bool(view.trace.get("truncated")),
             )
 
         allowed_refs = _evidence_refs(view.blocks)
@@ -306,6 +309,7 @@ class RegionExpertEngine:
                 parse_ok=False,
                 error=f"model_error: {getattr(response, 'error', '')}"[:240],
                 model_called=True,
+                context_truncated=bool(view.trace.get("truncated")),
             )
 
         report_data = _parse_report(getattr(response, "content", "") or "")
@@ -404,6 +408,7 @@ class RegionExpertEngine:
             parse_ok=True,
             error="",
             model_called=True,
+            context_truncated=bool(view.trace.get("truncated")),
         )
 
     @staticmethod
@@ -434,6 +439,7 @@ class RegionExpertEngine:
             parse_ok=False,
             error=error,
             model_called=True,
+            context_truncated=bool(view.trace.get("truncated")),
         )
 
 

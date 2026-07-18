@@ -92,7 +92,8 @@ Endpoint `models` can be plain strings or objects with optional profile metadata
           "tags": ["cheap", "fast"],
           "quality_score": 0.65,
           "cost_score": 0.9,
-          "speed_score": 0.85
+          "speed_score": 0.85,
+          "context_window_tokens": 128000
         }
       ]
     }
@@ -112,7 +113,8 @@ bare model name or an endpoint ref:
       "cost": "high",
       "tags": ["deep_reasoning", "architecture"],
       "quality_score": 0.98,
-      "cost_score": 0.2
+      "cost_score": 0.2,
+      "context_window_tokens": 200000
     }
   }
 }
@@ -120,6 +122,38 @@ bare model name or an endpoint ref:
 
 Profiles are descriptive preflight metadata for humans and schedulers. `suggest_panel` can rank configured routes from
 these scores and tags, returning a `selected_panel` without calling models or automatically executing downstream tools.
+`context_window_tokens` is optional and must be an explicitly verified positive integer. BrainRegion does not infer it
+from a model name; when absent, context-pressure telemetry reports model capacity as unknown.
+
+An explicit low/high synthetic recall probe can use the resolved capacity without copying it into another table:
+
+```powershell
+brain-region sandbox context-pressure-eval --main-brain modelbridge_anthropic/claude-opus-4-8
+```
+
+This command calls the selected model and may incur cost. Its bounded defaults use one middle-position needle and a
+planned input-token guard; increase positions, ratios, or token caps only for an intentional long-context pilot.
+
+Before interpreting a low/high result, check request-order repeatability with an identical-prompt control. This control
+does not require a known model capacity:
+
+```powershell
+brain-region sandbox context-stability-control --main-brain modelbridge_anthropic/claude-opus-4-8
+```
+
+A passing stability control means repeated identical requests produced consistent correctness, parse/error state, and
+input-token accounting. It does not prove long-context quality. When a config file lives outside the standard lookup
+paths, set `BRAIN_REGION_CONFIG` for the CLI process explicitly.
+
+To test memory selection rather than raw context length, run the matched semantic-interference A/B:
+
+```powershell
+brain-region sandbox context-interference-eval --main-brain modelbridge_anthropic/claude-opus-4-8
+```
+
+The clean and interference arms have matched target lengths and alternate execution order. The interference arm adds
+stale, unverified, and similar-case memories. Reports retain only correctness, evidence-selection, usage, latency, and
+cost metrics; generated memory contents and model responses are not persisted.
 
 ## Common Failures
 

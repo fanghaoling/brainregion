@@ -67,6 +67,7 @@ def test_describe_model_routes_includes_profiles_and_warnings(monkeypatch):
                 "activation_role": "awake",
                 "tags": ["architecture"],
                 "quality_score": 0.98,
+                "context_window_tokens": "180000",
             }
         },
         "endpoints": {
@@ -80,6 +81,7 @@ def test_describe_model_routes_includes_profiles_and_warnings(monkeypatch):
                         "tier": "flagship",
                         "cost": "high",
                         "latency": "medium",
+                        "context_window_tokens": 200000,
                     }
                 ],
             }
@@ -95,9 +97,33 @@ def test_describe_model_routes_includes_profiles_and_warnings(monkeypatch):
     assert endpoint["route_type"] == "configured_endpoint"
     assert endpoint["profile"]["activation_role"] == "awake"
     assert endpoint["profile"]["quality_score"] == 0.98
+    assert endpoint["profile"]["context_window_tokens"] == 200000
+    assert endpoint["profile"]["context_window_source"] == "endpoint_model"
     assert "architecture" in endpoint["profile"]["tags"]
     assert routes["endpoints"][0]["model_profiles"][0]["profile"]["tier"] == "flagship"
     assert routes["warnings"][0]["type"] == "bare_model_has_endpoint_ref"
+
+
+def test_model_profile_ignores_invalid_context_window_capacity():
+    defaults = {
+        "panel": ["relay/model-a", "relay/model-b", "relay/model-c"],
+        "endpoints": {
+            "relay": {
+                "models": [
+                    {"id": "model-a", "context_window_tokens": 0},
+                    {"id": "model-b", "context_window_tokens": True},
+                    {"id": "model-c", "context_window_tokens": 12.5},
+                ]
+            }
+        },
+    }
+
+    routes = _describe_model_routes(None, defaults, panel_source="test")
+
+    assert all(
+        "context_window_tokens" not in route["profile"]
+        for route in routes["resolved_panel"]
+    )
 
 
 def test_describe_model_routes_reports_missing_key_and_duplicate_endpoint_models(monkeypatch):

@@ -19,7 +19,17 @@ from typing import Any
 from brainregion import defaults as _defaults_mod
 from brainregion.providers.litellm import LiteLLMBackend
 from brainregion.runtime import merge_usage, normalize_usage
-from brainregion.server import _normalize_one, _resolve_endpoints
+from brainregion.server import _describe_model_routes, _normalize_one, _resolve_endpoints
+from brainregion.eval.context_pressure import (
+    render_context_pressure_eval_summary,
+    render_context_stability_summary,
+    run_context_pressure_eval,
+    run_context_stability_control,
+)
+from brainregion.eval.context_interference import (
+    render_context_interference_summary,
+    run_context_interference_eval,
+)
 
 from .delegation_eval import (
     SandboxExpertSpec,
@@ -100,6 +110,53 @@ def _build_backend(
 def _resolve_main_brain(model_str: str, registry: dict, dd: dict[str, Any]) -> tuple[str, str | None]:
     entry = _normalize_one(model_str, set(registry.keys()), dd.get("endpoints"))
     return entry["model"], entry.get("endpoint_id")
+
+
+def _context_window_for_model(
+    dd: dict[str, Any],
+    *,
+    model: str,
+    endpoint_id: str | None,
+    override: int | None,
+) -> tuple[int, str]:
+    if override is not None:
+        return int(override), "cli_override"
+    ref = f"{endpoint_id}/{model}" if endpoint_id else model
+    routes = _describe_model_routes(
+        [ref],
+        dd,
+        panel_source="context_pressure_eval",
+    )
+    route = routes["resolved_panel"][0]
+    profile = route.get("profile") or {}
+    limit = profile.get("context_window_tokens")
+    if not isinstance(limit, int) or isinstance(limit, bool) or limit <= 0:
+        raise ValueError(
+            f"model route {ref!r} has no verified context_window_tokens; "
+            "configure its model profile or pass --context-window-tokens"
+        )
+    source = str(profile.get("context_window_source") or "resolved_model_profile")
+    return limit, source
+
+
+def _optional_context_window_for_model(
+    dd: dict[str, Any],
+    *,
+    model: str,
+    endpoint_id: str | None,
+    override: int | None,
+) -> tuple[int | None, str]:
+    if override is not None:
+        return int(override), "cli_override"
+    try:
+        return _context_window_for_model(
+            dd,
+            model=model,
+            endpoint_id=endpoint_id,
+            override=None,
+        )
+    except ValueError:
+        return None, "unknown"
 
 
 def _resolve_orthogonal(
@@ -1195,6 +1252,122 @@ async def run_rule_shift_evaluation(args: argparse.Namespace) -> dict[str, Any]:
     out = args.out or Path(".brain-region") / "rule-shift" / "evals"
     path = write_report(report, out)
     print(render_rule_shift_eval_summary(report))
+    print(f"\nReport: {path}")
+    return {"report": report, "path": str(path)}
+
+
+async def run_context_pressure_evaluation(args: argparse.Namespace) -> dict[str, Any]:
+    """Run an explicit bounded synthetic context-recall A/B."""
+
+    dd = _defaults_mod.apply()
+    model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
+    if not model_str:
+        raise SystemExit("--main-brain is required (or configure sandbox_main_brain)")
+    backend, registry = _build_backend(
+        dd,
+        endpoint_ids=_endpoint_ids_for_refs(dd, [model_str]),
+    )
+    model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
+    try:
+        context_window_tokens, capacity_source = _context_window_for_model(
+            dd,
+            model=model,
+            endpoint_id=endpoint_id,
+            override=args.context_window_tokens,
+        )
+        report = await run_context_pressure_eval(
+            backend,
+            model,
+            endpoint_id=endpoint_id,
+            context_window_tokens=context_window_tokens,
+            repeats=int(args.repeats),
+            low_fill_ratio=float(args.low_fill_ratio),
+            high_fill_ratio=float(args.high_fill_ratio),
+            needle_positions=tuple(
+                part.strip() for part in args.needle_positions.split(",") if part.strip()
+            ),
+            max_probe_tokens=int(args.max_probe_tokens),
+            max_total_probe_tokens=int(args.max_total_probe_tokens),
+            max_tokens=int(args.max_tokens),
+            context_window_source=capacity_source,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    out = args.out or Path(".brain-region") / "context-pressure" / "evals"
+    path = write_report(report, out)
+    print(render_context_pressure_eval_summary(report))
+    print(f"\nReport: {path}")
+    return {"report": report, "path": str(path)}
+
+
+async def run_context_stability_evaluation(args: argparse.Namespace) -> dict[str, Any]:
+    """Run an identical-prompt request-order stability control."""
+
+    dd = _defaults_mod.apply()
+    model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
+    if not model_str:
+        raise SystemExit("--main-brain is required (or configure sandbox_main_brain)")
+    backend, registry = _build_backend(
+        dd,
+        endpoint_ids=_endpoint_ids_for_refs(dd, [model_str]),
+    )
+    model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
+    try:
+        context_window_tokens, capacity_source = _optional_context_window_for_model(
+            dd,
+            model=model,
+            endpoint_id=endpoint_id,
+            override=args.context_window_tokens,
+        )
+        report = await run_context_stability_control(
+            backend,
+            model,
+            endpoint_id=endpoint_id,
+            target_input_tokens=int(args.target_input_tokens),
+            repeats=int(args.repeats),
+            needle_position=args.needle_position,
+            reference_context_window_tokens=context_window_tokens,
+            max_total_probe_tokens=int(args.max_total_probe_tokens),
+            max_tokens=int(args.max_tokens),
+            context_window_source=capacity_source,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    out = args.out or Path(".brain-region") / "context-pressure" / "stability"
+    path = write_report(report, out)
+    print(render_context_stability_summary(report))
+    print(f"\nReport: {path}")
+    return {"report": report, "path": str(path)}
+
+
+async def run_context_interference_evaluation(args: argparse.Namespace) -> dict[str, Any]:
+    """Run a matched clean-memory versus interference-memory A/B."""
+
+    dd = _defaults_mod.apply()
+    model_str = args.main_brain or dd.get("sandbox_main_brain") or ""
+    if not model_str:
+        raise SystemExit("--main-brain is required (or configure sandbox_main_brain)")
+    backend, registry = _build_backend(
+        dd,
+        endpoint_ids=_endpoint_ids_for_refs(dd, [model_str]),
+    )
+    model, endpoint_id = _resolve_main_brain(model_str, registry, dd)
+    try:
+        report = await run_context_interference_eval(
+            backend,
+            model,
+            endpoint_id=endpoint_id,
+            repeats=int(args.repeats),
+            target_input_tokens=int(args.target_input_tokens),
+            max_total_probe_tokens=int(args.max_total_probe_tokens),
+            max_tokens=int(args.max_tokens),
+            load_match_tolerance=float(args.load_match_tolerance),
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    out = args.out or Path(".brain-region") / "context-pressure" / "interference"
+    path = write_report(report, out)
+    print(render_context_interference_summary(report))
     print(f"\nReport: {path}")
     return {"report": report, "path": str(path)}
 

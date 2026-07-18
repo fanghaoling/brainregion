@@ -313,6 +313,149 @@ def build_model_calls_payload(params: dict[str, list[str]] | None = None) -> dic
     return data
 
 
+def summarize_context_pressure_events(
+    events: list[dict[str, Any]],
+    *,
+    recent_limit: int = 20,
+) -> dict[str, Any]:
+    """Aggregate content-free context pressure observations by region and model."""
+    pressure_events = [
+        event for event in events if event.get("type") == "context.pressure_observed"
+    ]
+    grouped: dict[tuple[str, str, str], dict[str, Any]] = {}
+    totals = {
+        "sample_count": len(pressure_events),
+        "high_pressure_samples": 0,
+        "truncation_count": 0,
+        "capacity_known_count": 0,
+        "model_call_count": 0,
+    }
+    recent: list[dict[str, Any]] = []
+    for event in sorted(
+        pressure_events, key=lambda item: int(item.get("sequence", 0) or 0)
+    ):
+        payload = _event_payload(event)
+        region = str(payload.get("region") or event.get("region_id") or "unknown")
+        model = str(payload.get("model") or event.get("model") or "unknown")
+        endpoint = str(payload.get("endpoint_id") or event.get("endpoint_id") or "")
+        key = (region, model, endpoint)
+        band = str(payload.get("pressure_band") or "normal")
+        high_pressure = band in {"strained", "saturated"}
+        totals["high_pressure_samples"] += int(high_pressure)
+        totals["truncation_count"] += int(bool(payload.get("context_truncated")))
+        model_called = bool(payload.get("model_called"))
+        totals["capacity_known_count"] += int(
+            model_called and bool(payload.get("model_capacity_known"))
+        )
+        totals["model_call_count"] += int(model_called)
+        stats = grouped.setdefault(
+            key,
+            {
+                "region": region,
+                "model": model,
+                "endpoint_id": endpoint or None,
+                "sample_count": 0,
+                "high_pressure_samples": 0,
+                "truncation_count": 0,
+                "peak_pressure_score": 0.0,
+                "last_sequence": 0,
+            },
+        )
+        stats["sample_count"] += 1
+        stats["high_pressure_samples"] += int(high_pressure)
+        stats["truncation_count"] += int(bool(payload.get("context_truncated")))
+        pressure_score = _safe_float(payload.get("pressure_score")) or 0.0
+        stats["peak_pressure_score"] = max(
+            float(stats["peak_pressure_score"]), pressure_score
+        )
+        stats.update(
+            {
+                "latest_pressure_score": pressure_score,
+                "latest_pressure_band": band,
+                "context_fill_ratio": payload.get("context_fill_ratio"),
+                "model_window_fill_ratio": payload.get(
+                    "model_window_fill_ratio"
+                ),
+                "model_capacity_known": bool(
+                    payload.get("model_capacity_known")
+                ),
+                "input_tokens": _safe_int(payload.get("input_tokens")),
+                "high_pressure_streak": _safe_int(
+                    payload.get("high_pressure_streak")
+                ),
+                "signals": list(payload.get("signals") or ()),
+                "last_sequence": int(event.get("sequence", 0) or 0),
+                "last_seen": event.get("timestamp"),
+            }
+        )
+    rows = sorted(
+        grouped.values(),
+        key=lambda item: (
+            float(item.get("latest_pressure_score") or 0.0),
+            int(item.get("last_sequence") or 0),
+        ),
+        reverse=True,
+    )
+    for event in sorted(
+        pressure_events,
+        key=lambda item: int(item.get("sequence", 0) or 0),
+        reverse=True,
+    )[: max(1, recent_limit)]:
+        payload = _event_payload(event)
+        recent.append(
+            {
+                "sequence": event.get("sequence"),
+                "timestamp": event.get("timestamp"),
+                "task_id": event.get("task_id"),
+                "assignment_id": event.get("assignment_id"),
+                "region": payload.get("region") or event.get("region_id"),
+                "model": payload.get("model") or event.get("model"),
+                "endpoint_id": payload.get("endpoint_id")
+                or event.get("endpoint_id"),
+                "pressure_score": payload.get("pressure_score"),
+                "pressure_band": payload.get("pressure_band"),
+                "context_fill_ratio": payload.get("context_fill_ratio"),
+                "model_window_fill_ratio": payload.get(
+                    "model_window_fill_ratio"
+                ),
+                "input_tokens": payload.get("input_tokens"),
+                "signals": list(payload.get("signals") or ()),
+            }
+        )
+    totals["capacity_coverage_rate"] = (
+        totals["capacity_known_count"] / totals["model_call_count"]
+        if totals["model_call_count"]
+        else None
+    )
+    return {
+        "ok": True,
+        "mode": "shadow",
+        "totals": totals,
+        "region_models": rows,
+        "recent": recent,
+        "score_interpretation": "risk_proxy_not_measured_model_fatigue",
+        "contains_context_content": False,
+    }
+
+
+def build_context_pressure_payload(
+    params: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    params = params or {}
+    after = _nonnegative_int_param(params, "after", 0)
+    limit = min(_int_param(params, "limit", 5000), 5000)
+    recent_limit = min(_int_param(params, "recent", 20), 200)
+    events = list_events(after_sequence=after, limit=limit)
+    data = summarize_context_pressure_events(events, recent_limit=recent_limit)
+    data["debug"] = {
+        "generated_at_ms": int(time.time() * 1000),
+        "after_sequence": after,
+        "event_limit": limit,
+        "recent_limit": recent_limit,
+    }
+    return data
+
+
 def build_snapshot_payload(options: DebugDashboardOptions, params: dict[str, list[str]] | None = None) -> dict[str, Any]:
     params = params or {}
     gold_raw = _first(params, "gold_regions", ",".join(options.gold_regions))
@@ -657,6 +800,24 @@ pre {{
     </section>
     <section style="margin-top: 12px;">
       <h2>脑区状态</h2>
+      <h3>上下文压力（只读影子指标）</h3>
+      <div id="context-pressure-summary" class="grid"></div>
+      <div class="table-wrap" style="margin: 10px 0 14px;">
+        <table>
+          <thead>
+            <tr>
+              <th>脑区 / 模型</th>
+              <th>状态</th>
+              <th class="num">压力</th>
+              <th class="num">私有上下文</th>
+              <th class="num">模型窗口</th>
+              <th class="num">输入 Token</th>
+              <th>信号</th>
+            </tr>
+          </thead>
+          <tbody id="context-pressure-rows"></tbody>
+        </table>
+      </div>
       <div id="regions" class="regions"></div>
     </section>
     <section style="margin-top: 12px;">
@@ -791,6 +952,32 @@ function renderModelCalls(data) {{
     </tr>`;
   }}).join("") : `<tr><td colspan="6" class="small">还没有最近调用</td></tr>`;
 }}
+function renderContextPressure(data) {{
+  const totals = data.totals || {{}};
+  const coverage = totals.capacity_coverage_rate;
+  const items = [
+    ["观察样本", fmtInt(totals.sample_count || 0)],
+    ["高压力", fmtInt(totals.high_pressure_samples || 0)],
+    ["发生截断", fmtInt(totals.truncation_count || 0)],
+    ["容量覆盖", coverage == null ? "未知" : `${{Math.round(Number(coverage) * 100)}}%`],
+  ];
+  $("context-pressure-summary").innerHTML = items.map(([label, value]) => `<div class="metric"><span class="small">${{esc(label)}}</span><b>${{esc(value)}}</b></div>`).join("");
+  const ratioText = (value) => value == null ? "未知" : `${{Math.round(Number(value) * 100)}}%`;
+  const rows = data.region_models || [];
+  $("context-pressure-rows").innerHTML = rows.length ? rows.map((row) => {{
+    const route = row.endpoint_id ? `${{row.endpoint_id}}/${{row.model}}` : row.model;
+    const signals = (row.signals || []).join(", ") || "-";
+    return `<tr>
+      <td><div class="model-name">${{esc(row.region || "unknown")}}</div><div class="small">${{esc(route || "unknown")}}</div></td>
+      <td>${{esc(row.latest_pressure_band || "normal")}}</td>
+      <td class="num">${{esc(Number(row.latest_pressure_score || 0).toFixed(2))}}</td>
+      <td class="num">${{esc(ratioText(row.context_fill_ratio))}}</td>
+      <td class="num">${{esc(ratioText(row.model_window_fill_ratio))}}</td>
+      <td class="num">${{fmtInt(row.input_tokens || 0)}}</td>
+      <td>${{esc(signals)}}</td>
+    </tr>`;
+  }}).join("") : `<tr><td colspan="7" class="small">还没有脑区上下文压力样本</td></tr>`;
+}}
 function renderRegions(snapshot) {{
   const regions = snapshot.regions || [];
   $("regions").innerHTML = regions.map((r) => {{
@@ -810,6 +997,7 @@ function renderRegions(snapshot) {{
 let lastEventSequence = 0;
 const eventWindow = [];
 let modelRefreshPending = false;
+let contextPressureRefreshPending = false;
 function pushEvent(event) {{
   const seq = Number(event.sequence || 0);
   if (seq && seq <= lastEventSequence) return;
@@ -818,6 +1006,7 @@ function pushEvent(event) {{
   while (eventWindow.length > 100) eventWindow.pop();
   renderEvents();
   if (String(event.type || "").startsWith("model.call")) scheduleModelRefresh();
+  if (String(event.type || "") === "context.pressure_observed") scheduleContextPressureRefresh();
 }}
 function renderEvents() {{
   const box = $("events");
@@ -864,6 +1053,24 @@ async function loadModelCalls() {{
     $("model-summary").innerHTML = `<div class="metric"><span class="small">模型面板错误</span><b>${{esc(String(err))}}</b></div>`;
   }}
 }}
+function scheduleContextPressureRefresh() {{
+  if (contextPressureRefreshPending) return;
+  contextPressureRefreshPending = true;
+  setTimeout(() => {{
+    contextPressureRefreshPending = false;
+    loadContextPressure();
+  }}, 150);
+}}
+async function loadContextPressure() {{
+  if (paused) return;
+  try {{
+    const res = await fetch("/api/context-pressure?limit=5000&recent=20", {{cache: "no-store"}});
+    if (!res.ok) throw new Error(`HTTP ${{res.status}}`);
+    renderContextPressure(await res.json());
+  }} catch (err) {{
+    $("context-pressure-summary").innerHTML = `<div class="metric"><span class="small">上下文压力面板错误</span><b>${{esc(String(err))}}</b></div>`;
+  }}
+}}
 function connectEvents() {{
   if (!window.EventSource) {{
     pushEvent({{type: "dashboard.sse_unavailable", payload: {{"message": "EventSource unavailable"}}}});
@@ -905,9 +1112,11 @@ loadInitialEvents().then(connectEvents);
 timer = setInterval(() => {{
   loadSnapshot();
   loadModelCalls();
+  loadContextPressure();
 }}, refreshMs);
 loadSnapshot();
 loadModelCalls();
+loadContextPressure();
 </script>
 </body>
 </html>"""
@@ -959,6 +1168,13 @@ class _DebugHandler(BaseHTTPRequestHandler):
             return
         if parsed.path == "/api/models":
             self._send_json(build_model_calls_payload(parse_qs(parsed.query, keep_blank_values=True)))
+            return
+        if parsed.path == "/api/context-pressure":
+            self._send_json(
+                build_context_pressure_payload(
+                    parse_qs(parsed.query, keep_blank_values=True)
+                )
+            )
             return
         if parsed.path == "/api/snapshot":
             try:

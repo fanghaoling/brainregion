@@ -90,7 +90,8 @@ list_model_routes(panel=[
           "tags": ["cheap", "fast"],
           "quality_score": 0.65,
           "cost_score": 0.9,
-          "speed_score": 0.85
+          "speed_score": 0.85,
+          "context_window_tokens": 128000
         }
       ]
     }
@@ -109,7 +110,8 @@ list_model_routes(panel=[
       "cost": "high",
       "tags": ["deep_reasoning", "architecture"],
       "quality_score": 0.98,
-      "cost_score": 0.2
+      "cost_score": 0.2,
+      "context_window_tokens": 200000
     }
   }
 }
@@ -117,6 +119,34 @@ list_model_routes(panel=[
 
 Profile 是给人和 scheduler 看的 preflight 元数据。`suggest_panel` 可以根据这些评分和标签对已配置的模型路由排序，
 返回 `selected_panel`，但不会调用模型，也不会自动执行后续工具。
+`context_window_tokens` 是可选字段，必须填写经过核实的正整数。BrainRegion 不会根据模型名称猜测容量；未配置时，
+上下文压力遥测会明确将模型窗口容量标记为未知。
+
+可以用下面的显式命令直接读取 resolved profile 的容量，执行低/高上下文合成召回实验，无需再维护一份容量表：
+
+```powershell
+brain-region sandbox context-pressure-eval --main-brain modelbridge_anthropic/claude-opus-4-8
+```
+
+该命令会真实调用选定模型并产生费用。默认只测试 middle 位置，并带有计划输入 token 护栏；只有在有意进行长上下文
+pilot 时才应提高位置数量、负载比例或 token 上限。
+
+解释 low/high 结果前，应先用完全相同的 prompt 检查请求顺序重复性。这个控制实验不要求已知模型窗口容量：
+
+```powershell
+brain-region sandbox context-stability-control --main-brain modelbridge_anthropic/claude-opus-4-8
+```
+
+稳定性控制通过，只表示相同请求的正确性、解析/错误状态和 input-token 计数一致，并不证明模型具备长上下文能力。
+如果配置文件不在标准查找路径中，需要为 CLI 进程显式设置 `BRAIN_REGION_CONFIG`。
+
+要测试模型选择记忆的能力，而不只是测试上下文长度，可以运行等负载的语义干扰 A/B：
+
+```powershell
+brain-region sandbox context-interference-eval --main-brain modelbridge_anthropic/claude-opus-4-8
+```
+
+`clean_memory` 与 `interference_memory` 使用相同的目标长度，并交替执行顺序。干扰臂会加入过期记忆、未经验证的假设和相似任务记忆。报告只保存答案与证据选择是否正确、token、延迟和成本，不保存生成的记忆内容或模型响应。
 
 ## 常见错误
 
