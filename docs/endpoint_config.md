@@ -25,6 +25,31 @@ Use this for `/v1/chat/completions` APIs with `Authorization: Bearer ...`.
 }
 ```
 
+## Responses API Gateways
+
+Some OpenAI-compatible gateways expose GPT/Codex models only through
+`/v1/responses`. Set `api_mode` explicitly for those endpoint IDs:
+
+```json
+{
+  "endpoints": {
+    "responses_relay": {
+      "provider": "openai",
+      "base_url": "https://relay.example/v1",
+      "api_key_env": "RELAY_KEY",
+      "api_mode": "responses",
+      "models": ["gpt-5.5"]
+    }
+  }
+}
+```
+
+`api_mode` defaults to `chat_completions`; the only other supported value is
+`responses`. Responses calls preserve the message history, request JSON output,
+set `store=false`, and expose their transport mode through `list_model_routes`
+and model-call telemetry. Keep separate endpoint IDs when one gateway requires
+different wire APIs for different model groups.
+
 ## Anthropic-Compatible Gateways
 
 Use this for `/v1/messages` APIs with `x-api-key` and `anthropic-version`.

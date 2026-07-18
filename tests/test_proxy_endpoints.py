@@ -64,6 +64,43 @@ def test_resolve_endpoints_headers_timeout():
     assert reg["r"]["timeout"] == 120
 
 
+def test_resolve_endpoints_api_mode_defaults_and_responses(monkeypatch):
+    monkeypatch.setenv("RELAY_KEY", "secret")
+    reg = _resolve_endpoints(
+        {
+            "chat": {
+                "provider": "openai",
+                "base_url": "https://chat.example/v1",
+                "api_key_env": "RELAY_KEY",
+            },
+            "response": {
+                "provider": "openai",
+                "base_url": "https://response.example/v1",
+                "api_key_env": "RELAY_KEY",
+                "api_mode": "responses",
+            },
+        }
+    )
+
+    assert reg["chat"]["api_mode"] == "chat_completions"
+    assert reg["response"]["api_mode"] == "responses"
+
+
+def test_resolve_endpoints_rejects_unknown_api_mode(monkeypatch):
+    monkeypatch.setenv("RELAY_KEY", "secret")
+    with pytest.raises(ValueError, match="api_mode"):
+        _resolve_endpoints(
+            {
+                "relay": {
+                    "provider": "openai",
+                    "base_url": "https://relay.example/v1",
+                    "api_key_env": "RELAY_KEY",
+                    "api_mode": "completions",
+                }
+            }
+        )
+
+
 # ===== _normalize_panel / _normalize_one =====
 
 def test_normalize_panel_str_official():
@@ -348,6 +385,116 @@ def test_backend_openai_prefix_and_passthrough(monkeypatch):
     assert kw["model"] == "openai/glm-4"  # openai 前缀
     assert kw["api_base"] == "https://x/v1"  # snake_case
     assert kw["api_key"] == "k"
+
+
+def test_backend_responses_mode_uses_responses_api(monkeypatch):
+    calls = []
+    emitted = []
+
+    class _Usage:
+        def model_dump(self):
+            return {"input_tokens": 80, "output_tokens": 20, "total_tokens": 100}
+
+    class _Resp:
+        output_text = '{"thought":"done","done":true,"answer":"ok"}'
+        usage = _Usage()
+        _hidden_params = {"response_cost": 0.002}
+
+    async def fake_aresponses(**kwargs):
+        calls.append(kwargs)
+        return _Resp()
+
+    async def fail_acompletion(**_kwargs):
+        raise AssertionError("chat completions must not be used")
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "aresponses", fake_aresponses)
+    monkeypatch.setattr(litellm, "acompletion", fail_acompletion)
+    monkeypatch.setattr(
+        "brainregion.providers.litellm.emit_event",
+        lambda event_type, **fields: emitted.append((event_type, fields)),
+    )
+    reg = {
+        "r": {
+            "provider": "openai",
+            "base_url": "https://x/v1",
+            "api_key": "k",
+            "headers": {},
+            "timeout": None,
+            "api_mode": "responses",
+        }
+    }
+    backend = LiteLLMBackend(endpoint_registry=reg)
+
+    response = asyncio.run(
+        backend.complete_messages(
+            [{"role": "system", "content": "s"}, {"role": "user", "content": "u"}],
+            model="gpt-5.5",
+            endpoint_id="r",
+            max_tokens=512,
+            thinking=True,
+            effort="medium",
+        )
+    )
+
+    assert response.content == _Resp.output_text
+    assert response.usage["total_tokens"] == 100
+    assert response.cost_usd == 0.002
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["model"] == "openai/gpt-5.5"
+    assert call["input"][1]["content"] == "u"
+    assert call["api_base"] == "https://x/v1"
+    assert call["api_key"] == "k"
+    assert call["max_output_tokens"] == 512
+    assert call["store"] is False
+    assert call["reasoning_effort"] == "medium"
+    assert call["text"] == {"format": {"type": "json_object"}}
+    assert emitted[0][1]["payload"]["api_mode"] == "responses"
+
+
+def test_backend_responses_mode_retries_without_json_format(monkeypatch):
+    calls = []
+
+    class _Usage:
+        def model_dump(self):
+            return {"input_tokens": 1, "output_tokens": 1, "total_tokens": 2}
+
+    class _Resp:
+        output_text = "{}"
+        usage = _Usage()
+        _hidden_params = {}
+
+    async def fake_aresponses(**kwargs):
+        calls.append(kwargs)
+        if kwargs.get("text"):
+            raise ValueError("response_format json format is unsupported")
+        return _Resp()
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "aresponses", fake_aresponses)
+    reg = {
+        "r": {
+            "provider": "openai",
+            "base_url": "https://x/v1",
+            "api_key": "k",
+            "headers": {},
+            "timeout": None,
+            "api_mode": "responses",
+        }
+    }
+    backend = LiteLLMBackend(endpoint_registry=reg)
+
+    response = asyncio.run(
+        backend.complete(model="gpt-5.5", system="s", user="u", endpoint_id="r")
+    )
+
+    assert response.error is None
+    assert len(calls) == 2
+    assert "text" in calls[0]
+    assert "text" not in calls[1]
 
 
 def test_backend_anthropic_prefix(monkeypatch):

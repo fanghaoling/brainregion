@@ -35,6 +35,7 @@ def _defaults_for_suggest_panel():
                 "provider": "openai",
                 "base_url": "https://relay.example/v1",
                 "api_key_env": "RELAY_KEY",
+                "api_mode": "responses",
                 "models": ["cheap-mini", "deep-opus"],
             },
         },
@@ -56,6 +57,16 @@ def test_normalize_panel_accepts_endpoint_model_objects():
         {"label": "relay/cheap-model", "model": "cheap-model", "endpoint_id": "relay"},
         {"label": "relay/flagship-model", "model": "flagship-model", "endpoint_id": "relay"},
     ]
+
+
+def test_describe_model_routes_exposes_endpoint_api_mode(monkeypatch):
+    monkeypatch.setenv("RELAY_KEY", "secret")
+    defaults = _defaults_for_suggest_panel()
+
+    routes = _describe_model_routes(["relay/cheap-mini"], defaults)
+
+    assert routes["resolved_panel"][0]["api_mode"] == "responses"
+    assert routes["endpoints"][0]["api_mode"] == "responses"
 
 
 def test_describe_model_routes_includes_profiles_and_warnings(monkeypatch):

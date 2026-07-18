@@ -77,7 +77,7 @@ def _effort_kwargs(model: str, effort: str | None, thinking: bool | None = None)
                 kwargs["extra_body"] = {"output_config": {"effort": effort}}
             return kwargs
         return {}
-    if re.match(r"o[1-9]", short):  # o1/o3/o4/o5 系列
+    if re.match(r"(?:o[1-9]|gpt-5)", short):
         return {"reasoning_effort": effort} if effort else {}
     return {}
 
@@ -115,8 +115,10 @@ class LiteLLMBackend:
         # credential 只存活在 backend 边缘（调用时查 registry），不进 PipelineContext。
         self.endpoint_registry = endpoint_registry or {}
 
-    def _resolve_endpoint(self, model: str, endpoint_id: str | None) -> tuple[str, dict, float, str | None]:
-        """返回 (litellm_model, ep_kwargs, call_timeout, provider_for_event)。"""
+    def _resolve_endpoint(
+        self, model: str, endpoint_id: str | None
+    ) -> tuple[str, dict, float, str | None, str]:
+        """Resolve model, credentials, timeout, provider, and wire API mode."""
         ep = self.endpoint_registry.get(endpoint_id) if endpoint_id else None
         litellm_model = model
         ep_kwargs: dict = {}
@@ -135,7 +137,8 @@ class LiteLLMBackend:
                 ep_kwargs["extra_headers"] = ep["headers"]
         call_timeout = ep.get("timeout") if ep and ep.get("timeout") else self.timeout
         provider_for_event = (ep or {}).get("provider")
-        return litellm_model, ep_kwargs, call_timeout, provider_for_event
+        api_mode = str((ep or {}).get("api_mode") or "chat_completions")
+        return litellm_model, ep_kwargs, call_timeout, provider_for_event, api_mode
 
     @staticmethod
     def _sampling_for(litellm_model: str, temperature: float, top_p: float, effort: str | None, thinking: bool | None) -> dict:
@@ -188,6 +191,48 @@ class LiteLLMBackend:
                 return await litellm.acompletion(**base_kwargs)
             raise
 
+    async def _aresponses_with_fallback(
+        self,
+        messages: list[dict],
+        *,
+        litellm_model: str,
+        sampling: dict,
+        max_tokens: int,
+        call_timeout: float,
+        ep_kwargs: dict,
+        effort: str | None,
+        thinking: bool | None,
+    ) -> object:
+        """Call the Responses API and retry without JSON mode if rejected."""
+        litellm = _load_litellm()
+
+        litellm.drop_params = True
+        base_kwargs = dict(
+            model=litellm_model,
+            input=messages,
+            num_retries=self.num_retries,
+            timeout=call_timeout,
+            max_output_tokens=max_tokens,
+            store=False,
+            **sampling,
+            **_effort_kwargs(litellm_model, effort, thinking),
+            **{k: v for k, v in ep_kwargs.items() if v is not None},
+        )
+        try:
+            if self.response_format:
+                return await litellm.aresponses(
+                    text={"format": self.response_format}, **base_kwargs
+                )
+            return await litellm.aresponses(**base_kwargs)
+        except Exception as exc:  # noqa: BLE001
+            if self.response_format and _is_json_format_rejection(exc):
+                logger.info(
+                    "Responses API rejected JSON format; retrying as text model=%s",
+                    litellm_model,
+                )
+                return await litellm.aresponses(**base_kwargs)
+            raise
+
     async def _acomplete(
         self,
         *,
@@ -200,7 +245,13 @@ class LiteLLMBackend:
         endpoint_id: str | None,
         thinking: bool | None = None,
     ) -> ModelResponse:
-        litellm_model, ep_kwargs, call_timeout, provider_for_event = self._resolve_endpoint(model, endpoint_id)
+        (
+            litellm_model,
+            ep_kwargs,
+            call_timeout,
+            provider_for_event,
+            api_mode,
+        ) = self._resolve_endpoint(model, endpoint_id)
         sampling = self._sampling_for(litellm_model, temperature, top_p, effort, thinking)
 
         emit_event(
@@ -214,23 +265,37 @@ class LiteLLMBackend:
                 "thinking": thinking,
                 "max_tokens": max_tokens,
                 "timeout": call_timeout,
+                "api_mode": api_mode,
             },
         )
         started = time.perf_counter()
         try:
-            resp = await self._acompletion_with_fallback(
-                messages,
-                litellm_model=litellm_model,
-                sampling=sampling,
-                max_tokens=max_tokens,
-                call_timeout=call_timeout,
-                ep_kwargs=ep_kwargs,
-                effort=effort,
-                thinking=thinking,
-            )
+            if api_mode == "responses":
+                resp = await self._aresponses_with_fallback(
+                    messages,
+                    litellm_model=litellm_model,
+                    sampling=sampling,
+                    max_tokens=max_tokens,
+                    call_timeout=call_timeout,
+                    ep_kwargs=ep_kwargs,
+                    effort=effort,
+                    thinking=thinking,
+                )
+                content = str(getattr(resp, "output_text", "") or "")
+            else:
+                resp = await self._acompletion_with_fallback(
+                    messages,
+                    litellm_model=litellm_model,
+                    sampling=sampling,
+                    max_tokens=max_tokens,
+                    call_timeout=call_timeout,
+                    ep_kwargs=ep_kwargs,
+                    effort=effort,
+                    thinking=thinking,
+                )
+                content = resp.choices[0].message.content or ""
             usage = resp.usage.model_dump() if getattr(resp, "usage", None) else {}
             hp = getattr(resp, "_hidden_params", None) or {}
-            content = resp.choices[0].message.content or ""
             latency_ms = round((time.perf_counter() - started) * 1000, 3)
             cost_usd = hp.get("response_cost")
             usage_payload = model_usage_payload(

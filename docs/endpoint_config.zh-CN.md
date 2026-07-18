@@ -25,6 +25,26 @@ BrainRegion（`brain-region-mcp`）同时支持官方 LiteLLM 模型字符串和
 }
 ```
 
+## Responses API 中转站
+
+有些 OpenAI 兼容网关只允许 GPT/Codex 模型通过 `/v1/responses` 调用。应为这类 endpoint 显式设置 `api_mode`：
+
+```json
+{
+  "endpoints": {
+    "responses_relay": {
+      "provider": "openai",
+      "base_url": "https://relay.example/v1",
+      "api_key_env": "RELAY_KEY",
+      "api_mode": "responses",
+      "models": ["gpt-5.5"]
+    }
+  }
+}
+```
+
+`api_mode` 默认为 `chat_completions`，另一个可选值是 `responses`。Responses 调用会保留消息历史、请求 JSON 输出、显式设置 `store=false`，并在 `list_model_routes` 和模型调用遥测中显示传输模式。如果同一网关的不同模型组要求不同 API，应拆成不同 endpoint ID。
+
 ## Anthropic 兼容中转站
 
 适用于 `/v1/messages`，认证方式通常是 `x-api-key` 和 `anthropic-version`。

@@ -151,6 +151,12 @@ def _resolve_endpoints(cfg: dict) -> dict:
         base_url = ep.get("base_url")
         if not base_url:
             raise ValueError(f"endpoint {eid!r} 缺 base_url")
+        api_mode = str(ep.get("api_mode") or "chat_completions").strip()
+        if api_mode not in ("chat_completions", "responses"):
+            raise ValueError(
+                f"endpoint {eid!r} api_mode must be chat_completions|responses, "
+                f"got {api_mode!r}"
+            )
         api_key = None
         env_name = ep.get("api_key_env")
         if env_name:
@@ -167,6 +173,7 @@ def _resolve_endpoints(cfg: dict) -> dict:
             "api_key": api_key,
             "headers": ep.get("headers") or {},
             "timeout": ep.get("timeout"),
+            "api_mode": api_mode,
         }
     return registry
 
@@ -511,6 +518,7 @@ def _configured_endpoint_models(endpoints_cfg: dict) -> list[dict]:
                 "base_url": ep.get("base_url"),
                 "api_key_env": ep.get("api_key_env") or "",
                 "api_key_status": _endpoint_key_status(ep),
+                "api_mode": ep.get("api_mode") or "chat_completions",
                 "models": models,
                 "model_refs": [f"{eid}/{model}" for model in models],
                 "model_profiles": [
@@ -642,6 +650,7 @@ def _describe_model_routes(panel: list | None, defaults: dict, *, panel_source: 
                 "base_url": ep.get("base_url"),
                 "api_key_env": ep.get("api_key_env") or "",
                 "api_key_status": _endpoint_key_status(ep),
+                "api_mode": ep.get("api_mode") or "chat_completions",
                 "profile": _model_profile(
                     model=model,
                     label=entry["label"],
