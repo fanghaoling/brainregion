@@ -13,6 +13,10 @@ Memory is never injected directly into the main model. The main model receives o
 verify it against repository files and tests. Reports do not persist source, memory, model responses, diffs, tool results,
 or reasoning content.
 
+Reports retain content-free main-brain diagnostics: operation counts, error-kind counts, unique-target count, and how many
+responses reached the configured output-token cap. These distinguish navigation/inspection stalls from parser failures
+without storing paths, tool output, or model text.
+
 ## Task Spec
 
 ```json
@@ -23,7 +27,11 @@ or reasoning content.
   "base_ref": "tasks/parser-regression",
   "test_args": ["tests/test_parser.py", "-q"],
   "bootstrap_commands": [],
-  "expert_context_paths": ["src/parser.py", "tests/test_parser.py"],
+  "expert_context_paths": [
+    {"path": "src/parser.py", "start_line": 40, "end_line": 140},
+    "tests/test_parser.py"
+  ],
+  "protected_paths": ["tests/test_parser.py"],
   "seed_memory": [
     {
       "id": "parser-wrapper-lesson",
@@ -37,6 +45,12 @@ or reasoning content.
 
 `expert_context_paths` is an allowlist. Paths outside the worktree, missing files, duplicate paths, oversized files, and
 oversized aggregate context fail before an expert call. Memory is selected deterministically by exact region or `shared`.
+An entry may be an object with inclusive `start_line` and `end_line` bounds so a large source file can be staged without
+spending the expert's context budget on unrelated sections.
+
+`protected_paths` is required. The harness snapshots these files after bootstrap and marks a run unsolved when the main
+model changes or deletes any of them, even if pytest turns green. Historical replay tasks therefore cannot pass by
+weakening their regression tests.
 
 ## Run
 

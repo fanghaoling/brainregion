@@ -350,6 +350,7 @@ def _load_worktree_task(path: str) -> WorktreeTask:
         test_args=data.get("test_args", ["-q"]),
         bootstrap_commands=data.get("bootstrap_commands"),
         expert_context_paths=data.get("expert_context_paths", []),
+        protected_paths=data.get("protected_paths", []),
         seed_memory=data.get("seed_memory", []),
         gold_diff=data.get("gold_diff", ""),
         notes=data.get("notes", ""),

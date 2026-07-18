@@ -42,7 +42,8 @@ class WorktreeTask:
     base_ref: str = "HEAD"
     test_args: list[str] = field(default_factory=lambda: ["-q"])
     bootstrap_commands: list[list[str]] | None = None
-    expert_context_paths: list[str] = field(default_factory=list)
+    expert_context_paths: list[str | dict[str, Any]] = field(default_factory=list)
+    protected_paths: list[str] = field(default_factory=list)
     seed_memory: list[dict[str, Any]] = field(default_factory=list)
     gold_diff: str = ""
     notes: str = ""

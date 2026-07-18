@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import sys
 import time
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -39,6 +41,7 @@ _MAX_CONTEXT_PATHS = 16
 _MAX_CONTEXT_FILE_CHARS = 64_000
 _MAX_CONTEXT_TOTAL_CHARS = 256_000
 _MAX_MEMORY_RECORDS = 24
+_MAX_PROTECTED_PATHS = 32
 
 
 @dataclass(frozen=True)
@@ -67,7 +70,69 @@ def _positive_int(value: Any, name: str) -> int:
     return value
 
 
-def _safe_source_blocks(root: str, paths: list[str]) -> tuple[ContextBlock, ...]:
+def _protected_path_snapshot(root: str, paths: list[str]) -> dict[str, str]:
+    if not paths:
+        raise ValueError("protected_paths cannot be empty")
+    if len(paths) > _MAX_PROTECTED_PATHS:
+        raise ValueError(f"protected_paths cannot exceed {_MAX_PROTECTED_PATHS}")
+    root_path = Path(root).resolve()
+    snapshot: dict[str, str] = {}
+    for raw_path in paths:
+        relative = str(raw_path or "").strip().replace("\\", "/")
+        if not relative or relative in snapshot:
+            raise ValueError("protected_paths must be non-empty and unique")
+        candidate = (root_path / relative).resolve()
+        try:
+            candidate.relative_to(root_path)
+        except ValueError as exc:
+            raise ValueError(f"protected path escapes worktree: {relative!r}") from exc
+        if not candidate.is_file():
+            raise ValueError(f"protected path is not a file: {relative!r}")
+        snapshot[relative] = hashlib.sha256(candidate.read_bytes()).hexdigest()
+    return snapshot
+
+
+def _protected_path_integrity(
+    root: str, baseline: dict[str, str]
+) -> tuple[bool, int]:
+    root_path = Path(root).resolve()
+    modified = 0
+    for relative, expected_sha in baseline.items():
+        candidate = (root_path / relative).resolve()
+        if not candidate.is_file():
+            modified += 1
+            continue
+        actual_sha = hashlib.sha256(candidate.read_bytes()).hexdigest()
+        modified += int(actual_sha != expected_sha)
+    return modified == 0, modified
+
+
+def _trajectory_diagnostics(trajectory: Any, *, max_tokens: int) -> dict[str, Any]:
+    progress = trajectory.progress_trace
+    operation_counts = Counter(str(item.get("operation") or "model_turn") for item in progress)
+    error_kind_counts = Counter(
+        str(item.get("error_kind") or "unknown")
+        for item in progress
+        if item.get("error")
+    )
+    saturated_output_calls = sum(
+        int(int((step.main_usage or {}).get("output_tokens", 0)) >= max_tokens)
+        for step in trajectory.steps
+    )
+    return {
+        "operation_counts": dict(sorted(operation_counts.items())),
+        "error_kind_counts": dict(sorted(error_kind_counts.items())),
+        "unique_target_count": sum(int(bool(item.get("target_is_new"))) for item in progress),
+        "saturated_output_calls": saturated_output_calls,
+        "output_token_cap": max_tokens,
+        "contains_paths": False,
+        "contains_tool_results": False,
+        "contains_model_content": False,
+        "contains_reasoning": False,
+    }
+
+
+def _safe_source_blocks(root: str, paths: list[Any]) -> tuple[ContextBlock, ...]:
     if not paths:
         raise ValueError("expert_context_paths cannot be empty")
     if len(paths) > _MAX_CONTEXT_PATHS:
@@ -75,10 +140,29 @@ def _safe_source_blocks(root: str, paths: list[str]) -> tuple[ContextBlock, ...]
     root_path = Path(root).resolve()
     blocks: list[ContextBlock] = []
     total_chars = 0
-    seen: set[str] = set()
+    seen: set[tuple[str, int | None, int | None]] = set()
     for raw_path in paths:
-        relative = str(raw_path or "").strip().replace("\\", "/")
-        if not relative or relative in seen:
+        start_line: int | None = None
+        end_line: int | None = None
+        if isinstance(raw_path, dict):
+            relative = str(raw_path.get("path") or "").strip().replace("\\", "/")
+            start_line = raw_path.get("start_line")
+            end_line = raw_path.get("end_line")
+            if (
+                isinstance(start_line, bool)
+                or not isinstance(start_line, int)
+                or isinstance(end_line, bool)
+                or not isinstance(end_line, int)
+                or start_line < 1
+                or end_line < start_line
+            ):
+                raise ValueError(
+                    "expert context range requires 1 <= start_line <= end_line"
+                )
+        else:
+            relative = str(raw_path or "").strip().replace("\\", "/")
+        selection_key = (relative, start_line, end_line)
+        if not relative or selection_key in seen:
             raise ValueError("expert_context_paths must be non-empty and unique")
         candidate = (root_path / relative).resolve()
         try:
@@ -88,18 +172,33 @@ def _safe_source_blocks(root: str, paths: list[str]) -> tuple[ContextBlock, ...]
         if not candidate.is_file():
             raise ValueError(f"expert context path is not a file: {relative!r}")
         content = candidate.read_text(encoding="utf-8", errors="replace")
+        if start_line is not None and end_line is not None:
+            lines = content.splitlines(keepends=True)
+            if end_line > len(lines):
+                raise ValueError(
+                    f"expert context range exceeds file length: {relative!r}"
+                )
+            content = "".join(lines[start_line - 1 : end_line])
         if len(content) > _MAX_CONTEXT_FILE_CHARS:
             raise ValueError(f"expert context file exceeds character cap: {relative!r}")
         total_chars += len(content)
         if total_chars > _MAX_CONTEXT_TOTAL_CHARS:
             raise ValueError("expert context files exceed total character cap")
-        seen.add(relative)
+        seen.add(selection_key)
+        line_suffix = (
+            f" (lines {start_line}-{end_line})" if start_line is not None else ""
+        )
         blocks.append(
             ContextBlock(
                 source="worktree",
-                title=f"Repository file: {relative}",
+                title=f"Repository file: {relative}{line_suffix}",
                 content=content,
-                metadata={"path": relative, "kind": "source_snapshot"},
+                metadata={
+                    "path": relative,
+                    "kind": "source_snapshot",
+                    "start_line": start_line,
+                    "end_line": end_line,
+                },
             )
         )
     return tuple(blocks)
@@ -266,6 +365,8 @@ async def run_worktree_memory_eval(
         raise ValueError("main_model cannot be empty")
     if not task.expert_context_paths:
         raise ValueError("worktree memory eval requires expert_context_paths")
+    if not task.protected_paths:
+        raise ValueError("worktree memory eval requires protected_paths")
     if not task.seed_memory:
         raise ValueError("worktree memory eval requires seed_memory")
     run_id = run_id or f"worktree-memory-eval-{int(time.time() * 1000)}"
@@ -292,6 +393,9 @@ async def run_worktree_memory_eval(
             with worktree(task.repo_path, task.base_ref) as handle:
                 bootstrap = bootstrap_worktree(handle, task.bootstrap_commands)
                 bootstrap_failures = sum(int(item["returncode"] != 0) for item in bootstrap)
+                protected_baseline = _protected_path_snapshot(
+                    handle.path, task.protected_paths
+                )
                 advisory = ""
                 if arm != ARM_MAIN_ONLY:
                     advisory, expert_metrics = await _run_expert(
@@ -326,14 +430,25 @@ async def run_worktree_memory_eval(
                     advisory_context=advisory,
                     python_exe=selected_python,
                 )
+                protected_unchanged, protected_modified_count = (
+                    _protected_path_integrity(handle.path, protected_baseline)
+                )
                 diff = capture_worktree_diff(handle)
             main_usage = normalize_usage(trajectory.total_main_usage)
+            solved = bool(trajectory.tests_green and protected_unchanged)
+            main_diagnostics = _trajectory_diagnostics(
+                trajectory, max_tokens=max_tokens
+            )
             records.append(
                 {
                     "arm": arm,
                     "repeat": repeat,
                     "execution_order": execution_order,
-                    "solved": trajectory.tests_green,
+                    "solved": solved,
+                    "verification_tests_green": trajectory.tests_green,
+                    "evaluation_failure_reason": (
+                        None if protected_unchanged else "protected_paths_modified"
+                    ),
                     "protocol_completed": trajectory.done,
                     "termination_reason": trajectory.termination_reason,
                     "infrastructure_error": trajectory.termination_reason == "model_error",
@@ -347,6 +462,7 @@ async def run_worktree_memory_eval(
                     "main_output_tokens": main_usage["output_tokens"],
                     "main_total_tokens": main_usage["total_tokens"],
                     "main_cost_usd": round(float(trajectory.total_main_cost_usd), 6),
+                    "main_diagnostics": main_diagnostics,
                     "expert": expert_metrics,
                     "total_tokens": main_usage["total_tokens"]
                     + int(expert_metrics.get("total_tokens", 0)),
@@ -356,6 +472,9 @@ async def run_worktree_memory_eval(
                         6,
                     ),
                     "bootstrap_failure_count": bootstrap_failures,
+                    "protected_paths_count": len(protected_baseline),
+                    "protected_paths_unchanged": protected_unchanged,
+                    "protected_paths_modified_count": protected_modified_count,
                     "diff_changed": bool(str(diff.get("diff_stat") or "").strip()),
                     "contains_diff_content": False,
                     "contains_private_context": False,
@@ -374,6 +493,8 @@ async def run_worktree_memory_eval(
         "expert_model": expert.model,
         "expert_endpoint_id": expert.endpoint_id,
         "expert_region": expert.region,
+        "protected_paths_count": len(task.protected_paths),
+        "protected_path_integrity_enforced": True,
         "repeats": repeats,
         "arm_order_policy": "rotating_by_repeat",
         "arm_order_counts": order_counts,
@@ -426,6 +547,27 @@ def summarize_worktree_memory_records(
             "mean_verification_runs": _mean(items, "verification_runs"),
             "mean_total_tokens": _mean(items, "total_tokens"),
             "mean_total_cost_usd": _mean(items, "total_cost_usd"),
+            "mean_workspace_effects": _mean(items, "workspace_effects"),
+            "mean_main_parse_errors": round(
+                sum(
+                    int(
+                        ((item.get("main_diagnostics") or {}).get("error_kind_counts") or {}).get(
+                            "parse_error", 0
+                        )
+                    )
+                    for item in items
+                )
+                / runs,
+                4,
+            ),
+            "mean_saturated_output_calls": round(
+                sum(
+                    int((item.get("main_diagnostics") or {}).get("saturated_output_calls", 0))
+                    for item in items
+                )
+                / runs,
+                4,
+            ),
             "expert_activation_rate": round(
                 sum(int(bool((item.get("expert") or {}).get("model_called"))) for item in items)
                 / runs,

@@ -156,6 +156,7 @@ def test_worktree_memory_eval_runs_three_isolated_real_repo_arms(code_repo: Path
         test_args=["-q"],
         bootstrap_commands=[],
         expert_context_paths=["ranges.py", "test_ranges.py"],
+        protected_paths=["test_ranges.py"],
         seed_memory=[
             {
                 "id": "inclusive-range-history",
@@ -207,6 +208,103 @@ def test_worktree_memory_eval_runs_three_isolated_real_repo_arms(code_repo: Path
     assert "for i in range(start, end):" not in public
     assert report["execution"]["contains_memory_content"] is False
     assert report["execution"]["contains_diff_content"] is False
+    assert report["execution"]["protected_path_integrity_enforced"] is True
+    assert all(item["protected_paths_unchanged"] for item in report["records"])
+    assert all(
+        item["main_diagnostics"]["operation_counts"]["apply_text_patch"] == 1
+        for item in report["records"]
+    )
+    assert all(
+        item["main_diagnostics"]["contains_model_content"] is False
+        for item in report["records"]
+    )
+
+
+class _TestEditingBackend(_WorktreeMemoryBackend):
+    def __init__(self, test_sha: str) -> None:
+        super().__init__(source_sha="unused")
+        self.test_sha = test_sha
+
+    async def complete_messages(self, messages, **kwargs):
+        phase = self.main_calls % 3
+        self.main_calls += 1
+        if phase == 0:
+            payload = {
+                "thought": "weaken test",
+                "tool": "apply_text_patch",
+                "args": {
+                    "path": "test_ranges.py",
+                    "expected_sha256": self.test_sha,
+                    "replacements": [
+                        {
+                            "old_text": "assert sum_range(1, 3) == 6",
+                            "new_text": "assert True",
+                        }
+                    ],
+                    "dry_run": False,
+                },
+            }
+        elif phase == 1:
+            payload = {
+                "thought": "verify",
+                "tool": "workspace_run_check",
+                "args": {"argv": [sys.executable, "-m", "pytest", "-q"]},
+            }
+        else:
+            payload = {"thought": "done", "done": True, "answer": "fixed"}
+        return ModelResponse(
+            model=kwargs.get("model", "main"),
+            content=json.dumps(payload),
+            usage={"input_tokens": 20, "output_tokens": 10},
+            cost_usd=0.0001,
+            cost_source="test",
+        )
+
+
+def test_worktree_memory_eval_rejects_green_run_that_modifies_tests(code_repo: Path):
+    test_sha = hashlib.sha256((code_repo / "test_ranges.py").read_bytes()).hexdigest()
+    backend = _TestEditingBackend(test_sha)
+    task = WorktreeTask(
+        id="test-editing",
+        goal="Fix production code without changing tests.",
+        repo_path=str(code_repo),
+        test_args=["-q"],
+        bootstrap_commands=[],
+        expert_context_paths=["ranges.py", "test_ranges.py"],
+        protected_paths=["test_ranges.py"],
+        seed_memory=[
+            {
+                "id": "lesson",
+                "region": "debugging",
+                "summary": "Inspect production code.",
+            }
+        ],
+    )
+    expert = WorktreeMemoryExpertSpec(
+        assignment_id="debugger",
+        region="debugging",
+        question="Find the production defect.",
+        model="expert-model",
+    )
+
+    report = asyncio.run(
+        run_worktree_memory_eval(
+            backend,
+            "main-model",
+            task,
+            expert,
+            repeats=1,
+            max_steps=5,
+            python_exe=sys.executable,
+        )
+    )
+
+    assert all(item["verification_tests_green"] for item in report["records"])
+    assert all(not item["solved"] for item in report["records"])
+    assert all(not item["protected_paths_unchanged"] for item in report["records"])
+    assert {
+        item["evaluation_failure_reason"] for item in report["records"]
+    } == {"protected_paths_modified"}
 
 
 def test_worktree_context_paths_reject_escape(tmp_path: Path):
@@ -216,6 +314,30 @@ def test_worktree_context_paths_reject_escape(tmp_path: Path):
 
     with pytest.raises(ValueError, match="escapes worktree"):
         _safe_source_blocks(str(root), ["../secret.txt"])
+
+
+def test_worktree_context_paths_support_bounded_line_ranges(tmp_path: Path):
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "large.py").write_text(
+        "line one\nline two\nline three\nline four\n", encoding="utf-8"
+    )
+
+    blocks = _safe_source_blocks(
+        str(root),
+        [{"path": "large.py", "start_line": 2, "end_line": 3}],
+    )
+
+    assert len(blocks) == 1
+    assert blocks[0].content == "line two\nline three\n"
+    assert blocks[0].metadata["start_line"] == 2
+    assert blocks[0].metadata["end_line"] == 3
+
+    with pytest.raises(ValueError, match="exceeds file length"):
+        _safe_source_blocks(
+            str(root),
+            [{"path": "large.py", "start_line": 2, "end_line": 5}],
+        )
 
 
 def test_worktree_memory_summary_requires_complete_three_arm_repeat():
@@ -234,6 +356,7 @@ def test_worktree_memory_cli_and_task_spec_are_explicit(tmp_path: Path):
                 "goal": "Fix the bounded bug.",
                 "repo_path": str(tmp_path),
                 "expert_context_paths": ["module.py", "tests/test_module.py"],
+                "protected_paths": ["tests/test_module.py"],
                 "seed_memory": [
                     {
                         "id": "lesson-1",
@@ -251,6 +374,7 @@ def test_worktree_memory_cli_and_task_spec_are_explicit(tmp_path: Path):
     )
 
     assert task.expert_context_paths == ["module.py", "tests/test_module.py"]
+    assert task.protected_paths == ["tests/test_module.py"]
     assert task.seed_memory[0]["id"] == "lesson-1"
     assert args.sandbox_command == "worktree-memory-eval"
     assert args.repeats == 2
