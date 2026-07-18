@@ -29,6 +29,21 @@ def test_extract_prose_plus_json():
     assert obj is not None and "issues" in obj
 
 
+def test_extract_json_ignores_trailing_prose():
+    text = '{"issues":[]}\nNote: the object above is the requested machine-readable result.'
+    assert extract_json_object(text) == {"issues": []}
+
+
+def test_extract_does_not_infer_object_from_natural_language():
+    text = 'thought=inspect; tool=read_text; args(path="ranges.py")'
+    assert extract_json_object(text) is None
+
+
+def test_extract_does_not_consume_object_nested_in_top_level_array():
+    text = '[{"title":"first"},{"title":"second"}]'
+    assert extract_json_object(text) is None
+
+
 def test_extract_invalid():
     assert extract_json_object("not json at all") is None
 

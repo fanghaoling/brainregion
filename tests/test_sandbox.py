@@ -238,6 +238,15 @@ def test_parse_tool():
     assert err is None and call.tool == "read_text" and call.args == {"path": "a"}
 
 
+def test_parse_tool_accepts_json_followed_by_provider_text_fallback_note():
+    content = (
+        _J({"thought": "x", "tool": "read_text", "args": {"path": "a"}})
+        + "\nI have emitted the requested action above."
+    )
+    call, err = parse_tool_call(content)
+    assert err is None and call.tool == "read_text" and call.args == {"path": "a"}
+
+
 def test_parse_done_and_tool_mutually_exclusive():
     _, err = parse_tool_call(_J({"thought": "x", "done": True, "tool": "read_text", "args": {}}))
     assert err and "mutually exclusive" in err

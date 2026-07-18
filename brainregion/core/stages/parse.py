@@ -76,10 +76,10 @@ def _repair_truncated_json(s: str) -> dict | None:
 
 
 def extract_json_object(text: str) -> dict | None:
-    """提 JSON 对象，3 级 fallback（挽回国产模型非纯 JSON / 截断输出）：
-    1) 去 ```json 围栏后从首个 { 起 json.loads（完整 JSON，含"说明文字+JSON"）
-    2) 同上区段直接解析失败的兜底
-    3) 截断修复（补未闭合括号/字符串）—— glm-5.2 超长输出被截断时
+    """提 JSON 对象，3 级 fallback（挽回模型非纯 JSON / 截断输出）：
+    1) 去 ```json 围栏后从首个 { 起 raw_decode，允许完整对象后带简短说明
+    2) 仍要求首个值本身是 JSON object，不从自然语言猜测结构或动作
+    3) 截断修复（补未闭合括号/字符串）——模型超长输出被截断时
     """
     if not text:
         return None
@@ -87,10 +87,16 @@ def extract_json_object(text: str) -> dict | None:
     brace = inner.find("{")
     if brace < 0:
         return None
+    bracket = inner.find("[")
+    if 0 <= bracket < brace:
+        # This helper extracts objects only. Do not consume the first object nested in a
+        # top-level array; planner has a separate list-aware parser that needs the whole value.
+        return None
     cand = inner[brace:]
-    # 1) 直接解析（完整 JSON / 说明文字+JSON 都走这）
+    # raw_decode 保持 JSON 语法严格，但允许对象后出现 provider 文本回退常见的尾注。
+    # 后续调用方仍负责 schema / 工具白名单校验，提取器不把自然语言解释成动作。
     try:
-        obj = json.loads(cand)
+        obj, _ = json.JSONDecoder().raw_decode(cand)
         if isinstance(obj, dict):
             return obj
     except Exception:  # noqa: BLE001
