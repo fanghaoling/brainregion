@@ -262,6 +262,8 @@ def test_compiled_intent_gives_evidence_region_read_search_ownership():
 
     first_input = "\n".join(message["content"] for message in backend.message_history[0])
     assert "read_text->evidence" in first_input
+    assert "- read_text(" not in first_input
+    assert "- search_text(" not in first_input
     assert "Search evidence: range(start, end)" in first_input
     assert trajectory.region_tool_calls == 3
     assert trajectory.steps[0].tool is None

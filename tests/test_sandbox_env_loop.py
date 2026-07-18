@@ -17,6 +17,7 @@ from brainregion.providers.base import ModelResponse
 from brainregion.sandbox import cleanup_run_dir, make_run_dir
 from brainregion.sandbox.envs import GridWorld, build_env_system_prompt
 from brainregion.sandbox.loop import (
+    CODE_REGIME_TOOLS,
     _build_system_prompt,
     _current_env,
     _memory_mode,
@@ -294,6 +295,22 @@ def test_code_regime_system_prompt_does_not_leak_env_tools():
     prompt = _build_system_prompt(task, sys.executable)
     assert "observe" not in prompt  # env 专属工具不泄漏
     assert "read_text" in prompt    # code 工具仍在(tool 列表快照不变)
+
+
+def test_code_regime_prompt_exposes_only_actor_owned_tools():
+    task = SandboxTask(id="owned-evidence", goal="修 bug")
+    prompt = _build_system_prompt(
+        task,
+        sys.executable,
+        allowed_tools=CODE_REGIME_TOOLS - {"read_text", "search_text"},
+    )
+
+    assert "- read_text(" not in prompt
+    assert "- search_text(" not in prompt
+    assert "- apply_text_patch(" in prompt
+    assert "- workspace_run_check(" in prompt
+    assert "<region_workbench>" in prompt
+    assert "不要重复请求已委派的读取或搜索" in prompt
 
 
 # ---------- Phase B review 硬化:act 非法输入 / already_done 跳过 emit / CLI argparse ----------
