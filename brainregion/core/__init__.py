@@ -34,6 +34,13 @@ from .context_pressure import (
     ContextPressureSample,
     disabled_context_pressure_metrics,
 )
+from .intent import (
+    CapabilityRoute,
+    CognitiveIntent,
+    CompiledIntent,
+    IntentAssignment,
+    IntentCompiler,
+)
 from .cognitive_workspace import CognitiveWorkspace, WorkspaceDelivery, WorkspaceView
 from .region_reporting import (
     EscalationPolicy,
@@ -77,8 +84,13 @@ __all__ = [
     "ContextPressureBand",
     "ContextPressureObserver",
     "ContextPressureSample",
+    "CapabilityRoute",
+    "CognitiveIntent",
+    "CompiledIntent",
     "disabled_context_pressure_metrics",
     "CognitiveWorkspace",
+    "IntentAssignment",
+    "IntentCompiler",
     "WorkspaceDelivery",
     "EscalationPolicy",
     "RegionContextReceipt",

@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from brainregion.core.context import ContextBlock
+from brainregion.core.intent import IntentCompiler
 from brainregion.eval.stats import bootstrap_statistic, seed_for
 from brainregion.runtime import normalize_usage
 from brainregion.workspace import read_text
@@ -23,6 +24,7 @@ ARM_MAIN_ONLY = "main_only"
 ARM_PASSIVE_CONTEXT = "passive_context"
 ARM_EVIDENCE_REGION = "evidence_region"
 ARM_EVIDENCE_VERIFICATION = "evidence_verification_regions"
+ARM_INTENT_EVIDENCE_OWNED = "intent_evidence_owned"
 
 
 @dataclass(frozen=True)
@@ -31,6 +33,7 @@ class FunctionalRegionEvalArm:
     passive_context: bool = False
     evidence_region: bool = False
     verification_region: bool = False
+    intent_evidence_owned: bool = False
 
 
 FUNCTIONAL_REGION_EVAL_ARMS: tuple[FunctionalRegionEvalArm, ...] = (
@@ -38,15 +41,27 @@ FUNCTIONAL_REGION_EVAL_ARMS: tuple[FunctionalRegionEvalArm, ...] = (
     FunctionalRegionEvalArm(ARM_PASSIVE_CONTEXT, passive_context=True),
     FunctionalRegionEvalArm(ARM_EVIDENCE_REGION, evidence_region=True),
     FunctionalRegionEvalArm(
+        ARM_INTENT_EVIDENCE_OWNED,
+        evidence_region=True,
+        intent_evidence_owned=True,
+    ),
+    FunctionalRegionEvalArm(
         ARM_EVIDENCE_VERIFICATION,
         evidence_region=True,
         verification_region=True,
     ),
 )
 _ARM_BY_NAME = {arm.name: arm for arm in FUNCTIONAL_REGION_EVAL_ARMS}
+_DEFAULT_ARM_NAMES = (
+    ARM_MAIN_ONLY,
+    ARM_PASSIVE_CONTEXT,
+    ARM_EVIDENCE_REGION,
+    ARM_EVIDENCE_VERIFICATION,
+)
 _CONTRASTS = {
     "context_value": (ARM_MAIN_ONLY, ARM_PASSIVE_CONTEXT),
     "evidence_ownership": (ARM_PASSIVE_CONTEXT, ARM_EVIDENCE_REGION),
+    "intent_ownership": (ARM_EVIDENCE_REGION, ARM_INTENT_EVIDENCE_OWNED),
     "verification_delegation": (ARM_EVIDENCE_REGION, ARM_EVIDENCE_VERIFICATION),
     "end_to_end": (ARM_MAIN_ONLY, ARM_EVIDENCE_VERIFICATION),
 }
@@ -71,7 +86,7 @@ _METRICS = (
 def _selected_arms(
     names: list[str] | tuple[str, ...] | None,
 ) -> tuple[FunctionalRegionEvalArm, ...]:
-    selected_names = tuple(names or _ARM_BY_NAME)
+    selected_names = tuple(names or _DEFAULT_ARM_NAMES)
     if not selected_names:
         raise ValueError("functional Region eval arms cannot be empty")
     unknown = [name for name in selected_names if name not in _ARM_BY_NAME]
@@ -169,6 +184,20 @@ async def run_functional_region_eval(
                                 preparation_calls,
                                 preparation_failures,
                             ) = _prepare_passive_context(task)
+                    compiled_intent = (
+                        IntentCompiler().compile(
+                            {
+                                "intent_id": task.id,
+                                "objective": task.goal,
+                                "required_capabilities": ["code_evidence"],
+                                "success_criteria": ["task checks pass"],
+                                "constraints": ["evidence collection remains read only"],
+                                "autonomy": "read_only",
+                            }
+                        )
+                        if arm.intent_evidence_owned
+                        else None
+                    )
                     trajectory = await run_agent(
                         backend,
                         model,
@@ -186,6 +215,7 @@ async def run_functional_region_eval(
                         effort=effort if thinking else None,
                         tool_result_lifecycle=tool_result_lifecycle,
                         tool_result_live_reads=tool_result_live_reads,
+                        compiled_intent=compiled_intent,
                         passive_evidence_blocks=passive_blocks,
                         evidence_region=EvidenceRegion() if arm.evidence_region else None,
                         option_region=(
@@ -226,6 +256,7 @@ async def run_functional_region_eval(
                             "passive_context": arm.passive_context,
                             "evidence_region": arm.evidence_region,
                             "verification_region": arm.verification_region,
+                            "intent_evidence_owned": arm.intent_evidence_owned,
                             "solved": trajectory.tests_green,
                             "protocol_completed": trajectory.done,
                             "termination_reason": trajectory.termination_reason,
@@ -257,6 +288,7 @@ async def run_functional_region_eval(
                             "total_cost_usd": float(trajectory.total_main_cost_usd)
                             + float(trajectory.total_arm_cost_usd),
                             "region_workbench": workbench,
+                            "intent_execution": dict(trajectory.intent_execution),
                             "progress_trace": trajectory.progress_trace,
                             "contains_context_content": False,
                             "contains_reasoning": False,

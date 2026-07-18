@@ -11,8 +11,8 @@ transcript cap(总长超限丢最旧 tool-result)、main/arm 成本分开记、t
 """
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import logging
 import math
 from contextlib import contextmanager
@@ -23,6 +23,7 @@ from typing import Any, Awaitable, Callable
 
 from brainregion.core.cognitive_workspace import CognitiveWorkspace
 from brainregion.core.context import ContextBlock
+from brainregion.core.intent import CompiledIntent, IntentAssignment
 from brainregion.core.stages.parse import extract_json_object
 from brainregion.core.wake.gate import wake_gate
 from brainregion.runtime import emit_event, merge_usage, normalize_usage
@@ -453,6 +454,15 @@ class Trajectory:
     effort_routing_shadow: PhaseEffortShadow | None = None
     tool_result_lifecycle: dict[str, Any] = field(default_factory=dict)
     epistemic_transcript_lifecycle: dict[str, Any] = field(default_factory=dict)
+    intent_execution: dict[str, Any] = field(
+        default_factory=lambda: {
+            "enabled": False,
+            "action_owners": {},
+            "main_denied_actions": [],
+            "contains_context_content": False,
+            "contains_reasoning": False,
+        }
+    )
     region_workbench: dict[str, Any] = field(
         default_factory=lambda: {
             "enabled": False,
@@ -564,6 +574,7 @@ class Trajectory:
             ),
             "tool_result_lifecycle": dict(self.tool_result_lifecycle),
             "epistemic_transcript_lifecycle": dict(self.epistemic_transcript_lifecycle),
+            "intent_execution": dict(self.intent_execution),
             "region_workbench": dict(self.region_workbench),
             "iterations": ([it.to_dict() for it in self.iterations]
                            if self.iterations is not None else None),
@@ -785,13 +796,23 @@ def _execute_evidence_option(
     *,
     region: EvidenceRegion,
     task: SandboxTask | WorktreeTask,
+    assignment: IntentAssignment | None = None,
 ) -> tuple[OptionResult, tuple[ContextBlock, ...]]:
-    """Execute bounded read requests selected by the evidence region."""
+    """Execute bounded read/search requests selected by the evidence region."""
     trace: list[dict[str, Any]] = []
-    for request in region.requests(task):
+    for request in region.requests(task, assignment):
         traj.region_tool_calls += 1
         try:
-            result = read_text(request.path, max_bytes=request.max_bytes)
+            if request.action == "read_text":
+                result = read_text(request.path, max_bytes=request.max_bytes)
+            elif request.action == "search_text":
+                result = search_text(
+                    request.query,
+                    max_results=request.max_results,
+                    context_lines=1,
+                )
+            else:  # pragma: no cover - EvidenceRequest is a closed contract
+                raise ValueError(f"unsupported evidence action: {request.action}")
         except Exception as exc:  # noqa: BLE001 - one missing explicit path must not block the main brain
             error = f"{type(exc).__name__}: {exc}"
             region.observe(request, error=error)
@@ -805,11 +826,20 @@ def _execute_evidence_option(
                 "status": "collected",
                 "sha256": result.get("sha256"),
                 "total_lines": result.get("total_lines"),
+                "match_count": len(result.get("matches") or ()),
                 "truncated": bool(result.get("truncated", False)),
             }
         )
     blocks = region.blocks()
     state = region.snapshot()
+    evidence_refs = []
+    for block in blocks:
+        if block.metadata.get("path"):
+            evidence_refs.append(f"workspace:path:{block.metadata['path']}")
+        elif block.metadata.get("query_sha256"):
+            evidence_refs.append(
+                f"workspace:query_sha256:{block.metadata['query_sha256']}"
+            )
     return (
         OptionResult(
             region=region.name,
@@ -820,9 +850,7 @@ def _execute_evidence_option(
             solved=False,
             final_observation={
                 "blocks_published": len(blocks),
-                "evidence_refs": [
-                    f"workspace:path:{block.metadata.get('path')}" for block in blocks
-                ],
+                "evidence_refs": evidence_refs,
             },
             trace=trace,
             region_state=state,
@@ -888,6 +916,8 @@ def _replace_region_workbench_message(messages: list[dict], view: dict[str, Any]
 
 def parse_tool_call_diagnostic(
     content: str,
+    *,
+    allowed_tools: frozenset[str] | set[str] | None = None,
 ) -> tuple[ToolCall | None, str | None, str]:
     """解析并区分 JSON 提取失败与合法 JSON 的协议校验失败。"""
     obj = extract_json_object(content)
@@ -941,10 +971,19 @@ def parse_tool_call_diagnostic(
     if not has_tool:
         return None, "missing 'tool' (or set 'done': true to finish)", "protocol_error"
     tool = str(obj["tool"])
+    available_tools = ALLOWED_TOOLS if allowed_tools is None else frozenset(allowed_tools)
+    if not available_tools.issubset(ALLOWED_TOOLS):
+        raise ValueError("allowed_tools must be a subset of ALLOWED_TOOLS")
     if tool not in ALLOWED_TOOLS:
         return (
             None,
-            f"unknown tool '{tool}'; allowed: {sorted(ALLOWED_TOOLS)}",
+            f"unknown tool '{tool}'; allowed: {sorted(available_tools)}",
+            "protocol_error",
+        )
+    if tool not in available_tools:
+        return (
+            None,
+            f"tool '{tool}' is unavailable to this actor; allowed: {sorted(available_tools)}",
             "protocol_error",
         )
     args = obj.get("args", {})
@@ -1524,6 +1563,7 @@ async def run_agent(
     max_plan_calls: int | None = None,
     topo_region: Any = None,            # Phase 4.6 拓扑记忆脑区(代码,无 LLM):recall_topo → 解读 env 图成 Trémaux 状态
     path_region: Any = None,            # Phase 4.7 路径轨迹记忆脑区(代码,无 LLM):recall_path → 图+走过路径标 ·
+    compiled_intent: CompiledIntent | None = None,
     evidence_region: EvidenceRegion | None = None,
     passive_evidence_blocks: tuple[ContextBlock, ...] | None = None,
     option_region: OptionRegion | None = None,  # 通用有界执行脑区；与 navigation_region 二选一
@@ -1565,6 +1605,29 @@ async def run_agent(
 
     python_exe = python_exe or sys.executable
     arm = arm if arm in ("none", "brainregion") else "none"
+    evidence_assignment: IntentAssignment | None = None
+    action_owners: dict[str, str] = {}
+    if compiled_intent is not None:
+        if not isinstance(compiled_intent, CompiledIntent):
+            raise ValueError("compiled_intent must be CompiledIntent")
+        if compiled_intent.task.task_id != task.id:
+            raise ValueError("compiled intent task_id must match sandbox task")
+        unsupported_assignments = [
+            assignment.capability
+            for assignment in compiled_intent.assignments
+            if assignment.capability != "code_evidence"
+        ]
+        if unsupported_assignments:
+            raise ValueError(
+                "sandbox has no execution adapter for compiled capability(s): "
+                f"{unsupported_assignments}"
+            )
+        action_owners = compiled_intent.action_owners()
+        evidence_assignment = compiled_intent.assignment_for("code_evidence")
+        if evidence_assignment is not None and evidence_region is None:
+            raise ValueError("code_evidence ownership requires evidence_region")
+    main_denied_actions = frozenset(action_owners) & CODE_REGIME_TOOLS
+    main_allowed_tools = ALLOWED_TOOLS - main_denied_actions
     cap_chars = max(2000, int(transcript_token_cap) * 4)
     advisory_context = str(advisory_context or "").strip()
     if len(advisory_context) > 12000:
@@ -1583,6 +1646,25 @@ async def run_agent(
     if effort_routing_shadow and effort_routing_active:
         raise ValueError("effort routing shadow and active modes are mutually exclusive")
     traj = Trajectory(task_id=task.id, arm=arm, gold_diff=task.gold_diff)
+    if compiled_intent is not None:
+        traj.intent_execution = {
+            "enabled": True,
+            "intent_id": compiled_intent.intent.intent_id,
+            "assignments": [
+                {
+                    "assignment_id": assignment.assignment_id,
+                    "capability": assignment.capability,
+                    "region": assignment.region,
+                    "allowed_actions": list(assignment.allowed_actions),
+                    "output_contract": assignment.output_contract,
+                }
+                for assignment in compiled_intent.assignments
+            ],
+            "action_owners": dict(action_owners),
+            "main_denied_actions": sorted(main_denied_actions),
+            "contains_context_content": False,
+            "contains_reasoning": False,
+        }
     phase_controller = PhaseController.for_task(task)
     traj.phase_controller = phase_controller
     effort_shadow = (
@@ -1670,6 +1752,18 @@ async def run_agent(
     with scoped_workspace_root(run_dir):
         system = system_prompt if system_prompt is not None else _build_system_prompt(task, python_exe)
         system_parts = [("system", system)]
+        if main_denied_actions:
+            ownership_prompt = (
+                "\nRuntime action ownership is active. The following actions are unavailable to the "
+                "main brain because their grounded results are owned by Regions: "
+                + ", ".join(
+                    f"{action}->{action_owners[action]}"
+                    for action in sorted(main_denied_actions)
+                )
+                + ". Use <region_workbench> evidence and do not invoke those tools directly.\n"
+            )
+            system += ownership_prompt
+            system_parts.append(("intent_contract", ownership_prompt))
         if cognitive_scaffold and cognitive_scaffold_mode == "model_managed":
             scaffold_prompt = _cognitive_scaffold_prompt()
             system += scaffold_prompt
@@ -1876,6 +1970,7 @@ async def run_agent(
                 traj,
                 region=evidence_region,
                 task=task,
+                assignment=evidence_assignment,
             )
             _publish_workbench_blocks(
                 "evidence",
@@ -2242,7 +2337,10 @@ async def run_agent(
                 )
                 continue
 
-            call, parse_err, parse_error_kind = parse_tool_call_diagnostic(resp.content)
+            call, parse_err, parse_error_kind = parse_tool_call_diagnostic(
+                resp.content,
+                allowed_tools=main_allowed_tools,
+            )
             if parse_err is not None:
                 consecutive_errors += 1
                 _emit_phase_transition(

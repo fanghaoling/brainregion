@@ -13,6 +13,7 @@ from brainregion.sandbox.fixtures import get_fixture
 from brainregion.sandbox.functional_region_eval import (
     ARM_EVIDENCE_REGION,
     ARM_EVIDENCE_VERIFICATION,
+    ARM_INTENT_EVIDENCE_OWNED,
     ARM_MAIN_ONLY,
     ARM_PASSIVE_CONTEXT,
     run_functional_region_eval,
@@ -170,6 +171,37 @@ def test_functional_region_eval_separates_context_ownership_and_verification_eff
     assert "result_preview" not in rendered_report
     assert all(case["contains_context_content"] is False for case in report["cases"])
     assert all(case["contains_tool_results"] is False for case in report["cases"])
+
+
+def test_functional_region_eval_exposes_opt_in_intent_ownership_arm():
+    backend = _FunctionalBackend(_materialized_sha())
+    report = asyncio.run(
+        run_functional_region_eval(
+            backend,
+            "main-model",
+            [get_fixture("off_by_one")],
+            arms=[ARM_EVIDENCE_REGION, ARM_INTENT_EVIDENCE_OWNED],
+            max_steps=3,
+            max_cost_usd=1.0,
+            bootstrap_samples=20,
+        )
+    )
+
+    by_arm = {case["arm"]: case for case in report["cases"]}
+    control = by_arm[ARM_EVIDENCE_REGION]
+    treatment = by_arm[ARM_INTENT_EVIDENCE_OWNED]
+
+    assert control["intent_execution"]["enabled"] is False
+    assert treatment["intent_execution"]["enabled"] is True
+    assert treatment["intent_execution"]["action_owners"] == {
+        "read_text": "evidence",
+        "search_text": "evidence",
+    }
+    assert treatment["intent_execution"]["main_denied_actions"] == [
+        "read_text",
+        "search_text",
+    ]
+    assert report["effects"]["intent_ownership"]["n_tasks"] == 1
 
 
 def _record(task_id: str, arm: str, *, solved: bool, infrastructure_error: bool = False) -> dict:

@@ -9,6 +9,7 @@ from brainregion.runtime import normalize_usage
 
 INPUT_CATEGORIES = (
     "system",
+    "intent_contract",
     "scaffold",
     "task",
     "control_feedback",

@@ -537,7 +537,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_sb_functional_regions = p_sb_sub.add_parser(
         "functional-region-eval",
-        help="Matched main/passive/evidence/evidence+verification functional Region evaluation",
+        help=(
+            "Matched main/passive/evidence/evidence+verification evaluation; "
+            "intent_evidence_owned is available as an opt-in arm"
+        ),
     )
     p_sb_functional_regions.add_argument("--tasks", required=True, help="Comma-separated fixture ids")
     p_sb_functional_regions.add_argument("--main-brain", default=None, help="Main executor model reference")

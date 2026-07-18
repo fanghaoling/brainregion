@@ -4,6 +4,9 @@ import asyncio
 import json
 from pathlib import Path
 
+import pytest
+
+from brainregion.core.intent import IntentCompiler
 from brainregion.providers.base import ModelResponse
 from brainregion.sandbox import cleanup_run_dir, make_run_dir, materialize_fixture, run_agent
 from brainregion.sandbox.fixtures import get_fixture
@@ -80,6 +83,51 @@ def test_evidence_region_turns_successful_reads_into_grounded_blocks():
     }
     assert json.loads(block.content)["text"].startswith("def parse")
     assert region.snapshot()["uses_model"] is False
+
+
+def test_evidence_region_executes_assignment_scoped_search_and_sanitizes_results():
+    task = SandboxTask(id="search", goal="Inspect parser behavior", test_args=[])
+    assignment = IntentCompiler().compile(
+        {
+            "intent_id": task.id,
+            "objective": task.goal,
+            "required_capabilities": ["code_evidence"],
+            "resource_hints": ["src/parser.py"],
+            "search_queries": ["parse_config"],
+        }
+    ).assignment_for("code_evidence")
+    assert assignment is not None
+    region = EvidenceRegion(max_results_per_search=5)
+    requests = region.requests(task, assignment)
+
+    assert [request.action for request in requests] == ["read_text", "search_text"]
+    search_request = requests[1]
+    region.observe(
+        search_request,
+        result={
+            "matches": [
+                {
+                    "path": "D:/private/work/src/parser.py",
+                    "relative_path": "src/parser.py",
+                    "line": 12,
+                    "text": "def parse_config():",
+                    "context": [{"line": 12, "text": "def parse_config():"}],
+                    "root": {"path": "D:/private/work"},
+                }
+            ],
+            "matched_files": 1,
+            "scanned_files": 8,
+            "truncated": False,
+        },
+    )
+
+    block = region.blocks()[0]
+    content = json.loads(block.content)
+
+    assert block.metadata["kind"] == "search_results"
+    assert content["matches"][0]["path"] == "src/parser.py"
+    assert "D:/private" not in block.content
+    assert region.snapshot()["searches_succeeded"] == 1
 
 
 def test_empty_evidence_region_still_reports_enabled_workbench():
@@ -170,6 +218,90 @@ def test_evidence_and_verification_regions_share_one_main_brain_workbench():
     ]
     assert trajectory.region_workbench["by_region"] == {"evidence": 2, "verification": 1}
     assert trajectory.to_dict()["region_workbench"]["contains_context_content"] is False
+
+
+def test_compiled_intent_gives_evidence_region_read_search_ownership():
+    task = get_fixture("off_by_one")
+    compiled = IntentCompiler().compile(
+        {
+            "intent_id": task.id,
+            "objective": task.goal,
+            "required_capabilities": ["code_evidence"],
+            "resource_hints": ["ranges.py", "test_ranges.py"],
+            "search_queries": ["range(start, end)"],
+        }
+    )
+    run_dir = make_run_dir(prefix="brainregion-intent-ownership-")
+    materialize_fixture(task, Path(run_dir))
+    backend = ScriptBackend(
+        [
+            _json(
+                {
+                    "thought": "Try to duplicate delegated evidence work",
+                    "tool": "read_text",
+                    "args": {"path": "ranges.py"},
+                }
+            ),
+            _json({"thought": "Respect the ownership boundary", "done": True, "answer": "stopped"}),
+        ]
+    )
+    try:
+        trajectory = asyncio.run(
+            run_agent(
+                backend,
+                "mock",
+                task,
+                run_dir=run_dir,
+                max_steps=2,
+                compiled_intent=compiled,
+                evidence_region=EvidenceRegion(),
+            )
+        )
+    finally:
+        cleanup_run_dir(run_dir)
+
+    first_input = "\n".join(message["content"] for message in backend.message_history[0])
+    assert "read_text->evidence" in first_input
+    assert "Search evidence: range(start, end)" in first_input
+    assert trajectory.region_tool_calls == 3
+    assert trajectory.steps[0].tool is None
+    assert trajectory.steps[0].error_kind == "protocol_error"
+    assert "unavailable to this actor" in str(trajectory.steps[0].error)
+    assert trajectory.intent_execution["action_owners"] == {
+        "read_text": "evidence",
+        "search_text": "evidence",
+    }
+    assert trajectory.intent_execution["main_denied_actions"] == [
+        "read_text",
+        "search_text",
+    ]
+
+
+def test_compiled_evidence_intent_requires_evidence_region():
+    task = SandboxTask(id="owned", goal="Inspect parser.py", test_args=[])
+    compiled = IntentCompiler().compile(
+        {
+            "intent_id": task.id,
+            "objective": task.goal,
+            "required_capabilities": ["code_evidence"],
+        }
+    )
+
+    run_dir = make_run_dir(prefix="brainregion-missing-evidence-region-")
+    try:
+        with pytest.raises(ValueError, match="requires evidence_region"):
+            asyncio.run(
+                run_agent(
+                    ScriptBackend([_json({"thought": "done", "done": True})]),
+                    "mock",
+                    task,
+                    run_dir=run_dir,
+                    max_steps=1,
+                    compiled_intent=compiled,
+                )
+            )
+    finally:
+        cleanup_run_dir(run_dir)
 
 
 def test_evidence_region_cli_flag():
