@@ -55,6 +55,16 @@ _PUBLIC_REPORT_FIELDS = (
     "conflicts_with",
     "recommended_followups",
 )
+_DECISION_CARD_FIELDS = (
+    "assignment_id",
+    "region",
+    "summary",
+    "implication",
+    "recommended_action",
+    "uncertainty",
+    "evidence_refs",
+    "risk",
+)
 
 
 def _text(value: Any, name: str, *, max_length: int = 4000) -> str:
@@ -181,6 +191,37 @@ def render_expert_reports(reports: tuple[dict[str, Any], ...]) -> str:
     rendered = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
     if len(rendered) > _MAX_ADVISORY_CHARS:
         raise ValueError(f"rendered expert reports cannot exceed {_MAX_ADVISORY_CHARS} characters")
+    return rendered
+
+
+def render_expert_decision_cards(reports: tuple[dict[str, Any], ...]) -> str:
+    """Render bounded action-facing fields from validated reports."""
+
+    limits = {
+        "assignment_id": 200,
+        "region": 200,
+        "summary": 600,
+        "implication": 500,
+        "recommended_action": 800,
+        "uncertainty": 300,
+        "risk": 50,
+    }
+    payload: list[dict[str, Any]] = []
+    for report in reports:
+        card: dict[str, Any] = {}
+        for key in _DECISION_CARD_FIELDS:
+            if key not in report:
+                continue
+            value = report[key]
+            if key == "evidence_refs":
+                refs = value if isinstance(value, (list, tuple)) else ()
+                card[key] = [str(item)[:200] for item in refs[:8]]
+            else:
+                card[key] = str(value or "")[: limits[key]]
+        payload.append(card)
+    rendered = json.dumps(payload, ensure_ascii=False, separators=(",", ":"))
+    if len(rendered) > _MAX_ADVISORY_CHARS:
+        raise ValueError(f"rendered expert decision cards cannot exceed {_MAX_ADVISORY_CHARS} characters")
     return rendered
 
 
@@ -530,6 +571,7 @@ __all__ = [
     "SandboxExpertSpec",
     "build_fixture_delegation_tasks",
     "render_expert_reports",
+    "render_expert_decision_cards",
     "render_fixture_delegation_summary",
     "run_fixture_delegation_eval",
 ]

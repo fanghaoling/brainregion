@@ -401,6 +401,43 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sb_worktree_memory.add_argument("--out", default=None, help="Report directory")
 
+    p_sb_worktree_report = p_sb_sub.add_parser(
+        "worktree-report-eval",
+        help="Real-worktree no/full/decision-card RegionReport utilization evaluation",
+    )
+    p_sb_worktree_report.add_argument(
+        "--task-spec",
+        required=True,
+        help="WorktreeTask JSON with expert context, protected paths, and scoped memory",
+    )
+    p_sb_worktree_report.add_argument("--main-brain", default=None)
+    p_sb_worktree_report.add_argument("--expert-model", default=None)
+    p_sb_worktree_report.add_argument("--expert-assignment", default="debugger")
+    p_sb_worktree_report.add_argument("--expert-region", default="debugging")
+    p_sb_worktree_report.add_argument(
+        "--expert-question",
+        default="Identify the root cause, smallest grounded fix, and verification risks.",
+    )
+    p_sb_worktree_report.add_argument("--repeats", type=int, default=1)
+    p_sb_worktree_report.add_argument("--max-steps", type=int, default=None)
+    p_sb_worktree_report.add_argument("--max-cost-usd", type=float, default=None)
+    p_sb_worktree_report.add_argument("--max-tokens", type=int, default=None)
+    p_sb_worktree_report.add_argument(
+        "--expert-max-context-tokens", type=int, default=6000
+    )
+    p_sb_worktree_report.add_argument("--expert-max-tokens", type=int, default=1200)
+    p_sb_worktree_report.add_argument(
+        "--expert-temperature", type=float, default=0.0
+    )
+    p_sb_worktree_report.add_argument(
+        "--thinking", default="off", choices=["off", "on"]
+    )
+    p_sb_worktree_report.add_argument(
+        "--effort", default=None, choices=["low", "medium", "high", "xhigh", "max"]
+    )
+    p_sb_worktree_report.add_argument("--python", default=None)
+    p_sb_worktree_report.add_argument("--out", default=None, help="Report directory")
+
     p_sb_cognitive = p_sb_sub.add_parser(
         "cognitive-eval",
         help="Matched 2x2: provider-native thinking x external cognitive state",
@@ -1491,6 +1528,8 @@ def main() -> None:
             asyncio.run(sandbox_cli.run_delegation_eval(args))
         elif args.sandbox_command == "worktree-memory-eval":
             asyncio.run(sandbox_cli.run_worktree_memory_evaluation(args))
+        elif args.sandbox_command == "worktree-report-eval":
+            asyncio.run(sandbox_cli.run_worktree_report_evaluation(args))
         elif args.sandbox_command == "cognitive-eval":
             asyncio.run(sandbox_cli.run_cognitive_eval(args))
         elif args.sandbox_command == "phase-effort-eval":

@@ -87,6 +87,10 @@ from .worktree_memory_eval import (
     render_worktree_memory_summary,
     run_worktree_memory_eval,
 )
+from .worktree_report_eval import (
+    render_worktree_report_summary,
+    run_worktree_report_utilization_eval,
+)
 
 logger = logging.getLogger("brainregion.sandbox.cli")
 
@@ -1396,6 +1400,59 @@ async def run_worktree_memory_evaluation(args: argparse.Namespace) -> dict[str, 
         raise SystemExit(str(exc)) from exc
     path = write_report(report, args.out)
     print(render_worktree_memory_summary(report))
+    print(f"\nReport: {path}")
+    return {"report": report, "path": str(path)}
+
+
+async def run_worktree_report_evaluation(args: argparse.Namespace) -> dict[str, Any]:
+    """Run matched RegionReport delivery formats on isolated real worktrees."""
+
+    dd = _defaults_mod.apply()
+    task = _load_worktree_task(args.task_spec)
+    main_ref = args.main_brain or dd.get("sandbox_main_brain") or ""
+    if not main_ref:
+        raise SystemExit("--main-brain is required (or configure sandbox_main_brain)")
+    expert_ref = args.expert_model or main_ref
+    backend, registry = _build_backend(
+        dd,
+        endpoint_ids=_endpoint_ids_for_refs(dd, [main_ref, expert_ref]),
+    )
+    main_model, main_endpoint_id = _resolve_main_brain(main_ref, registry, dd)
+    expert_route = _normalize_one(expert_ref, set(registry), dd.get("endpoints"))
+    expert = WorktreeMemoryExpertSpec(
+        assignment_id=args.expert_assignment,
+        region=args.expert_region,
+        question=args.expert_question,
+        model=expert_route["model"],
+        endpoint_id=expert_route.get("endpoint_id"),
+    )
+    try:
+        report = await run_worktree_report_utilization_eval(
+            backend,
+            main_model,
+            task,
+            expert,
+            main_endpoint_id=main_endpoint_id,
+            repeats=int(args.repeats),
+            max_steps=int(args.max_steps or dd.get("sandbox_max_steps", 10)),
+            max_cost_usd=float(
+                args.max_cost_usd or dd.get("sandbox_max_cost_usd", 0.5)
+            ),
+            temperature=float(dd.get("sandbox_temperature", 0.0)),
+            max_tokens=int(args.max_tokens or 2048),
+            transcript_token_cap=int(dd.get("sandbox_transcript_token_cap", 24000)),
+            consecutive_error_limit=int(dd.get("sandbox_consecutive_error_limit", 3)),
+            thinking=_thinking_arg(args),
+            effort=args.effort,
+            expert_max_context_tokens=int(args.expert_max_context_tokens),
+            expert_max_tokens=int(args.expert_max_tokens),
+            expert_temperature=float(args.expert_temperature),
+            python_exe=args.python,
+        )
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from exc
+    path = write_report(report, args.out)
+    print(render_worktree_report_summary(report))
     print(f"\nReport: {path}")
     return {"report": report, "path": str(path)}
 

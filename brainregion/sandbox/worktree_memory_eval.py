@@ -266,7 +266,7 @@ async def _run_expert(
     max_tokens: int,
     temperature: float,
     effort: str | None,
-) -> tuple[str, dict[str, Any]]:
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     source_blocks = _safe_source_blocks(root, task.expert_context_paths)
     memory_blocks: tuple[ContextBlock, ...] = ()
     excluded_memory = 0
@@ -309,11 +309,11 @@ async def _run_expert(
     )
     published = result.published_report or {}
     report = published.get("report") if isinstance(published, dict) else None
-    advisory = render_expert_reports((report,)) if isinstance(report, dict) else ""
+    report_dict = report if isinstance(report, dict) else None
     usage = normalize_usage(result.usage or {})
-    return advisory, {
+    metrics = {
         "model_called": result.model_called,
-        "report_produced": bool(advisory),
+        "report_produced": report_dict is not None,
         "error_observed": bool(result.error),
         "parse_ok": result.parse_ok,
         "source_blocks": len(source_blocks),
@@ -330,6 +330,7 @@ async def _run_expert(
         "contains_report_content": False,
         "contains_reasoning": False,
     }
+    return report_dict, metrics
 
 
 async def run_worktree_memory_eval(
@@ -398,7 +399,7 @@ async def run_worktree_memory_eval(
                 )
                 advisory = ""
                 if arm != ARM_MAIN_ONLY:
-                    advisory, expert_metrics = await _run_expert(
+                    expert_report, expert_metrics = await _run_expert(
                         backend,
                         task,
                         handle.path,
@@ -408,6 +409,11 @@ async def run_worktree_memory_eval(
                         max_tokens=expert_max_tokens,
                         temperature=expert_temperature,
                         effort=effort,
+                    )
+                    advisory = (
+                        render_expert_reports((expert_report,))
+                        if expert_report is not None
+                        else ""
                     )
                 selected_python = (
                     python_exe or detect_venv_python(handle.path) or sys.executable
