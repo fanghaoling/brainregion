@@ -32,6 +32,20 @@ ARM_DECISION_CARD = "decision_card"
 WORKTREE_REPORT_ARMS = (ARM_NO_REPORT, ARM_FULL_REPORT, ARM_DECISION_CARD)
 
 
+def normalize_worktree_report_arms(
+    arms: list[str] | tuple[str, ...] | None,
+) -> tuple[str, ...]:
+    selected = tuple(arms or WORKTREE_REPORT_ARMS)
+    if not selected:
+        raise ValueError("worktree report arms cannot be empty")
+    if len(selected) != len(set(selected)):
+        raise ValueError("worktree report arms must be unique")
+    unknown = [arm for arm in selected if arm not in WORKTREE_REPORT_ARMS]
+    if unknown:
+        raise ValueError(f"unknown worktree report arm(s): {unknown}")
+    return selected
+
+
 def _mean(items: list[dict[str, Any]], field: str) -> float:
     return round(sum(float(item.get(field, 0)) for item in items) / len(items), 4)
 
@@ -59,22 +73,30 @@ def _comparison(
 
 
 def summarize_worktree_report_records(
-    records: list[dict[str, Any]], *, run_id: str = ""
+    records: list[dict[str, Any]],
+    *,
+    run_id: str = "",
+    arms: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     if not records:
         raise ValueError("worktree report records cannot be empty")
-    grouped = {arm: [] for arm in WORKTREE_REPORT_ARMS}
+    selected_arms = normalize_worktree_report_arms(arms)
+    grouped = {arm: [] for arm in selected_arms}
     pairs: dict[int, set[str]] = {}
     for record in records:
         arm = str(record.get("arm") or "")
-        if arm not in grouped:
+        if arm not in WORKTREE_REPORT_ARMS:
             raise ValueError(f"unknown worktree report arm: {arm!r}")
+        if arm not in grouped:
+            raise ValueError(f"worktree report arm not selected: {arm!r}")
         repeat = int(record.get("repeat", 0))
         if arm in pairs.setdefault(repeat, set()):
             raise ValueError(f"duplicate worktree report record: {repeat}/{arm}")
         pairs[repeat].add(arm)
         grouped[arm].append(record)
-    incomplete = [repeat for repeat, arms in pairs.items() if arms != set(WORKTREE_REPORT_ARMS)]
+    incomplete = [
+        repeat for repeat, repeat_arms in pairs.items() if repeat_arms != set(selected_arms)
+    ]
     if incomplete:
         raise ValueError(f"incomplete worktree report repeats: {incomplete}")
 
@@ -119,19 +141,22 @@ def summarize_worktree_report_records(
                 4,
             ),
         }
+    comparisons: dict[str, dict[str, float]] = {}
+    if {ARM_NO_REPORT, ARM_FULL_REPORT} <= set(selected_arms):
+        comparisons["full_report_minus_no_report"] = _comparison(
+            per_arm, ARM_FULL_REPORT, ARM_NO_REPORT
+        )
+    if {ARM_FULL_REPORT, ARM_DECISION_CARD} <= set(selected_arms):
+        comparisons["decision_card_minus_full_report"] = _comparison(
+            per_arm, ARM_DECISION_CARD, ARM_FULL_REPORT
+        )
     return {
         "run_id": run_id,
         "mode": "real_worktree_region_report_utilization",
         "pair_count": len(pairs),
+        "arms": list(selected_arms),
         "per_arm": per_arm,
-        "comparisons": {
-            "full_report_minus_no_report": _comparison(
-                per_arm, ARM_FULL_REPORT, ARM_NO_REPORT
-            ),
-            "decision_card_minus_full_report": _comparison(
-                per_arm, ARM_DECISION_CARD, ARM_FULL_REPORT
-            ),
-        },
+        "comparisons": comparisons,
         "infrastructure_usable": not any(
             bool(item.get("infrastructure_error")) for item in records
         ),
@@ -163,6 +188,7 @@ async def run_worktree_report_utilization_eval(
     expert_max_tokens: int = 1200,
     expert_temperature: float = 0.0,
     python_exe: str | None = None,
+    arms: list[str] | tuple[str, ...] | None = None,
     run_id: str = "",
 ) -> dict[str, Any]:
     """Compare no report, full report, and a compact card from one shared report."""
@@ -174,55 +200,59 @@ async def run_worktree_report_utilization_eval(
     )
     if not str(main_model or "").strip():
         raise ValueError("main_model cannot be empty")
-    if not task.expert_context_paths:
-        raise ValueError("worktree report eval requires expert_context_paths")
+    selected_arms = normalize_worktree_report_arms(arms)
+    needs_expert_report = any(arm != ARM_NO_REPORT for arm in selected_arms)
     if not task.protected_paths:
         raise ValueError("worktree report eval requires protected_paths")
-    if not task.seed_memory:
+    if needs_expert_report and not task.expert_context_paths:
+        raise ValueError("report delivery arms require expert_context_paths")
+    if needs_expert_report and not task.seed_memory:
         raise ValueError("worktree report eval requires seed_memory")
 
     run_id = run_id or f"worktree-report-eval-{int(time.time() * 1000)}"
     records: list[dict[str, Any]] = []
     expert_runs: list[dict[str, Any]] = []
-    order_counts = {f"{arm}_first": 0 for arm in WORKTREE_REPORT_ARMS}
+    order_counts = {f"{arm}_first": 0 for arm in selected_arms}
     execution_order = 0
 
     for repeat in range(repeats):
-        with worktree(task.repo_path, task.base_ref) as expert_handle:
-            bootstrap = bootstrap_worktree(expert_handle, task.bootstrap_commands)
-            expert_bootstrap_failures = sum(
-                int(item["returncode"] != 0) for item in bootstrap
+        report: dict[str, Any] | None = None
+        if needs_expert_report:
+            with worktree(task.repo_path, task.base_ref) as expert_handle:
+                bootstrap = bootstrap_worktree(expert_handle, task.bootstrap_commands)
+                expert_bootstrap_failures = sum(
+                    int(item["returncode"] != 0) for item in bootstrap
+                )
+                report, expert_metrics = await _run_expert(
+                    backend,
+                    task,
+                    expert_handle.path,
+                    expert,
+                    include_memory=True,
+                    max_context_tokens=expert_max_context_tokens,
+                    max_tokens=expert_max_tokens,
+                    temperature=expert_temperature,
+                    effort=effort,
+                )
+            expert_runs.append(
+                {
+                    **expert_metrics,
+                    "repeat": repeat,
+                    "bootstrap_failure_count": expert_bootstrap_failures,
+                }
             )
-            report, expert_metrics = await _run_expert(
-                backend,
-                task,
-                expert_handle.path,
-                expert,
-                include_memory=True,
-                max_context_tokens=expert_max_context_tokens,
-                max_tokens=expert_max_tokens,
-                temperature=expert_temperature,
-                effort=effort,
-            )
-        expert_metrics = {
-            **expert_metrics,
-            "repeat": repeat,
-            "bootstrap_failure_count": expert_bootstrap_failures,
-        }
-        expert_runs.append(expert_metrics)
-        if report is None:
-            raise ValueError(
-                f"shared expert report was not produced for repeat {repeat}; "
-                "report-utilization arms cannot be matched"
-            )
+            if report is None:
+                raise ValueError(
+                    f"shared expert report was not produced for repeat {repeat}; "
+                    "report-utilization arms cannot be matched"
+                )
 
-        advisories = {
-            ARM_NO_REPORT: "",
-            ARM_FULL_REPORT: render_expert_reports((report,)),
-            ARM_DECISION_CARD: render_expert_decision_cards((report,)),
-        }
-        offset = repeat % len(WORKTREE_REPORT_ARMS)
-        ordered_arms = (*WORKTREE_REPORT_ARMS[offset:], *WORKTREE_REPORT_ARMS[:offset])
+        advisories = {ARM_NO_REPORT: ""}
+        if report is not None:
+            advisories[ARM_FULL_REPORT] = render_expert_reports((report,))
+            advisories[ARM_DECISION_CARD] = render_expert_decision_cards((report,))
+        offset = repeat % len(selected_arms)
+        ordered_arms = (*selected_arms[offset:], *selected_arms[:offset])
         order_counts[f"{ordered_arms[0]}_first"] += 1
 
         for arm in ordered_arms:
@@ -302,7 +332,9 @@ async def run_worktree_report_utilization_eval(
                 }
             )
 
-    summary = summarize_worktree_report_records(records, run_id=run_id)
+    summary = summarize_worktree_report_records(
+        records, run_id=run_id, arms=selected_arms
+    )
     expert_cost = round(sum(float(item.get("cost_usd", 0.0)) for item in expert_runs), 6)
     main_cost = round(sum(float(item.get("main_cost_usd", 0.0)) for item in records), 6)
     summary.update(
@@ -310,15 +342,24 @@ async def run_worktree_report_utilization_eval(
             "records": records,
             "expert_generation": {
                 "runs": len(expert_runs),
-                "report_rate": round(
-                    sum(int(bool(item.get("report_produced"))) for item in expert_runs)
-                    / len(expert_runs),
-                    4,
+                "skipped": not needs_expert_report,
+                "report_rate": (
+                    round(
+                        sum(int(bool(item.get("report_produced"))) for item in expert_runs)
+                        / len(expert_runs),
+                        4,
+                    )
+                    if expert_runs
+                    else 0.0
                 ),
-                "mean_memory_blocks": round(
-                    sum(int(item.get("memory_blocks", 0)) for item in expert_runs)
-                    / len(expert_runs),
-                    4,
+                "mean_memory_blocks": (
+                    round(
+                        sum(int(item.get("memory_blocks", 0)) for item in expert_runs)
+                        / len(expert_runs),
+                        4,
+                    )
+                    if expert_runs
+                    else 0.0
                 ),
                 "memory_records_excluded_by_scope": sum(
                     int(item.get("memory_records_excluded_by_scope", 0))
@@ -341,8 +382,9 @@ async def run_worktree_report_utilization_eval(
                 "expert_endpoint_id": expert.endpoint_id,
                 "expert_region": expert.region,
                 "repeats": repeats,
-                "expert_report_calls_per_repeat": 1,
-                "report_semantics_reused_across_delivery_arms": True,
+                "arms": list(selected_arms),
+                "expert_report_calls_per_repeat": 1 if needs_expert_report else 0,
+                "report_semantics_reused_across_delivery_arms": needs_expert_report,
                 "arm_order_policy": "rotating_by_repeat",
                 "arm_order_counts": order_counts,
                 "protected_path_integrity_enforced": True,
@@ -360,7 +402,7 @@ async def run_worktree_report_utilization_eval(
 
 def render_worktree_report_summary(report: dict[str, Any]) -> str:
     lines = [f"Worktree RegionReport utilization: {report.get('run_id', '')}"]
-    for arm in WORKTREE_REPORT_ARMS:
+    for arm in report.get("arms") or WORKTREE_REPORT_ARMS:
         item = (report.get("per_arm") or {}).get(arm) or {}
         lines.append(
             f"  {arm}: solved={item.get('solved')}/{item.get('runs')} "
@@ -386,6 +428,7 @@ __all__ = [
     "ARM_FULL_REPORT",
     "ARM_NO_REPORT",
     "WORKTREE_REPORT_ARMS",
+    "normalize_worktree_report_arms",
     "render_worktree_report_summary",
     "run_worktree_report_utilization_eval",
     "summarize_worktree_report_records",

@@ -6,9 +6,9 @@
 - `full_report`：注入全部公共 RegionReport 字段。
 - `decision_card`：只注入有界的行动字段，包括 assignment、region、摘要、影响、建议动作、不确定性、证据和风险。
 
-专家每个 repeat 只调用一次，而不是每个臂各调用一次，避免把专家采样差异误判为报告格式影响。主脑始终不会直接收到专家私有源码快照或记忆。
+专家每个 repeat 只调用一次，而不是每个评测臂各调用一次，避免把专家采样差异误判为报告格式影响。主脑始终不会直接收到专家私有源码快照或记忆。
 
-任务规格与 `worktree-memory-eval` 相同，必须包含 `expert_context_paths`、`protected_paths` 和能匹配专家 region 的 `seed_memory`。
+完整三臂评测使用与 `worktree-memory-eval` 相同的任务规格，要求提供 `expert_context_paths`、`protected_paths` 和能够匹配专家 region 的 `seed_memory`。
 
 ```powershell
 brain-region --config brain_region_config.json --env-file .env `
@@ -19,6 +19,19 @@ brain-region --config brain_region_config.json --env-file .env `
   --repeats 1
 ```
 
-评测报告只保留无内容的交付长度、动作、解析错误、输出上限饱和、工作区修改、验证、Token、成本和解决状态；不保存源码、记忆、RegionReport 正文、diff、工具结果或推理。
+如果只想确认某个主脑是否有能力解决任务，可以只运行无报告基线：
 
-主要对比是 `decision_card - full_report`，`no_report` 只作为“存在报告本身是否有价值”的下界。单次结果只能视为协议 pilot，不能证明专家或记忆具有一般价值。
+```powershell
+brain-region --config brain_region_config.json --env-file .env `
+  sandbox worktree-report-eval `
+  --task-spec .brain-region/tasks/historical-consult-endpoint.json `
+  --arms no_report `
+  --main-brain buzz_openai/gpt-5.5 `
+  --repeats 1
+```
+
+在仅启用 `no_report` 时，评测器不会调用专家，也不会加载或向外发送专家源码上下文和 scoped memory；受保护测试完整性与工作区动作协议仍然生效。该模式是主脑可解性基线，不是 RegionReport 利用率对比。
+
+评测报告只保留无内容的交付长度、动作、解析错误、输出上限饱和、工作区修改、验证、token、成本和解决状态；不保存源码、记忆、RegionReport 正文、diff、工具结果或推理。
+
+完整三臂评测的主要对比是 `decision_card - full_report`，`no_report` 只作为“报告存在本身是否有价值”的下界。单次结果只能视为协议 pilot，不能证明专家或记忆具有一般价值。

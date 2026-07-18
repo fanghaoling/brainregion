@@ -1448,6 +1448,7 @@ async def run_worktree_report_evaluation(args: argparse.Namespace) -> dict[str, 
             expert_max_tokens=int(args.expert_max_tokens),
             expert_temperature=float(args.expert_temperature),
             python_exe=args.python,
+            arms=tuple(part.strip() for part in args.arms.split(",") if part.strip()),
         )
     except ValueError as exc:
         raise SystemExit(str(exc)) from exc

@@ -227,6 +227,50 @@ def test_report_utilization_summary_requires_complete_repeat():
         )
 
 
+def test_report_utilization_no_report_arm_skips_expert(report_repo: Path):
+    source_sha = hashlib.sha256((report_repo / "ranges.py").read_bytes()).hexdigest()
+    backend = _ReportUtilizationBackend(source_sha, output_cap=100)
+    task = WorktreeTask(
+        id="main-model-solvability",
+        goal="Fix production code without changing tests.",
+        repo_path=str(report_repo),
+        test_args=["-q"],
+        bootstrap_commands=[],
+        protected_paths=["test_ranges.py"],
+    )
+    expert = WorktreeMemoryExpertSpec(
+        assignment_id="unused",
+        region="debugging",
+        question="This expert must not run.",
+        model="unused-expert-model",
+    )
+
+    report = asyncio.run(
+        run_worktree_report_utilization_eval(
+            backend,
+            "main-model",
+            task,
+            expert,
+            arms=(ARM_NO_REPORT,),
+            repeats=1,
+            max_steps=6,
+            max_tokens=100,
+            python_exe=sys.executable,
+            run_id="main-model-solvability-test",
+        )
+    )
+
+    assert backend.expert_calls == 0
+    assert report["arms"] == [ARM_NO_REPORT]
+    assert report["comparisons"] == {}
+    assert report["expert_generation"]["runs"] == 0
+    assert report["expert_generation"]["skipped"] is True
+    assert report["execution"]["expert_report_calls_per_repeat"] == 0
+    assert report["execution"]["report_semantics_reused_across_delivery_arms"] is False
+    assert report["per_arm"][ARM_NO_REPORT]["solved"] == 1
+    assert all(item["protected_paths_unchanged"] for item in report["records"])
+
+
 def test_report_utilization_cli_is_explicit():
     args = build_parser().parse_args(
         [
@@ -238,5 +282,56 @@ def test_report_utilization_cli_is_explicit():
     )
 
     assert args.sandbox_command == "worktree-report-eval"
+    assert args.arms == "no_report,full_report,decision_card"
     assert args.repeats == 1
     assert args.expert_region == "debugging"
+
+
+def test_report_utilization_cli_handler_forwards_selected_arms(
+    monkeypatch, tmp_path: Path
+):
+    import brainregion.sandbox.cli as sandbox_cli
+
+    args = build_parser().parse_args(
+        [
+            "sandbox",
+            "worktree-report-eval",
+            "--task-spec",
+            "task.json",
+            "--main-brain",
+            "mock",
+            "--arms",
+            "no_report",
+        ]
+    )
+    captured: dict = {}
+
+    async def fake_eval(_backend, _model, _task, _expert, **kwargs):
+        captured.update(kwargs)
+        return {"run_id": "test", "arms": [ARM_NO_REPORT], "per_arm": {}}
+
+    monkeypatch.setattr(sandbox_cli._defaults_mod, "apply", lambda: {})
+    monkeypatch.setattr(sandbox_cli, "_load_worktree_task", lambda _path: object())
+    monkeypatch.setattr(sandbox_cli, "_endpoint_ids_for_refs", lambda *_args: [])
+    monkeypatch.setattr(
+        sandbox_cli, "_build_backend", lambda *_args, **_kwargs: (object(), {})
+    )
+    monkeypatch.setattr(
+        sandbox_cli, "_resolve_main_brain", lambda *_args: ("mock", "endpoint")
+    )
+    monkeypatch.setattr(
+        sandbox_cli,
+        "_normalize_one",
+        lambda *_args: {"model": "mock", "endpoint_id": "endpoint"},
+    )
+    monkeypatch.setattr(sandbox_cli, "run_worktree_report_utilization_eval", fake_eval)
+    monkeypatch.setattr(
+        sandbox_cli, "render_worktree_report_summary", lambda _report: "ok"
+    )
+    monkeypatch.setattr(
+        sandbox_cli, "write_report", lambda _report, _out: tmp_path / "report.json"
+    )
+
+    asyncio.run(sandbox_cli.run_worktree_report_evaluation(args))
+
+    assert captured["arms"] == (ARM_NO_REPORT,)

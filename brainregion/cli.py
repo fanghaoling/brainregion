@@ -412,6 +412,14 @@ def build_parser() -> argparse.ArgumentParser:
     )
     p_sb_worktree_report.add_argument("--main-brain", default=None)
     p_sb_worktree_report.add_argument("--expert-model", default=None)
+    p_sb_worktree_report.add_argument(
+        "--arms",
+        default="no_report,full_report,decision_card",
+        help=(
+            "Comma-separated evaluation arms; use no_report for a main-model "
+            "solvability baseline without an expert call"
+        ),
+    )
     p_sb_worktree_report.add_argument("--expert-assignment", default="debugger")
     p_sb_worktree_report.add_argument("--expert-region", default="debugging")
     p_sb_worktree_report.add_argument(

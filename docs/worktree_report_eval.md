@@ -26,6 +26,23 @@ brain-region --config brain_region_config.json --env-file .env `
   --repeats 1
 ```
 
+To measure whether a main model can solve the task at all, select only the
+content-free baseline:
+
+```powershell
+brain-region --config brain_region_config.json --env-file .env `
+  sandbox worktree-report-eval `
+  --task-spec .brain-region/tasks/historical-consult-endpoint.json `
+  --arms no_report `
+  --main-brain buzz_openai/gpt-5.5 `
+  --repeats 1
+```
+
+In `no_report`-only mode, the evaluator does not call the expert and does not
+load or export expert source context or scoped memory. Protected-path integrity
+and the normal workspace action protocol remain enforced. This mode is a main
+model solvability baseline, not a RegionReport utilization comparison.
+
 Reports retain only content-free delivery length, actions, parse-error counts,
 output-cap saturation, workspace effects, verification, tokens, cost, and solve
 status. They do not persist source, memory, RegionReport text, diffs, tool
