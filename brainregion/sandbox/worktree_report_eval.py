@@ -69,6 +69,20 @@ def _comparison(
             - right["mean_saturated_output_calls"],
             4,
         ),
+        "main_input_tokens_delta": round(
+            left["mean_main_input_tokens"] - right["mean_main_input_tokens"], 4
+        ),
+        "main_cached_tokens_delta": round(
+            left["mean_main_cached_tokens"] - right["mean_main_cached_tokens"], 4
+        ),
+        "main_reasoning_tokens_delta": round(
+            left["mean_main_reasoning_tokens"]
+            - right["mean_main_reasoning_tokens"],
+            4,
+        ),
+        "main_cost_usd_delta": round(
+            left["mean_main_cost_usd"] - right["mean_main_cost_usd"], 6
+        ),
     }
 
 
@@ -112,6 +126,10 @@ def summarize_worktree_report_records(
             "mean_main_steps": _mean(items, "main_steps"),
             "mean_workspace_effects": _mean(items, "workspace_effects"),
             "mean_verification_runs": _mean(items, "verification_runs"),
+            "mean_main_input_tokens": _mean(items, "main_input_tokens"),
+            "mean_main_output_tokens": _mean(items, "main_output_tokens"),
+            "mean_main_cached_tokens": _mean(items, "main_cached_tokens"),
+            "mean_main_reasoning_tokens": _mean(items, "main_reasoning_tokens"),
             "mean_main_total_tokens": _mean(items, "main_total_tokens"),
             "mean_main_cost_usd": _mean(items, "main_cost_usd"),
             "mean_advisory_chars": _mean(items, "advisory_chars"),
@@ -149,6 +167,10 @@ def summarize_worktree_report_records(
     if {ARM_FULL_REPORT, ARM_DECISION_CARD} <= set(selected_arms):
         comparisons["decision_card_minus_full_report"] = _comparison(
             per_arm, ARM_DECISION_CARD, ARM_FULL_REPORT
+        )
+    if {ARM_NO_REPORT, ARM_DECISION_CARD} <= set(selected_arms):
+        comparisons["decision_card_minus_no_report"] = _comparison(
+            per_arm, ARM_DECISION_CARD, ARM_NO_REPORT
         )
     return {
         "run_id": run_id,
@@ -314,6 +336,8 @@ async def run_worktree_report_utilization_eval(
                     "advisory_chars": len(advisory),
                     "main_input_tokens": usage["input_tokens"],
                     "main_output_tokens": usage["output_tokens"],
+                    "main_cached_tokens": usage["cached_tokens"],
+                    "main_reasoning_tokens": usage["reasoning_tokens"],
                     "main_total_tokens": usage["total_tokens"],
                     "main_cost_usd": round(float(trajectory.total_main_cost_usd), 6),
                     "main_diagnostics": _trajectory_diagnostics(
@@ -409,17 +433,20 @@ def render_worktree_report_summary(report: dict[str, Any]) -> str:
             f"steps={item.get('mean_main_steps')} effects={item.get('mean_workspace_effects')} "
             f"parse_errors={item.get('mean_main_parse_errors')} "
             f"saturated={item.get('mean_saturated_output_calls')} "
+            f"cached={item.get('mean_main_cached_tokens')} "
+            f"reasoning={item.get('mean_main_reasoning_tokens')} "
             f"cost=${float(item.get('mean_main_cost_usd') or 0):.6f}"
         )
-    compact = (report.get("comparisons") or {}).get(
-        "decision_card_minus_full_report", {}
-    )
-    lines.append(
-        "  decision-card minus full-report: "
-        f"solve_delta={compact.get('solve_rate_delta')} "
-        f"effects_delta={compact.get('workspace_effects_delta')} "
-        f"parse_errors_delta={compact.get('parse_errors_delta')}"
-    )
+    for name, comparison in (report.get("comparisons") or {}).items():
+        label = name.replace("_minus_", " minus ").replace("_", "-")
+        lines.append(
+            f"  {label}: solve_delta={comparison.get('solve_rate_delta')} "
+            f"effects_delta={comparison.get('workspace_effects_delta')} "
+            f"parse_errors_delta={comparison.get('parse_errors_delta')} "
+            f"cached_delta={comparison.get('main_cached_tokens_delta')} "
+            f"reasoning_delta={comparison.get('main_reasoning_tokens_delta')} "
+            f"cost_delta=${float(comparison.get('main_cost_usd_delta') or 0):.6f}"
+        )
     return "\n".join(lines)
 
 

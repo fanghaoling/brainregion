@@ -17,6 +17,7 @@ from brainregion.sandbox.worktree_report_eval import (
     ARM_DECISION_CARD,
     ARM_FULL_REPORT,
     ARM_NO_REPORT,
+    render_worktree_report_summary,
     run_worktree_report_utilization_eval,
     summarize_worktree_report_records,
 )
@@ -202,6 +203,7 @@ def test_report_utilization_reuses_one_report_across_delivery_arms(report_repo: 
     assert report["expert_generation"]["runs"] == 1
     assert report["expert_generation"]["mean_memory_blocks"] == 1.0
     assert report["execution"]["report_semantics_reused_across_delivery_arms"] is True
+    assert "decision_card_minus_no_report" in report["comparisons"]
     records = {item["arm"]: item for item in report["records"]}
     assert records[ARM_NO_REPORT]["solved"] is True
     assert records[ARM_DECISION_CARD]["solved"] is True
@@ -269,6 +271,55 @@ def test_report_utilization_no_report_arm_skips_expert(report_repo: Path):
     assert report["execution"]["report_semantics_reused_across_delivery_arms"] is False
     assert report["per_arm"][ARM_NO_REPORT]["solved"] == 1
     assert all(item["protected_paths_unchanged"] for item in report["records"])
+    rendered = render_worktree_report_summary(report)
+    assert " minus " not in rendered
+
+
+def test_report_utilization_summary_compares_content_free_token_categories():
+    base = {
+        "repeat": 0,
+        "solved": False,
+        "main_steps": 4,
+        "workspace_effects": 0,
+        "verification_runs": 0,
+        "main_input_tokens": 1_000,
+        "main_output_tokens": 100,
+        "main_total_tokens": 1_100,
+        "main_cost_usd": 0.02,
+        "advisory_chars": 0,
+        "main_diagnostics": {
+            "error_kind_counts": {},
+            "saturated_output_calls": 0,
+        },
+    }
+    records = [
+        {
+            **base,
+            "arm": ARM_NO_REPORT,
+            "main_cached_tokens": 200,
+            "main_reasoning_tokens": 50,
+        },
+        {
+            **base,
+            "arm": ARM_DECISION_CARD,
+            "main_input_tokens": 800,
+            "main_cached_tokens": 300,
+            "main_reasoning_tokens": 10,
+            "main_cost_usd": 0.01,
+        },
+    ]
+
+    report = summarize_worktree_report_records(
+        records, arms=(ARM_NO_REPORT, ARM_DECISION_CARD)
+    )
+    comparison = report["comparisons"]["decision_card_minus_no_report"]
+
+    assert report["per_arm"][ARM_DECISION_CARD]["mean_main_cached_tokens"] == 300
+    assert comparison["main_input_tokens_delta"] == -200
+    assert comparison["main_cached_tokens_delta"] == 100
+    assert comparison["main_reasoning_tokens_delta"] == -40
+    assert comparison["main_cost_usd_delta"] == -0.01
+    assert "decision-card minus no-report" in render_worktree_report_summary(report)
 
 
 def test_report_utilization_cli_is_explicit():
