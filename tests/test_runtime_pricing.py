@@ -36,6 +36,24 @@ def test_normalize_usage_keeps_token_categories():
     }
 
 
+def test_normalize_usage_accepts_responses_token_details():
+    usage = {
+        "input_tokens": 8_242,
+        "output_tokens": 52,
+        "total_tokens": 8_294,
+        "input_tokens_details": {"cached_tokens": 5_888},
+        "output_tokens_details": {"reasoning_tokens": 11},
+    }
+
+    assert normalize_usage(usage) == {
+        "input_tokens": 8_242,
+        "output_tokens": 52,
+        "total_tokens": 8_294,
+        "cached_tokens": 5_888,
+        "reasoning_tokens": 11,
+    }
+
+
 def test_merge_usage_sums_normalized_categories():
     merged = merge_usage(
         {"prompt_tokens": 100, "completion_tokens": 20, "total_tokens": 125,

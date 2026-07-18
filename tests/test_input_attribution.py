@@ -67,6 +67,23 @@ def test_reconciliation_allocates_exact_provider_total_without_content():
     assert report["contains_tool_results"] is False
 
 
+def test_reconciliation_reads_responses_cached_tokens():
+    captured = capture_input_attribution(
+        [attributed_message("user", "inspect the repository", "task")]
+    )
+
+    report = reconcile_input_attribution(
+        captured,
+        {
+            "input_tokens": 8_242,
+            "input_tokens_details": {"cached_tokens": 5_888},
+        },
+    )
+
+    assert report["actual_input_tokens"] == 8_242
+    assert report["cached_input_tokens"] == 5_888
+
+
 def test_estimate_only_and_aggregate_reports_remain_additive():
     first = reconcile_input_attribution(
         capture_input_attribution([attributed_message("user", "alpha", "task")]),

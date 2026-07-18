@@ -87,8 +87,14 @@ def price_for_model(model: str, *, config: dict[str, Any] | None = None) -> Mode
 
 def normalize_usage(usage: dict[str, Any] | None) -> dict[str, int]:
     usage = usage or {}
-    prompt_details = usage.get("prompt_tokens_details") or {}
-    completion_details = usage.get("completion_tokens_details") or {}
+    prompt_details = (
+        usage.get("prompt_tokens_details") or usage.get("input_tokens_details") or {}
+    )
+    completion_details = (
+        usage.get("completion_tokens_details")
+        or usage.get("output_tokens_details")
+        or {}
+    )
     input_tokens = int(usage.get("prompt_tokens") or usage.get("input_tokens") or 0)
     output_tokens = int(usage.get("completion_tokens") or usage.get("output_tokens") or 0)
     total_tokens = int(usage.get("total_tokens") or input_tokens + output_tokens)
