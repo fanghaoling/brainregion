@@ -276,6 +276,8 @@ def test_mcp_assignment_expert_wakes_exact_private_view_and_returns_report(
     assert result["assignment_lifecycle"]["wake_reasons"] == ["expert_request"]
     assert result["assignment_lifecycle"]["pending_wake_requests"] == 1
     assert result["assignment_lifecycle"]["pending_provider_reads"] == 1
+    assert result["context_retrieval"]["status"] == "existing"
+    assert result["context_retrieval"]["reason"] == "private_view_ready"
     assert result["published_report"]["report"]["assignment_id"] == "parser"
     assert result["published_report"]["report"]["evidence_refs"] == [
         "memory:id:expert-mcp"

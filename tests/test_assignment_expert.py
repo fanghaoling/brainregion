@@ -240,6 +240,10 @@ def test_assignment_runner_consumes_exact_wake_and_returns_only_grounded_report(
         "contains_context_content": False,
         "authorization_boundary": False,
     }
+    assert first["context_retrieval"]["status"] == "existing"
+    assert first["context_retrieval"]["reason"] == "private_view_ready"
+    assert first["context_retrieval"]["estimated_tokens"] > 0
+    assert first["context_retrieval"]["blocks_staged"] == 0
     assert second["assignment_lifecycle"]["pending_wake_requests"] == 0
     assert second["assignment_lifecycle"]["pending_provider_reads"] == 0
     assert sleeping["assignment_lifecycle"]["state"] == "sleeping"

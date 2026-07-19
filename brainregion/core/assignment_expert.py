@@ -353,7 +353,16 @@ class AssignmentExpertRunner:
             max_context_tokens=max_context_tokens,
             max_blocks=max_blocks,
         )
-        context_retrieval = _retrieval_trace()
+        context_retrieval = (
+            _retrieval_trace(
+                "existing",
+                estimated_tokens=int(view.trace.get("estimated_tokens") or 0),
+                truncated=bool(view.trace.get("truncated", False)),
+                reason="private_view_ready",
+            )
+            if view.blocks
+            else _retrieval_trace()
+        )
         if not view.blocks:
             context_retrieval = self._retrieve_private_context(
                 assignment=assignment,
