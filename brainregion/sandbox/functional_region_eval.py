@@ -283,6 +283,10 @@ async def run_functional_region_eval(
                             "main_input_tokens": usage["input_tokens"],
                             "main_input_attribution": trajectory.main_input_attribution,
                             "extraction_mode_counts": trajectory.extraction_mode_counts,
+                            "transport_mode_counts": trajectory.transport_mode_counts,
+                            "transport_extraction_counts": (
+                                trajectory.transport_extraction_counts
+                            ),
                             "main_total_tokens": usage["total_tokens"],
                             "main_cost_usd": float(trajectory.total_main_cost_usd),
                             "region_cost_usd": float(trajectory.total_arm_cost_usd),
@@ -330,6 +334,11 @@ async def run_functional_region_eval(
         "actual_tool_calls": actual_tool_calls,
         "actual_cost_usd": actual_cost_usd,
         "extraction_mode_counts": _merge_extraction_mode_counts(cases),
+        "transport_mode_counts": _merge_count_field(cases, "transport_mode_counts"),
+        "transport_extraction_counts": _merge_count_field(
+            cases,
+            "transport_extraction_counts",
+        ),
         "passive_region_input_contract": "model_visible_context_equivalent_v1",
         "contains_trajectories": False,
         "contains_context_content": False,
@@ -382,6 +391,11 @@ def summarize_functional_region_records(
             "mean_workbench_tokens": _mean_workbench_tokens(valid),
             "input_attribution": _summarize_input_attribution(valid),
             "extraction_mode_counts": _merge_extraction_mode_counts(valid),
+            "transport_mode_counts": _merge_count_field(valid, "transport_mode_counts"),
+            "transport_extraction_counts": _merge_count_field(
+                valid,
+                "transport_extraction_counts",
+            ),
             "context_preparation_failures": sum(
                 int(record.get("context_preparation_failures") or 0) for record in valid
             ),
@@ -453,7 +467,7 @@ def render_functional_region_eval_summary(report: dict[str, Any]) -> str:
             f"total={summary.get('mean_total_tool_calls')}) "
             f"input={summary.get('mean_main_input_tokens')} "
             f"cost=${float(summary.get('mean_total_cost_usd') or 0):.4f} "
-            f"parse_modes={summary.get('extraction_mode_counts') or {}}"
+            f"transport_parse={summary.get('transport_extraction_counts') or {}}"
         )
     for name, effect in (report.get("effects") or {}).items():
         solved = (effect.get("raw_deltas") or {}).get("solved")
@@ -501,6 +515,8 @@ def _runner_error_case(
         "main_input_tokens": 0,
         "main_input_attribution": merge_input_attributions([]),
         "extraction_mode_counts": {},
+        "transport_mode_counts": {},
+        "transport_extraction_counts": {},
         "main_total_tokens": 0,
         "main_cost_usd": 0.0,
         "region_cost_usd": 0.0,
@@ -526,9 +542,13 @@ def _runner_error_case(
 
 
 def _merge_extraction_mode_counts(records: list[dict[str, Any]]) -> dict[str, int]:
+    return _merge_count_field(records, "extraction_mode_counts")
+
+
+def _merge_count_field(records: list[dict[str, Any]], field: str) -> dict[str, int]:
     counts: dict[str, int] = {}
     for record in records:
-        for mode, value in (record.get("extraction_mode_counts") or {}).items():
+        for mode, value in (record.get(field) or {}).items():
             name = str(mode or "")
             if name:
                 counts[name] = counts.get(name, 0) + int(value or 0)

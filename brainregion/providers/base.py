@@ -24,6 +24,7 @@ class ModelResponse:
         cost_usd: provider 返回或本地价格表估算的 USD 成本。
         cost_source: 成本来源（provider/config/builtin/missing_price）。
         error: 失败原因（None=成功）。backend 内部已隔离，不向上抛。
+        transport_mode: 内容无关的传输格式路径（如 responses_text_fallback）。
     """
 
     model: str
@@ -32,6 +33,7 @@ class ModelResponse:
     cost_usd: float | None = None
     cost_source: str | None = None
     error: str | None = None
+    transport_mode: str = ""
 
     @property
     def ok(self) -> bool:

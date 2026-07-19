@@ -441,6 +441,7 @@ def test_backend_responses_mode_uses_responses_api(monkeypatch):
     assert response.content == _Resp.output_text
     assert response.usage["total_tokens"] == 100
     assert response.cost_usd == 0.002
+    assert response.transport_mode == "responses_json"
     assert len(calls) == 1
     call = calls[0]
     assert call["model"] == "openai/gpt-5.5"
@@ -452,6 +453,7 @@ def test_backend_responses_mode_uses_responses_api(monkeypatch):
     assert call["reasoning_effort"] == "medium"
     assert call["text"] == {"format": {"type": "json_object"}}
     assert emitted[0][1]["payload"]["api_mode"] == "responses"
+    assert emitted[-1][1]["payload"]["transport_mode"] == "responses_json"
 
 
 def test_backend_responses_mode_retries_without_json_format(monkeypatch):
@@ -492,6 +494,7 @@ def test_backend_responses_mode_retries_without_json_format(monkeypatch):
     )
 
     assert response.error is None
+    assert response.transport_mode == "responses_text_fallback"
     assert len(calls) == 2
     assert "text" in calls[0]
     assert "text" not in calls[1]
@@ -542,6 +545,42 @@ def test_backend_responses_mode_explicitly_disables_gpt5_reasoning(monkeypatch):
 
     assert response.error is None
     assert calls[0]["reasoning_effort"] == "none"
+
+
+def test_backend_responses_failure_reports_content_free_transport_mode(monkeypatch):
+    emitted = []
+
+    async def fake_aresponses(**_kwargs):
+        raise RuntimeError("gateway unavailable")
+
+    import litellm
+
+    monkeypatch.setattr(litellm, "aresponses", fake_aresponses)
+    monkeypatch.setattr(
+        "brainregion.providers.litellm.emit_event",
+        lambda event_type, **fields: emitted.append((event_type, fields)),
+    )
+    backend = LiteLLMBackend(
+        endpoint_registry={
+            "r": {
+                "provider": "openai",
+                "base_url": "https://x/v1",
+                "api_key": "k",
+                "headers": {},
+                "timeout": None,
+                "api_mode": "responses",
+            }
+        }
+    )
+
+    response = asyncio.run(
+        backend.complete(model="gpt-5.5", system="s", user="u", endpoint_id="r")
+    )
+
+    assert response.error is not None
+    assert response.transport_mode == "responses_error"
+    assert emitted[-1][0] == "model.call_failed"
+    assert emitted[-1][1]["payload"]["transport_mode"] == "responses_error"
 
 
 def test_backend_anthropic_prefix(monkeypatch):

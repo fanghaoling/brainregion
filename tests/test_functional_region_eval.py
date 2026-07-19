@@ -85,6 +85,7 @@ class _FunctionalBackend:
             usage={"input_tokens": 40, "output_tokens": 10, "total_tokens": 50},
             cost_usd=0.001,
             cost_source="provider",
+            transport_mode="responses_text_fallback",
         )
 
 
@@ -122,6 +123,12 @@ def test_functional_region_eval_separates_context_ownership_and_verification_eff
     assert report["execution"]["actual_model_calls"] == 12
     assert report["execution"]["actual_tool_calls"] == 15
     assert report["execution"]["extraction_mode_counts"] == {"strict_json": 12}
+    assert report["execution"]["transport_mode_counts"] == {
+        "responses_text_fallback": 12
+    }
+    assert report["execution"]["transport_extraction_counts"] == {
+        "responses_text_fallback|strict_json": 12
+    }
     assert report["execution"]["passive_region_input_contract"] == (
         "model_visible_context_equivalent_v1"
     )
@@ -131,6 +138,11 @@ def test_functional_region_eval_separates_context_ownership_and_verification_eff
     assert all(summary["solve_rate"] == 1.0 for summary in report["per_arm"].values())
     assert all(
         summary["extraction_mode_counts"] == {"strict_json": int(summary["mean_steps"])}
+        for summary in report["per_arm"].values()
+    )
+    assert all(
+        summary["transport_extraction_counts"]
+        == {"responses_text_fallback|strict_json": int(summary["mean_steps"])}
         for summary in report["per_arm"].values()
     )
 
@@ -207,6 +219,9 @@ def test_functional_region_eval_exposes_opt_in_intent_ownership_arm():
         "search_text",
     ]
     assert treatment["extraction_mode_counts"] == {"strict_json": 3}
+    assert treatment["transport_extraction_counts"] == {
+        "responses_text_fallback|strict_json": 3
+    }
     assert report["effects"]["intent_ownership"]["n_tasks"] == 1
 
 

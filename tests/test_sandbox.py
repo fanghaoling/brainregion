@@ -89,6 +89,7 @@ def test_complete_messages_json_object_fallback(monkeypatch):
     resp = asyncio.run(backend.complete_messages([{"role": "user", "content": "hi"}], model="some/model"))
     assert resp.ok
     assert resp.content == '{"done":true}'
+    assert resp.transport_mode == "chat_text_fallback"
     assert len(calls) == 2  # 回退重试了一次
     assert calls[0] == {"type": "json_object"}
     assert calls[1] is None  # 第二次不带 response_format
@@ -121,12 +122,20 @@ def test_deepseek_thinking_kwargs():
 class MockBackend:
     """按脚本返 tool-call;不调模型。"""
 
-    def __init__(self, script, cost=0.001, usage=None, cost_source=None):
+    def __init__(
+        self,
+        script,
+        cost=0.001,
+        usage=None,
+        cost_source=None,
+        transport_mode="",
+    ):
         self.script = script
         self.i = 0
         self.cost = cost
         self.usage = dict(usage or {})
         self.cost_source = cost_source
+        self.transport_mode = transport_mode
 
     async def complete_messages(self, messages, **kw):
         content = self.script[min(self.i, len(self.script) - 1)]
@@ -134,6 +143,7 @@ class MockBackend:
         return ModelResponse(
             model=kw.get("model", "mock"), content=content, usage=dict(self.usage),
             cost_usd=self.cost, cost_source=self.cost_source,
+            transport_mode=self.transport_mode,
         )
 
 
@@ -301,13 +311,29 @@ def _solve_script(run_dir):
 def test_loop_solves_happy_path():
     task, run_dir = _materialized("off_by_one")
     try:
-        traj = asyncio.run(run_agent(MockBackend(_solve_script(run_dir)), "mock", task, run_dir=run_dir, arm="none"))
+        traj = asyncio.run(run_agent(
+            MockBackend(
+                _solve_script(run_dir),
+                transport_mode="responses_text_fallback",
+            ),
+            "mock",
+            task,
+            run_dir=run_dir,
+            arm="none",
+        ))
         assert traj.solve_status == "solved"
         assert traj.done and traj.n_steps == 4
         assert traj.termination_reason == "done"
         assert traj.steps[1].tool == "apply_text_patch"
         assert traj.extraction_mode_counts == {"strict_json": 4}
+        assert traj.transport_mode_counts == {"responses_text_fallback": 4}
+        assert traj.transport_extraction_counts == {
+            "responses_text_fallback|strict_json": 4
+        }
         assert {step["extraction_mode"] for step in traj.progress_trace} == {"strict_json"}
+        assert {step["transport_mode"] for step in traj.progress_trace} == {
+            "responses_text_fallback"
+        }
     finally:
         cleanup_run_dir(run_dir)
 

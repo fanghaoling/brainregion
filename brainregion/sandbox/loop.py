@@ -327,6 +327,7 @@ class StepRecord:
     effort_routing_shadow: dict[str, Any] = field(default_factory=dict)
     error_kind: str = ""
     extraction_mode: str = ""
+    transport_mode: str = ""
 
 
 @dataclass(frozen=True)
@@ -504,6 +505,23 @@ class Trajectory:
         return dict(sorted(counts.items()))
 
     @property
+    def transport_mode_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for step in self.steps:
+            if step.transport_mode:
+                counts[step.transport_mode] = counts.get(step.transport_mode, 0) + 1
+        return dict(sorted(counts.items()))
+
+    @property
+    def transport_extraction_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for step in self.steps:
+            if step.transport_mode and step.extraction_mode:
+                key = f"{step.transport_mode}|{step.extraction_mode}"
+                counts[key] = counts.get(key, 0) + 1
+        return dict(sorted(counts.items()))
+
+    @property
     def progress_trace(self) -> list[dict[str, Any]]:
         """Content-free step metadata suitable for gate replay and reports."""
         return [
@@ -518,6 +536,7 @@ class Trajectory:
                 "error": bool(step.error),
                 "error_kind": step.error_kind,
                 "extraction_mode": step.extraction_mode,
+                "transport_mode": step.transport_mode,
             }
             for step in self.steps
         ]
@@ -567,6 +586,8 @@ class Trajectory:
             "advisory_injections": list(self.advisory_injections),
             "progress_trace": self.progress_trace,
             "extraction_mode_counts": self.extraction_mode_counts,
+            "transport_mode_counts": self.transport_mode_counts,
+            "transport_extraction_counts": self.transport_extraction_counts,
             "cognitive_state": self.cognitive_state.to_dict() if self.cognitive_state else None,
             "cognitive_scaffold": (
                 self.cognitive_state.public_metrics()
@@ -603,6 +624,7 @@ class Trajectory:
                     "error": s.error,
                     "error_kind": s.error_kind,
                     "extraction_mode": s.extraction_mode,
+                    "transport_mode": s.transport_mode,
                     "main_cost_usd": round(s.main_cost_usd, 6),
                     "arm_cost_usd": round(s.arm_cost_usd, 6),
                     "main_usage": normalize_usage(s.main_usage),
@@ -2346,6 +2368,7 @@ async def run_agent(
             )
             step_main_cost = float(resp.cost_usd or 0.0)
             step_main_cost_source = getattr(resp, "cost_source", None)
+            transport_mode = str(getattr(resp, "transport_mode", "") or "")
             step_main_usage = _record_usage(
                 traj, getattr(resp, "usage", None), arm=False, cost_source=step_main_cost_source,
             )
@@ -2380,6 +2403,7 @@ async def run_agent(
                     index=step, thought="", tool=None, args={}, done=False,
                     result_chars=0, result_preview="", error=resp.error or "empty model output",
                     error_kind="model_error",
+                    transport_mode=transport_mode,
                     main_cost_usd=step_main_cost, arm_cost_usd=0.0, status_injected=status_injected,
                     main_usage=step_main_usage, main_cost_source=step_main_cost_source,
                     main_input_attribution=step_main_input_attribution,
@@ -2395,6 +2419,7 @@ async def run_agent(
                         "arm": arm,
                         "step": step,
                         "model_error": resp.error,
+                        "transport_mode": transport_mode,
                         "phase": phase_controller.phase.value,
                         "recommended_tier": phase_controller.tier.value,
                         "difficulty_score": round(phase_controller.difficulty.score, 3),
@@ -2433,6 +2458,7 @@ async def run_agent(
                     result_chars=0, result_preview="", error=parse_err,
                     error_kind=parse_error_kind,
                     extraction_mode=extraction_mode,
+                    transport_mode=transport_mode,
                     main_cost_usd=step_main_cost, arm_cost_usd=0.0, status_injected=status_injected,
                     main_usage=step_main_usage, main_cost_source=step_main_cost_source,
                     main_input_attribution=step_main_input_attribution,
@@ -2450,6 +2476,7 @@ async def run_agent(
                         "parse_error": parse_err,
                         "error_kind": parse_error_kind,
                         "extraction_mode": extraction_mode,
+                        "transport_mode": transport_mode,
                         "phase": phase_controller.phase.value,
                         "recommended_tier": phase_controller.tier.value,
                         "difficulty_score": round(phase_controller.difficulty.score, 3),
@@ -2516,6 +2543,7 @@ async def run_agent(
                     index=step, thought=call.thought, tool=None, args={}, done=True,
                     result_chars=0, result_preview=call.answer[:300], error=None,
                     extraction_mode=extraction_mode,
+                    transport_mode=transport_mode,
                     main_cost_usd=step_main_cost, arm_cost_usd=0.0, status_injected=status_injected,
                     main_usage=step_main_usage, main_cost_source=step_main_cost_source,
                     main_input_attribution=step_main_input_attribution,
@@ -2538,6 +2566,7 @@ async def run_agent(
                         "step": step,
                         "done": True,
                         "extraction_mode": extraction_mode,
+                        "transport_mode": transport_mode,
                         "phase": phase_controller.phase.value,
                         "recommended_tier": phase_controller.tier.value,
                         "difficulty_score": round(phase_controller.difficulty.score, 3),
@@ -2697,6 +2726,7 @@ async def run_agent(
                 result_chars=len(result_str), result_preview=preview, error=exec_err,
                 error_kind="tool_error" if exec_err else "",
                 extraction_mode=extraction_mode,
+                transport_mode=transport_mode,
                 main_cost_usd=step_main_cost,
                 arm_cost_usd=traj.total_arm_cost_usd - _arm_cost_before,
                 status_injected=status_injected,
@@ -2741,6 +2771,7 @@ async def run_agent(
                     "error": exec_err,
                     "error_kind": step_record.error_kind,
                     "extraction_mode": extraction_mode,
+                    "transport_mode": transport_mode,
                     "phase": phase_controller.phase.value,
                     "recommended_tier": phase_controller.tier.value,
                     "difficulty_score": round(phase_controller.difficulty.score, 3),

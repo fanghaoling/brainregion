@@ -172,7 +172,7 @@ class LiteLLMBackend:
         ep_kwargs: dict,
         effort: str | None,
         thinking: bool | None,
-    ) -> object:
+    ) -> tuple[object, str]:
         """litellm.acompletion + json_object 回退：provider 拒 json_object 时去 response_format 重试。"""
         litellm = _load_litellm()
 
@@ -188,11 +188,15 @@ class LiteLLMBackend:
             **{k: v for k, v in ep_kwargs.items() if v is not None},
         )
         try:
-            return await litellm.acompletion(response_format=self.response_format, **base_kwargs)
+            response = await litellm.acompletion(
+                response_format=self.response_format,
+                **base_kwargs,
+            )
+            return response, "chat_json" if self.response_format else "chat_text"
         except Exception as e:  # noqa: BLE001
             if self.response_format and _is_json_format_rejection(e):
                 logger.info("response_format 被拒，回退纯文本 model=%s", litellm_model)
-                return await litellm.acompletion(**base_kwargs)
+                return await litellm.acompletion(**base_kwargs), "chat_text_fallback"
             raise
 
     async def _aresponses_with_fallback(
@@ -206,7 +210,7 @@ class LiteLLMBackend:
         ep_kwargs: dict,
         effort: str | None,
         thinking: bool | None,
-    ) -> object:
+    ) -> tuple[object, str]:
         """Call the Responses API and retry without JSON mode if rejected."""
         litellm = _load_litellm()
 
@@ -224,17 +228,19 @@ class LiteLLMBackend:
         )
         try:
             if self.response_format:
-                return await litellm.aresponses(
-                    text={"format": self.response_format}, **base_kwargs
+                response = await litellm.aresponses(
+                    text={"format": self.response_format},
+                    **base_kwargs,
                 )
-            return await litellm.aresponses(**base_kwargs)
+                return response, "responses_json"
+            return await litellm.aresponses(**base_kwargs), "responses_text"
         except Exception as exc:  # noqa: BLE001
             if self.response_format and _is_json_format_rejection(exc):
                 logger.info(
                     "Responses API rejected JSON format; retrying as text model=%s",
                     litellm_model,
                 )
-                return await litellm.aresponses(**base_kwargs)
+                return await litellm.aresponses(**base_kwargs), "responses_text_fallback"
             raise
 
     async def _acomplete(
@@ -275,7 +281,7 @@ class LiteLLMBackend:
         started = time.perf_counter()
         try:
             if api_mode == "responses":
-                resp = await self._aresponses_with_fallback(
+                resp, transport_mode = await self._aresponses_with_fallback(
                     messages,
                     litellm_model=litellm_model,
                     sampling=sampling,
@@ -287,7 +293,7 @@ class LiteLLMBackend:
                 )
                 content = str(getattr(resp, "output_text", "") or "")
             else:
-                resp = await self._acompletion_with_fallback(
+                resp, transport_mode = await self._acompletion_with_fallback(
                     messages,
                     litellm_model=litellm_model,
                     sampling=sampling,
@@ -316,7 +322,11 @@ class LiteLLMBackend:
                 "model.call_finished",
                 model=model,
                 provider=provider_for_event,
-                payload=usage_payload,
+                payload={
+                    **usage_payload,
+                    "api_mode": api_mode,
+                    "transport_mode": transport_mode,
+                },
             )
             return ModelResponse(
                 model=model,
@@ -324,30 +334,37 @@ class LiteLLMBackend:
                 usage=usage,
                 cost_usd=usage_payload["cost_usd"],
                 cost_source=usage_payload["cost_source"],
+                transport_mode=transport_mode,
             )
         except Exception as e:  # noqa: BLE001 — 失败隔离，不向上抛
             logger.warning("LiteLLMBackend 调用失败 model=%s: %s: %s", model, type(e).__name__, e)
             latency_ms = round((time.perf_counter() - started) * 1000, 3)
             error = f"{type(e).__name__}: {e}"
+            transport_mode = f"{api_mode}_error"
             emit_event(
                 "model.call_failed",
                 model=model,
                 provider=provider_for_event,
-                payload=model_usage_payload(
-                    provider=provider_for_event,
-                    model=model,
-                    resolved_model=litellm_model,
-                    endpoint_id=endpoint_id,
-                    usage={},
-                    cost_usd=None,
-                    latency_ms=latency_ms,
-                    status="error",
-                    error=error,
-                ),
+                payload={
+                    **model_usage_payload(
+                        provider=provider_for_event,
+                        model=model,
+                        resolved_model=litellm_model,
+                        endpoint_id=endpoint_id,
+                        usage={},
+                        cost_usd=None,
+                        latency_ms=latency_ms,
+                        status="error",
+                        error=error,
+                    ),
+                    "api_mode": api_mode,
+                    "transport_mode": transport_mode,
+                },
             )
             return ModelResponse(
                 model=model,
                 content="",
+                transport_mode=transport_mode,
                 error=error,
             )
 
