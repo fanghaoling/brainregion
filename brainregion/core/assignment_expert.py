@@ -69,6 +69,15 @@ def _has_memory_request(assignment: dict[str, Any]) -> bool:
 
 
 @dataclass(frozen=True)
+class AssignmentContextPreparation:
+    task_id: str
+    assignment_id: str
+    region: str
+    view: WorkspaceView
+    context_retrieval: dict[str, Any] = field(default_factory=_retrieval_trace)
+
+
+@dataclass(frozen=True)
 class AssignmentExpertResult:
     state: AssignmentExpertState
     task_id: str
@@ -169,7 +178,7 @@ class AssignmentExpertRunner:
     def __init__(
         self,
         *,
-        engine: RegionExpertEngine,
+        engine: RegionExpertEngine | None,
         tasks: TaskCoordinationBoard,
         workspace: CognitiveWorkspace,
         coordination: RegionCoordinationBoard,
@@ -313,29 +322,20 @@ class AssignmentExpertRunner:
             reason=("provider_error" if load.status == "failed" else load.reason),
         )
 
-    async def run(
+    def prepare_context(
         self,
         *,
         task_id: str,
         assignment_id: str,
-        model: str,
-        endpoint_id: str | None = None,
         max_context_tokens: int = 2000,
         max_blocks: int = 12,
-        max_tokens: int = 1200,
-        temperature: float = 0.1,
-        effort: str | None = None,
         evidence_view: WorkspaceView | None = None,
-    ) -> AssignmentExpertResult:
+    ) -> AssignmentContextPreparation:
+        """Prepare one exact private view without consuming wake or calling a model."""
         assignment = self.tasks.assignment(task_id, assignment_id)
         wake_status = self.tasks.evidence_wake_status(task_id, assignment_id)
         if wake_status["count"] == 0:
-            return AssignmentExpertResult.sleeping(
-                assignment=assignment,
-                model=model,
-                endpoint_id=endpoint_id,
-            )
-
+            raise RuntimeError("cannot prepare context for a sleeping assignment")
         if evidence_view is not None and (
             evidence_view.task_id != task_id
             or evidence_view.consumer != "region"
@@ -369,6 +369,63 @@ class AssignmentExpertRunner:
                     max_context_tokens=max_context_tokens,
                     max_blocks=max_blocks,
                 )
+        return AssignmentContextPreparation(
+            task_id=task_id,
+            assignment_id=assignment_id,
+            region=str(assignment["region"]),
+            view=view,
+            context_retrieval=context_retrieval,
+        )
+
+    async def run(
+        self,
+        *,
+        task_id: str,
+        assignment_id: str,
+        model: str,
+        endpoint_id: str | None = None,
+        max_context_tokens: int = 2000,
+        max_blocks: int = 12,
+        max_tokens: int = 1200,
+        temperature: float = 0.1,
+        effort: str | None = None,
+        evidence_view: WorkspaceView | None = None,
+        context_preparation: AssignmentContextPreparation | None = None,
+    ) -> AssignmentExpertResult:
+        assignment = self.tasks.assignment(task_id, assignment_id)
+        wake_status = self.tasks.evidence_wake_status(task_id, assignment_id)
+        if wake_status["count"] == 0:
+            return AssignmentExpertResult.sleeping(
+                assignment=assignment,
+                model=model,
+                endpoint_id=endpoint_id,
+            )
+        if self.engine is None:
+            raise RuntimeError("expert engine is required to run an awake assignment")
+
+        if context_preparation is not None and evidence_view is not None:
+            raise ValueError("context_preparation and evidence_view are mutually exclusive")
+        preparation = context_preparation or self.prepare_context(
+            task_id=task_id,
+            assignment_id=assignment_id,
+            max_context_tokens=max_context_tokens,
+            max_blocks=max_blocks,
+            evidence_view=evidence_view,
+        )
+        if (
+            preparation.task_id != task_id
+            or preparation.assignment_id != assignment_id
+            or preparation.region != assignment["region"]
+            or preparation.view.task_id != task_id
+            or preparation.view.consumer != "region"
+            or preparation.view.region != assignment["region"]
+            or preparation.view.assignment_id != assignment_id
+        ):
+            raise ValueError(
+                "assignment context preparation must match task_id, region, and assignment_id"
+            )
+        view = preparation.view
+        context_retrieval = dict(preparation.context_retrieval)
         if not view.blocks:
             self.tasks.set_assignment_status(task_id, assignment_id, "working")
             expert_result = await self.engine.run(
@@ -467,6 +524,7 @@ class AssignmentExpertRunner:
 
 
 __all__ = [
+    "AssignmentContextPreparation",
     "AssignmentExpertResult",
     "AssignmentExpertRunner",
     "AssignmentExpertState",

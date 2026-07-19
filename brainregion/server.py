@@ -2143,7 +2143,35 @@ async def _run_region_expert_impl(
     export_mode = _context_export_mode(export_policy)
     export_decision = _bypass_context_export()
     expert_view = None
-    if wake_gated or export_mode != "off":
+    context_preparation = None
+    if wake_gated:
+        assignment = _task_coordination_board.assignment(task_id, assignment_id)
+        memory_request = assignment.get("memory_request") or {}
+        requests_memory = bool(
+            str(memory_request.get("query") or "").strip()
+            or str(memory_request.get("purpose") or "").strip()
+            or memory_request.get("regions")
+            or memory_request.get("selectors")
+        )
+        memory_provider = None
+        if requests_memory:
+            _ensure_default_providers()
+            memory_provider = _default_provider_registry.get("memory")
+        preparation_runner = _AssignmentExpertRunner(
+            engine=None,
+            tasks=_task_coordination_board,
+            workspace=_cognitive_workspace,
+            coordination=_region_coordination_board,
+            memory_provider=memory_provider,
+        )
+        context_preparation = preparation_runner.prepare_context(
+            task_id=task_id,
+            assignment_id=assignment_id,
+            max_context_tokens=max_context_tokens,
+            max_blocks=max_blocks,
+        )
+        expert_view = context_preparation.view
+    elif export_mode != "off":
         expert_view = _cognitive_workspace.read(
             task_id,
             consumer="region",
@@ -2181,6 +2209,11 @@ async def _run_region_expert_impl(
                 "parse_ok": False,
                 "error": "context_export_denied: context exceeds endpoint trust",
                 "model_called": False,
+                **(
+                    {"context_retrieval": dict(context_preparation.context_retrieval)}
+                    if context_preparation is not None
+                    else {}
+                ),
                 "context_export": export_decision.to_dict(),
                 "budget": budget,
                 "routing": {
@@ -2222,6 +2255,11 @@ async def _run_region_expert_impl(
                 "parse_ok": False,
                 "error": "budget_exceeded: expert model call skipped",
                 "model_called": False,
+                **(
+                    {"context_retrieval": dict(context_preparation.context_retrieval)}
+                    if context_preparation is not None
+                    else {}
+                ),
                 "context_export": export_decision.to_dict(),
                 "budget": budget,
                 "routing": {"requested_model": model, "resolved_model": entry["model"]},
@@ -2243,7 +2281,7 @@ async def _run_region_expert_impl(
             max_tokens=max_tokens,
             temperature=temperature,
             effort=dd.get("effort"),
-            evidence_view=expert_view,
+            context_preparation=context_preparation,
         )
     else:
         result = await engine.run(

@@ -7,7 +7,12 @@ import json
 
 from brainregion.core.activation import ActivationPlan
 from brainregion.core.cognitive_workspace import CognitiveWorkspace
-from brainregion.core.context import ContextBlock
+from brainregion.core.context import (
+    ContextBlock,
+    ContextQuery,
+    ProviderRegistry,
+    RetrieveResult,
+)
 from brainregion.core.context_loader import ActivatedContext, ContextLoadRecord
 from brainregion.core.region_expert import RegionExpertEngine
 from brainregion.core.region_reporting import RegionContextReceipt, RegionCoordinationBoard
@@ -44,6 +49,16 @@ class _Backend:
             cost_usd=0.005,
             cost_source="provider",
         )
+
+
+class _MemoryProvider:
+    def __init__(self, block: ContextBlock) -> None:
+        self.block = block
+        self.calls: list[ContextQuery] = []
+
+    def retrieve(self, query: ContextQuery) -> RetrieveResult:
+        self.calls.append(query)
+        return RetrieveResult(provider="memory", blocks=[self.block])
 
 
 def _runtime(private: str, *, assignment_id: str = ""):
@@ -110,20 +125,20 @@ def _configure(monkeypatch, server, backend, workspace, board):
     monkeypatch.setattr(server, "_region_coordination_board", board)
 
 
-def _assignment_board() -> TaskCoordinationBoard:
+def _assignment_board(*, memory_request: dict | None = None) -> TaskCoordinationBoard:
     tasks = TaskCoordinationBoard()
     tasks.create_task(
         {"task_id": "expert-mcp-task", "goal": "Resolve the parser regression"}
     )
-    tasks.delegate(
-        "expert-mcp-task",
-        {
-            "assignment_id": "parser",
-            "region": "debugging",
-            "question": "Choose the next parser debugging action.",
-            "scope": "Parser loading only.",
-        },
-    )
+    assignment = {
+        "assignment_id": "parser",
+        "region": "debugging",
+        "question": "Choose the next parser debugging action.",
+        "scope": "Parser loading only.",
+    }
+    if memory_request is not None:
+        assignment["memory_request"] = memory_request
+    tasks.delegate("expert-mcp-task", assignment)
     return tasks
 
 
@@ -270,6 +285,133 @@ def test_mcp_assignment_expert_wakes_exact_private_view_and_returns_report(
     assert "Parser loading only" in backend.calls[0]["user"]
     assert private not in json.dumps(result)
     assert reads["count"] == 1
+
+
+def test_mcp_assignment_expert_retrieves_private_memory_before_model_call(monkeypatch):
+    from brainregion import server
+
+    private = "Retrieved parser history remains private to the parser assignment."
+    provider = _MemoryProvider(
+        ContextBlock(
+            source="memory",
+            title="Parser history",
+            content=private,
+            metadata={"id": "expert-mcp", "region": "debugging"},
+        )
+    )
+    providers = ProviderRegistry()
+    providers.register("memory", provider)
+    tasks = _assignment_board(
+        memory_request={
+            "query": "parser fallback history",
+            "selectors": ["failure_lessons"],
+            "top_k": 2,
+            "max_context_tokens": 700,
+        }
+    )
+    tasks.request_evidence_wake(
+        "expert-mcp-task",
+        "parser",
+        reason="expert_request",
+        source="region_expert",
+    )
+    workspace = CognitiveWorkspace()
+    board = RegionCoordinationBoard()
+    backend = _Backend()
+    _configure(monkeypatch, server, backend, workspace, board)
+    monkeypatch.setattr(server, "_task_coordination_board", tasks)
+    monkeypatch.setattr(server, "_default_provider_registry", providers)
+    monkeypatch.setattr(server, "_ensure_default_providers", lambda: None)
+
+    result = asyncio.run(
+        server.run_assignment_expert(
+            task_id="expert-mcp-task",
+            assignment_id="parser",
+            model="mock-model",
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["assignment_lifecycle"]["state"] == "awake"
+    assert result["context_retrieval"]["status"] == "loaded"
+    assert result["context_retrieval"]["blocks_staged"] == 1
+    assert result["context_export"]["action"] == "bypass"
+    assert result["published_report"]["report"]["evidence_refs"] == [
+        "memory:id:expert-mcp"
+    ]
+    assert len(provider.calls) == 1
+    assert provider.calls[0].text == "parser fallback history"
+    assert provider.calls[0].selectors == ("failure_lessons",)
+    assert private in backend.calls[0]["user"]
+    assert private not in json.dumps(result)
+    assert tasks.evidence_wake_status("expert-mcp-task", "parser")["count"] == 0
+
+
+def test_mcp_assignment_export_guard_evaluates_newly_retrieved_memory(monkeypatch):
+    from brainregion import server
+
+    private = "Newly retrieved private memory must not reach an external endpoint."
+    provider = _MemoryProvider(
+        ContextBlock(
+            source="memory",
+            title="Private parser history",
+            content=private,
+            metadata={"id": "expert-mcp", "region": "debugging"},
+        )
+    )
+    providers = ProviderRegistry()
+    providers.register("memory", provider)
+    tasks = _assignment_board(memory_request={"query": "private parser history"})
+    tasks.request_evidence_wake(
+        "expert-mcp-task",
+        "parser",
+        reason="expert_request",
+        source="region_expert",
+    )
+    workspace = CognitiveWorkspace()
+    board = RegionCoordinationBoard()
+    backend = _Backend()
+    monkeypatch.setattr(
+        server._defaults_mod,
+        "apply",
+        lambda **_kwargs: {
+            "endpoints": {},
+            "timeout": 90,
+            "effort": None,
+            "context_export_policy": {"mode": "enforce"},
+        },
+    )
+    monkeypatch.setattr(server, "_resolve_endpoints", lambda _cfg: {})
+    monkeypatch.setattr(
+        server,
+        "_build_region_expert_engine",
+        lambda _dd, _registry: RegionExpertEngine(backend=backend),
+    )
+    monkeypatch.setattr(server, "_task_coordination_board", tasks)
+    monkeypatch.setattr(server, "_cognitive_workspace", workspace)
+    monkeypatch.setattr(server, "_region_coordination_board", board)
+    monkeypatch.setattr(server, "_default_provider_registry", providers)
+    monkeypatch.setattr(server, "_ensure_default_providers", lambda: None)
+
+    result = asyncio.run(
+        server.run_assignment_expert(
+            task_id="expert-mcp-task",
+            assignment_id="parser",
+            model="mock-model",
+        )
+    )
+    pending = tasks.evidence_wake_status("expert-mcp-task", "parser")
+
+    assert result["ok"] is False
+    assert result["error"].startswith("context_export_denied")
+    assert result["context_retrieval"]["status"] == "loaded"
+    assert result["context_export"]["action"] == "deny"
+    assert result["context_export"]["highest_sensitivity"] == "private"
+    assert result["assignment_lifecycle"]["pending_provider_reads"] == 1
+    assert pending["wakes"][0]["remaining_reads"] == 1
+    assert len(provider.calls) == 1
+    assert backend.calls == []
+    assert private not in json.dumps(result)
 
 
 def test_mcp_assignment_budget_guard_preserves_unread_wake(monkeypatch):
