@@ -7,69 +7,32 @@ an explicit export policy allows them to leave the host.
 
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from .validation import (
+    attributes as _attributes,
+    identifier as _identifier,
+    required_text as _required_text,
+    sha256_digest as _sha256,
+    strict_fields as _strict_fields,
+)
+
 
 Sensitivity = Literal["public", "project", "private", "secret"]
-ComputerAction = Literal["click", "type_text", "press_key", "wait"]
+ComputerAction = Literal["click", "type_text", "press_key", "wait", "hover"]
 ActionRisk = Literal["low", "medium", "high"]
 ReceiptStatus = Literal["executed", "rejected", "stale", "failed"]
 VerificationStatus = Literal["passed", "failed", "not_requested"]
+MouseButton = Literal["left", "right", "middle"]
+TransientKind = Literal["context_menu", "submenu", "popup", "tooltip", "dialog"]
 AttributeValue = str | int | float | bool | None
 
 _SENSITIVITIES = frozenset({"public", "project", "private", "secret"})
-_ACTIONS = frozenset({"click", "type_text", "press_key", "wait"})
+_ACTIONS = frozenset({"click", "type_text", "press_key", "wait", "hover"})
 _RISKS = frozenset({"low", "medium", "high"})
-_HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
-
-
-def _required_text(value: Any, name: str, *, max_length: int = 1000) -> str:
-    text = str(value or "").strip()
-    if not text:
-        raise ValueError(f"{name} cannot be empty")
-    if len(text) > max_length:
-        raise ValueError(f"{name} cannot exceed {max_length} characters")
-    return text
-
-
-def _identifier(value: Any, name: str) -> str:
-    text = _required_text(value, name, max_length=200)
-    if any(char.isspace() for char in text):
-        raise ValueError(f"{name} cannot contain whitespace")
-    return text
-
-
-def _sha256(value: Any, name: str) -> str:
-    text = str(value or "").strip().casefold()
-    if not _HEX_SHA256.fullmatch(text):
-        raise ValueError(f"{name} must be a lowercase SHA-256 digest")
-    return text
-
-
-def _strict_fields(data: dict[str, Any], allowed: set[str], name: str) -> None:
-    unknown = set(data) - allowed
-    if unknown:
-        raise ValueError(f"{name} unknown field(s): {sorted(unknown)}")
-
-
-def _attributes(value: Any, name: str) -> tuple[tuple[str, AttributeValue], ...]:
-    if value in (None, ""):
-        return ()
-    if not isinstance(value, dict):
-        raise ValueError(f"{name} must be an object")
-    if len(value) > 32:
-        raise ValueError(f"{name} cannot contain more than 32 entries")
-    output: list[tuple[str, AttributeValue]] = []
-    for raw_key, raw_value in value.items():
-        key = _identifier(raw_key, f"{name} key")
-        if not isinstance(raw_value, (str, int, float, bool, type(None))):
-            raise ValueError(f"{name}.{key} must be a JSON scalar")
-        if isinstance(raw_value, str) and len(raw_value) > 2000:
-            raise ValueError(f"{name}.{key} cannot exceed 2000 characters")
-        output.append((key, raw_value))
-    return tuple(sorted(output))
+_BUTTONS = frozenset({"left", "right", "middle"})
+_TRANSIENT_KINDS = frozenset({"context_menu", "submenu", "popup", "tooltip", "dialog"})
 
 
 @dataclass(frozen=True)
@@ -154,18 +117,33 @@ class UIElement:
     enabled: bool = True
     visible: bool = True
     attributes: tuple[tuple[str, AttributeValue], ...] = ()
+    panel_id: str | None = None
+    semantic_band: str | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "element_id", _identifier(self.element_id, "element_id"))
         object.__setattr__(self, "role", _identifier(self.role, "role").casefold())
         object.__setattr__(self, "label", _required_text(self.label, "label", max_length=500))
         object.__setattr__(self, "attributes", _attributes(dict(self.attributes), "attributes"))
+        panel_id = self.panel_id
+        if panel_id is not None:
+            object.__setattr__(self, "panel_id", _identifier(panel_id, "panel_id"))
+        band = self.semantic_band
+        if band is not None:
+            object.__setattr__(self, "semantic_band", _identifier(band, "semantic_band").casefold())
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "UIElement":
         if not isinstance(data, dict):
             raise ValueError("element must be an object")
-        _strict_fields(data, {"element_id", "role", "label", "enabled", "visible", "attributes"}, "element")
+        _strict_fields(
+            data,
+            {"element_id", "role", "label", "enabled", "visible", "attributes",
+             "panel_id", "semantic_band"},
+            "element",
+        )
+        panel_id = data.get("panel_id")
+        band = data.get("semantic_band")
         return cls(
             element_id=_identifier(data.get("element_id"), "element_id"),
             role=_identifier(data.get("role"), "role").casefold(),
@@ -173,6 +151,8 @@ class UIElement:
             enabled=bool(data.get("enabled", True)),
             visible=bool(data.get("visible", True)),
             attributes=_attributes(data.get("attributes"), "attributes"),
+            panel_id=_identifier(panel_id, "panel_id") if panel_id is not None else None,
+            semantic_band=_identifier(band, "semantic_band").casefold() if band is not None else None,
         )
 
     def attribute_map(self) -> dict[str, AttributeValue]:
@@ -186,6 +166,101 @@ class UIElement:
             "enabled": self.enabled,
             "visible": self.visible,
             "attributes": dict(self.attributes),
+            "panel_id": self.panel_id,
+            "semantic_band": self.semantic_band,
+        }
+
+
+@dataclass(frozen=True)
+class Panel:
+    """A UI panel/region within a scene.
+
+    Persistent panels (hierarchy/inspector/scene/...) have ``transient_kind=None``;
+    transient ones (context menus, submenus, popups) carry their kind. ``transient``
+    is derived from ``transient_kind`` (single source of truth). ``ordinal`` is a
+    spatial hint declared by the adapter (e.g. "leftmost"), never pixel-derived;
+    ``just_opened`` is a query semantic resolved by the perception layer via
+    ``spawn_sequence`` (max wins; ties are ambiguous), not stored here.
+    """
+
+    panel_id: str
+    role: str
+    label: str
+    transient_kind: TransientKind | None = None
+    ordinal: str | None = None
+    spawned_by_element_id: str | None = None
+    spawn_sequence: int = 0
+    scroll_position: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "panel_id", _identifier(self.panel_id, "panel_id"))
+        object.__setattr__(self, "role", _identifier(self.role, "role").casefold())
+        object.__setattr__(self, "label", _required_text(self.label, "label", max_length=500))
+        kind = self.transient_kind
+        if kind is not None:
+            kind = str(kind).strip().casefold()
+            if kind not in _TRANSIENT_KINDS:
+                raise ValueError(f"transient_kind must be one of {sorted(_TRANSIENT_KINDS)}")
+            object.__setattr__(self, "transient_kind", kind)
+        ordinal = self.ordinal
+        if ordinal is not None:
+            object.__setattr__(self, "ordinal", _identifier(ordinal, "ordinal"))
+        spawned = self.spawned_by_element_id
+        if spawned is not None:
+            object.__setattr__(
+                self, "spawned_by_element_id", _identifier(spawned, "spawned_by_element_id")
+            )
+        if self.spawn_sequence < 0:
+            raise ValueError("spawn_sequence cannot be negative")
+        scroll = self.scroll_position
+        if scroll is not None:
+            object.__setattr__(self, "scroll_position", _identifier(scroll, "scroll_position"))
+
+    @property
+    def transient(self) -> bool:
+        return self.transient_kind is not None
+
+    @classmethod
+    def from_dict(cls, data: dict[str, Any]) -> "Panel":
+        if not isinstance(data, dict):
+            raise ValueError("panel must be an object")
+        _strict_fields(
+            data,
+            {"panel_id", "role", "label", "transient_kind", "ordinal",
+             "spawned_by_element_id", "spawn_sequence", "scroll_position"},
+            "panel",
+        )
+        kind = data.get("transient_kind")
+        if kind is not None:
+            kind = str(kind).strip().casefold()
+            if kind not in _TRANSIENT_KINDS:
+                raise ValueError(f"transient_kind must be one of {sorted(_TRANSIENT_KINDS)}")
+        ordinal = data.get("ordinal")
+        spawned = data.get("spawned_by_element_id")
+        scroll = data.get("scroll_position")
+        return cls(
+            panel_id=_identifier(data.get("panel_id"), "panel_id"),
+            role=_identifier(data.get("role"), "role").casefold(),
+            label=_required_text(data.get("label"), "label", max_length=500),
+            transient_kind=kind,  # type: ignore[arg-type]
+            ordinal=_identifier(ordinal, "ordinal") if ordinal is not None else None,
+            spawned_by_element_id=(
+                _identifier(spawned, "spawned_by_element_id") if spawned is not None else None
+            ),
+            spawn_sequence=int(data.get("spawn_sequence") or 0),
+            scroll_position=_identifier(scroll, "scroll_position") if scroll is not None else None,
+        )
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "panel_id": self.panel_id,
+            "role": self.role,
+            "label": self.label,
+            "transient_kind": self.transient_kind,
+            "ordinal": self.ordinal,
+            "spawned_by_element_id": self.spawned_by_element_id,
+            "spawn_sequence": self.spawn_sequence,
+            "scroll_position": self.scroll_position,
         }
 
 
@@ -199,6 +274,7 @@ class SceneObservation:
     frame: FrameRef
     state_sha256: str
     elements: tuple[UIElement, ...] = ()
+    panels: tuple[Panel, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "session_id", _identifier(self.session_id, "session_id"))
@@ -215,9 +291,44 @@ class SceneObservation:
         ids = [element.element_id for element in self.elements]
         if len(ids) != len(set(ids)):
             raise ValueError("element_id values must be unique within a scene")
+        if any(not isinstance(panel, Panel) for panel in self.panels):
+            raise ValueError("panels must contain Panel values")
+        panel_ids = [panel.panel_id for panel in self.panels]
+        if len(panel_ids) != len(set(panel_ids)):
+            raise ValueError("panel_id values must be unique within a scene")
+        known_panels = set(panel_ids)
+        for element in self.elements:
+            if element.panel_id is not None and element.panel_id not in known_panels:
+                raise ValueError(
+                    f"element {element.element_id} references unknown panel_id {element.panel_id!r}"
+                )
+        known_elements = set(ids)
+        for panel in self.panels:
+            if (
+                panel.spawned_by_element_id is not None
+                and panel.spawned_by_element_id not in known_elements
+            ):
+                raise ValueError(
+                    f"panel {panel.panel_id} spawned_by_element_id "
+                    f"{panel.spawned_by_element_id!r} not found in scene elements"
+                )
 
     def element(self, element_id: str) -> UIElement | None:
         return next((element for element in self.elements if element.element_id == element_id), None)
+
+    def panel(self, panel_id: str) -> Panel | None:
+        return next((panel for panel in self.panels if panel.panel_id == panel_id), None)
+
+    def panels_by_role(self, role: str) -> tuple[Panel, ...]:
+        wanted = str(role or "").strip().casefold()
+        return tuple(panel for panel in self.panels if panel.role == wanted)
+
+    def transients(self) -> tuple[Panel, ...]:
+        return tuple(panel for panel in self.panels if panel.transient)
+
+    def elements_in(self, panel_id: str) -> tuple[UIElement, ...]:
+        """Elements whose panel_id matches, preserving scene order (top→bottom = first→last)."""
+        return tuple(element for element in self.elements if element.panel_id == panel_id)
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -229,6 +340,7 @@ class SceneObservation:
             "frame": self.frame.to_dict(),
             "state_sha256": self.state_sha256,
             "elements": [element.to_dict() for element in self.elements],
+            "panels": [panel.to_dict() for panel in self.panels],
         }
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -241,6 +353,9 @@ class SceneObservation:
             "state_sha256": self.state_sha256,
             "element_count": len(self.elements),
             "element_roles": sorted({element.role for element in self.elements}),
+            "panel_count": len(self.panels),
+            "panel_roles": sorted({panel.role for panel in self.panels}),
+            "transient_count": sum(1 for panel in self.panels if panel.transient),
             "content_redacted": True,
         }
 
@@ -253,6 +368,7 @@ class ActionIntent:
     action: ComputerAction
     expected_frame_id: str
     expected_state_sha256: str
+    button: MouseButton = "left"
     target_id: str | None = None
     payload: str = ""
     key: str = ""
@@ -276,8 +392,12 @@ class ActionIntent:
             "expected_state_sha256",
             _sha256(self.expected_state_sha256, "expected_state_sha256"),
         )
+        button = str(self.button or "left").strip().casefold()
+        if button not in _BUTTONS:
+            raise ValueError(f"button must be one of {sorted(_BUTTONS)}")
+        object.__setattr__(self, "button", button)
         target = str(self.target_id or "").strip() or None
-        if action in {"click", "type_text"} and target is None:
+        if action in {"click", "type_text", "hover"} and target is None:
             raise ValueError(f"{action} requires target_id")
         object.__setattr__(self, "target_id", _identifier(target, "target_id") if target is not None else None)
         if action == "type_text" and not self.payload:
@@ -318,6 +438,7 @@ class ActionIntent:
                 "action",
                 "expected_frame_id",
                 "expected_state_sha256",
+                "button",
                 "target_id",
                 "payload",
                 "key",
@@ -335,11 +456,14 @@ class ActionIntent:
         risk = str(data.get("risk") or "low").strip().casefold()
         if risk not in _RISKS:
             raise ValueError(f"risk must be one of {sorted(_RISKS)}")
+        button = str(data.get("button") or "left").strip().casefold()
+        if button not in _BUTTONS:
+            raise ValueError(f"button must be one of {sorted(_BUTTONS)}")
         target = str(data.get("target_id") or "").strip() or None
         payload = str(data.get("payload") or "")
         key = str(data.get("key") or "").strip()
         wait_ms = int(data.get("wait_ms") or 0)
-        if action in {"click", "type_text"} and target is None:
+        if action in {"click", "type_text", "hover"} and target is None:
             raise ValueError(f"{action} requires target_id")
         if action == "type_text" and not payload:
             raise ValueError("type_text requires payload")
@@ -360,6 +484,7 @@ class ActionIntent:
             action=action,  # type: ignore[arg-type]
             expected_frame_id=_identifier(data.get("expected_frame_id"), "expected_frame_id"),
             expected_state_sha256=_sha256(data.get("expected_state_sha256"), "expected_state_sha256"),
+            button=button,  # type: ignore[arg-type]
             target_id=_identifier(target, "target_id") if target is not None else None,
             payload=payload,
             key=key,
@@ -380,6 +505,7 @@ class ActionIntent:
             "action": self.action,
             "expected_frame_id": self.expected_frame_id,
             "expected_state_sha256": self.expected_state_sha256,
+            "button": self.button,
             "target_id": self.target_id,
             "payload": self.payload,
             "key": self.key,
@@ -398,6 +524,7 @@ class ActionIntent:
             "action": self.action,
             "expected_frame_id": self.expected_frame_id,
             "expected_state_sha256": self.expected_state_sha256,
+            "button": self.button,
             "target_id": self.target_id,
             "payload_chars": len(self.payload),
             "payload_redacted": bool(self.payload),

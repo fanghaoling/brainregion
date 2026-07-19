@@ -22,7 +22,7 @@ class ComputerUseSession:
         session_id: str,
         adapter: ComputerUseAdapter,
         allowed_apps: Iterable[str],
-        allowed_actions: Iterable[str] = ("click", "type_text", "press_key", "wait"),
+        allowed_actions: Iterable[str] = ("click", "type_text", "press_key", "wait", "hover"),
         max_actions: int = 50,
         event_sink: EventSink = emit_event,
     ) -> None:
