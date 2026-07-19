@@ -66,6 +66,15 @@ class _MemoryProvider:
         )
 
 
+class _ModelErrorBackend:
+    def __init__(self) -> None:
+        self.calls: list[dict] = []
+
+    async def complete(self, **kwargs):
+        self.calls.append(kwargs)
+        return ModelResponse(model=kwargs["model"], error="synthetic endpoint failure")
+
+
 def _activated(*, evidence_id: str, content: str) -> ActivatedContext:
     return ActivatedContext(
         activation=ActivationPlan(
@@ -274,6 +283,34 @@ def test_assignment_runner_preserves_wake_while_waiting_for_private_context():
     status = tasks.status("root")
     assert status["assignments"][0]["status"] == "working"
     assert status["task"]["status"] == "working"
+
+
+def test_assignment_runner_reports_blocked_when_awake_model_call_fails():
+    runner, tasks, workspace, coordination, _ = _runtime()
+    backend = _ModelErrorBackend()
+    runner = AssignmentExpertRunner(
+        engine=RegionExpertEngine(backend=backend),
+        tasks=tasks,
+        workspace=workspace,
+        coordination=coordination,
+    )
+    tasks.request_evidence_wake(
+        "root",
+        "parser",
+        reason="expert_request",
+        source="region_expert",
+    )
+
+    result = _run(runner, "parser")
+
+    assert result["ok"] is False
+    assert result["error"].startswith("model_error")
+    assert result["model_called"] is True
+    assert result["assignment_lifecycle"]["state"] == "blocked"
+    assert result["assignment_lifecycle"]["wake_delivered"] is True
+    assert result["assignment_lifecycle"]["pending_wake_requests"] == 0
+    assert tasks.assignment("root", "parser")["status"] == "blocked"
+    assert len(backend.calls) == 1
 
 
 def test_assignment_runner_retrieves_stages_and_retries_exact_private_context():

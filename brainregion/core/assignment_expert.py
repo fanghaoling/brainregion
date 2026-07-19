@@ -494,7 +494,7 @@ class AssignmentExpertRunner:
         self._sync_result_status(task_id, assignment_id, expert_result)
         pending = self.tasks.evidence_wake_status(task_id, assignment_id)
         return AssignmentExpertResult(
-            state="awake",
+            state="awake" if expert_result.ok else "blocked",
             task_id=task_id,
             assignment_id=assignment_id,
             region=assignment["region"],
