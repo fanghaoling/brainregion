@@ -10,7 +10,7 @@ import pytest
 from brainregion.core.activation import ActivationPlan
 from brainregion.core.assignment_expert import AssignmentExpertRunner
 from brainregion.core.cognitive_workspace import CognitiveWorkspace
-from brainregion.core.context import ContextBlock
+from brainregion.core.context import ContextBlock, ContextQuery, RetrieveResult
 from brainregion.core.context_loader import ActivatedContext, ContextLoadRecord
 from brainregion.core.region_expert import RegionExpertEngine
 from brainregion.core.region_reporting import RegionContextReceipt, RegionCoordinationBoard
@@ -49,6 +49,23 @@ class _Backend:
         )
 
 
+class _MemoryProvider:
+    def __init__(self, *, blocks: list[ContextBlock] | None = None, error: str = "") -> None:
+        self.blocks = list(blocks or [])
+        self.error = error
+        self.calls: list[ContextQuery] = []
+
+    def retrieve(self, query: ContextQuery) -> RetrieveResult:
+        self.calls.append(query)
+        if self.error:
+            raise RuntimeError(self.error)
+        return RetrieveResult(
+            provider="memory",
+            blocks=list(self.blocks),
+            meta={"candidates_before_top_k": len(self.blocks)},
+        )
+
+
 def _activated(*, evidence_id: str, content: str) -> ActivatedContext:
     return ActivatedContext(
         activation=ActivationPlan(
@@ -78,18 +95,23 @@ def _activated(*, evidence_id: str, content: str) -> ActivatedContext:
     )
 
 
-def _runtime(*, with_context: bool = True):
+def _runtime(
+    *,
+    with_context: bool = True,
+    memory_provider: _MemoryProvider | None = None,
+    parser_memory_request: dict | None = None,
+):
     tasks = TaskCoordinationBoard()
     tasks.create_task({"task_id": "root", "goal": "Resolve the regression"})
-    tasks.delegate(
-        "root",
-        {
-            "assignment_id": "parser",
-            "region": "debugging",
-            "question": "Choose the next parser diagnostic.",
-            "scope": "Only inspect parser loading.",
-        },
-    )
+    parser_assignment = {
+        "assignment_id": "parser",
+        "region": "debugging",
+        "question": "Choose the next parser diagnostic.",
+        "scope": "Only inspect parser loading.",
+    }
+    if parser_memory_request is not None:
+        parser_assignment["memory_request"] = parser_memory_request
+    tasks.delegate("root", parser_assignment)
     tasks.delegate(
         "root",
         {
@@ -136,6 +158,7 @@ def _runtime(*, with_context: bool = True):
         tasks=tasks,
         workspace=workspace,
         coordination=coordination,
+        memory_provider=memory_provider,
     )
     return runner, tasks, workspace, coordination, backend
 
@@ -251,6 +274,197 @@ def test_assignment_runner_preserves_wake_while_waiting_for_private_context():
     status = tasks.status("root")
     assert status["assignments"][0]["status"] == "working"
     assert status["task"]["status"] == "working"
+
+
+def test_assignment_runner_retrieves_stages_and_retries_exact_private_context():
+    private = "Private parser evidence says prose-wrapped JSON needs a fallback."
+    provider = _MemoryProvider(
+        blocks=[
+            ContextBlock(
+                source="memory",
+                title="Parser failure lesson",
+                content=private,
+                metadata={
+                    "id": "parser-evidence",
+                    "region": "debugging",
+                    "selectors": ["failure_lessons"],
+                },
+            )
+        ]
+    )
+    runner, tasks, workspace, coordination, backend = _runtime(
+        with_context=False,
+        memory_provider=provider,
+        parser_memory_request={
+            "query": "parser fallback regression",
+            "purpose": "reuse failure lessons",
+            "regions": ["memory", "debugging"],
+            "selectors": ["failure_lessons"],
+            "top_k": 2,
+            "max_context_tokens": 900,
+        },
+    )
+    tasks.request_evidence_wake(
+        "root",
+        "parser",
+        reason="expert_request",
+        source="region_expert",
+    )
+
+    result = _run(runner, "parser")
+
+    assert result["assignment_lifecycle"]["state"] == "awake"
+    assert result["assignment_lifecycle"]["pending_wake_requests"] == 0
+    assert result["context_retrieval"]["status"] == "loaded"
+    assert result["context_retrieval"]["provider"] == "memory"
+    assert result["context_retrieval"]["blocks_staged"] == 1
+    assert result["context_retrieval"]["truncated"] is False
+    assert result["context_retrieval"]["reason"] == ""
+    assert result["context_retrieval"]["contains_context_content"] is False
+    assert result["context_retrieval"]["models_called"] is False
+    assert result["context_retrieval"]["estimated_tokens"] > 0
+    assert result["model_called"] is True
+    assert len(provider.calls) == 1
+    assert provider.calls[0].text == "parser fallback regression"
+    assert provider.calls[0].regions == frozenset({"memory", "debugging"})
+    assert provider.calls[0].selectors == ("failure_lessons",)
+    assert provider.calls[0].top_k == 2
+    assert private in backend.calls[0]["user"]
+    assert private not in json.dumps(result)
+    assert coordination.reports("root", assignment_id="parser")["count"] == 1
+    network_view = workspace.read(
+        "root",
+        consumer="region",
+        region="debugging",
+        assignment_id="network",
+    )
+    assert network_view.blocks == ()
+
+
+@pytest.mark.parametrize(
+    ("provider", "expected_status"),
+    [
+        (_MemoryProvider(), "empty"),
+        (_MemoryProvider(error="memory unavailable"), "failed"),
+    ],
+)
+def test_assignment_runner_preserves_wake_when_memory_retrieval_has_no_context(
+    provider,
+    expected_status,
+):
+    runner, tasks, _, _, backend = _runtime(
+        with_context=False,
+        memory_provider=provider,
+        parser_memory_request={"query": "missing parser evidence"},
+    )
+    tasks.request_evidence_wake(
+        "root",
+        "parser",
+        reason="explicit_recall",
+        source="main_brain",
+    )
+
+    result = _run(runner, "parser")
+
+    assert result["assignment_lifecycle"]["state"] == "waiting_context"
+    assert result["assignment_lifecycle"]["pending_provider_reads"] == 1
+    assert result["context_retrieval"]["status"] == expected_status
+    assert result["context_retrieval"]["blocks_staged"] == 0
+    if expected_status == "failed":
+        assert result["context_retrieval"]["reason"] == "provider_error"
+        assert "memory unavailable" not in json.dumps(result)
+    assert result["model_called"] is False
+    assert backend.calls == []
+    assert len(provider.calls) == 1
+
+
+def test_assignment_runner_does_not_retrieve_without_explicit_memory_request():
+    provider = _MemoryProvider(
+        blocks=[ContextBlock(source="memory", title="Unexpected", content="private")]
+    )
+    runner, tasks, _, _, backend = _runtime(
+        with_context=False,
+        memory_provider=provider,
+    )
+    tasks.request_evidence_wake(
+        "root",
+        "parser",
+        reason="expert_request",
+        source="region_expert",
+    )
+
+    result = _run(runner, "parser")
+
+    assert result["assignment_lifecycle"]["state"] == "waiting_context"
+    assert result["context_retrieval"]["status"] == "skipped"
+    assert result["context_retrieval"]["reason"] == "memory_request_empty"
+    assert provider.calls == []
+    assert backend.calls == []
+
+
+def test_assignment_runner_rejects_memory_request_for_another_target_region():
+    provider = _MemoryProvider(
+        blocks=[ContextBlock(source="memory", title="Cross-region", content="private")]
+    )
+    runner, tasks, _, _, backend = _runtime(
+        with_context=False,
+        memory_provider=provider,
+        parser_memory_request={
+            "query": "parser evidence",
+            "target_region": "review",
+        },
+    )
+    tasks.request_evidence_wake(
+        "root",
+        "parser",
+        reason="expert_request",
+        source="region_expert",
+    )
+
+    result = _run(runner, "parser")
+
+    assert result["assignment_lifecycle"]["state"] == "waiting_context"
+    assert result["context_retrieval"]["status"] == "skipped"
+    assert result["context_retrieval"]["reason"] == "target_region_mismatch"
+    assert provider.calls == []
+    assert backend.calls == []
+
+
+def test_assignment_runner_preserves_wake_when_private_stage_fails(monkeypatch):
+    provider = _MemoryProvider(
+        blocks=[
+            ContextBlock(
+                source="memory",
+                title="Parser evidence",
+                content="private",
+                metadata={"id": "parser-evidence"},
+            )
+        ]
+    )
+    runner, tasks, workspace, _, backend = _runtime(
+        with_context=False,
+        memory_provider=provider,
+        parser_memory_request={"query": "parser evidence"},
+    )
+    tasks.request_evidence_wake(
+        "root",
+        "parser",
+        reason="expert_request",
+        source="region_expert",
+    )
+
+    def fail_stage(*args, **kwargs):
+        raise RuntimeError("private storage path")
+
+    monkeypatch.setattr(workspace, "stage", fail_stage)
+    result = _run(runner, "parser")
+
+    assert result["assignment_lifecycle"]["state"] == "waiting_context"
+    assert result["assignment_lifecycle"]["pending_provider_reads"] == 1
+    assert result["context_retrieval"]["status"] == "failed"
+    assert result["context_retrieval"]["reason"] == "private_stage_failed"
+    assert "private storage path" not in json.dumps(result)
+    assert backend.calls == []
 
 
 def test_assignment_runner_rejects_mismatched_snapshot_before_consuming_wake():
