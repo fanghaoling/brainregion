@@ -64,7 +64,7 @@ from .option_runtime import (
 )
 from .phase_control import PhaseController, PhaseTransition
 from .tool_result_lifecycle import ToolResultLifecycle, tool_result_message
-from .regions.evidence_region import EvidenceRegion
+from .regions.evidence_region import EvidenceRegion, EvidenceRequest
 
 logger = logging.getLogger("brainregion.sandbox.loop")
 
@@ -72,7 +72,15 @@ logger = logging.getLogger("brainregion.sandbox.loop")
 # 故 code agent 不知其存在;仅幻觉调用时会触发 → dispatch 显式报错(不崩)。parse_tool_call 用此集校验。
 # ENV_TOOLS 单列常量防 drift(opus medium):observe/act/recall_map 命名一处。
 CODE_REGIME_TOOLS = frozenset(
-    {"read_text", "search_text", "inspect_file", "apply_text_patch", "workspace_run_check", "list_allowed_roots"}
+    {
+        "read_text",
+        "search_text",
+        "inspect_file",
+        "apply_text_patch",
+        "workspace_run_check",
+        "list_allowed_roots",
+        "request_evidence",
+    }
 )
 ENV_TOOLS = frozenset(
     {"observe", "act", "recall_map", "plan", "recall_topo", "recall_path", "delegate_navigation"}
@@ -831,10 +839,13 @@ def _execute_evidence_option(
     region: EvidenceRegion,
     task: SandboxTask | WorktreeTask,
     assignment: IntentAssignment | None = None,
+    requests: tuple[EvidenceRequest, ...] | None = None,
 ) -> tuple[OptionResult, tuple[ContextBlock, ...]]:
     """Execute bounded read/search requests selected by the evidence region."""
     trace: list[dict[str, Any]] = []
-    for request in region.requests(task, assignment):
+    before_blocks = len(region.blocks())
+    selected_requests = requests if requests is not None else region.requests(task, assignment)
+    for request in selected_requests:
         traj.region_tool_calls += 1
         try:
             if request.action == "read_text":
@@ -864,7 +875,7 @@ def _execute_evidence_option(
                 "truncated": bool(result.get("truncated", False)),
             }
         )
-    blocks = region.blocks()
+    blocks = region.blocks()[before_blocks:]
     state = region.snapshot()
     evidence_refs = []
     for block in blocks:
@@ -1269,7 +1280,11 @@ def _build_system_prompt(
 ) -> str:
     # 评测测试命令:用 task.test_args(worktree 任务常钉到具体文件,如 ["tests/test_x.py","-q"])。
     test_argv_part = (", " + ", ".join(f'"{a}"' for a in task.test_args)) if task.test_args else ""
-    available_tools = CODE_REGIME_TOOLS if allowed_tools is None else frozenset(allowed_tools)
+    available_tools = (
+        CODE_REGIME_TOOLS - {"request_evidence"}
+        if allowed_tools is None
+        else frozenset(allowed_tools)
+    )
     if not available_tools.issubset(CODE_REGIME_TOOLS):
         raise ValueError("code prompt tools must be a subset of CODE_REGIME_TOOLS")
     tool_docs = {
@@ -1286,6 +1301,11 @@ def _build_system_prompt(
             f'argv=["{python_exe}", "-m", "pytest"{test_argv_part}]。\n'
         ),
         "list_allowed_roots": "- list_allowed_roots(): 看工作区根。\n",
+        "request_evidence": (
+            "- request_evidence(action, path|query): 请求 EvidenceRegion 补充一次有界读取或搜索;"
+            "action=read_text 时传 path,action=search_text 时传 query。结果发布到下一轮 "
+            "<region_workbench>。\n"
+        ),
     }
     tools_doc = "".join(tool_docs[tool] for tool in sorted(available_tools))
     if "read_text" in available_tools:
@@ -1294,10 +1314,16 @@ def _build_system_prompt(
             "   然后 workspace_run_check 跑 pytest 验证;绿了就 done。\n"
         )
     else:
+        follow_up_rule = (
+            "   若工作台证据不足,可 request_evidence 请求一次有界搜索或读取,下一轮再使用新证据。\n"
+            if "request_evidence" in available_tools
+            else ""
+        )
         workflow_rule = (
             "1. 源码和测试证据由脑区发布在 <region_workbench>;直接使用其中的 text 与 sha256 "
             "定位并 apply_text_patch(dry_run=false),不要重复请求已委派的读取或搜索。\n"
-            "   然后 workspace_run_check 跑 pytest 验证;绿了就 done。\n"
+            + follow_up_rule
+            + "   然后 workspace_run_check 跑 pytest 验证;绿了就 done。\n"
         )
     return (
         "你是软件工程师,任务:修复工作区里的 bug 让 pytest 测试转绿。\n\n"
@@ -1722,6 +1748,8 @@ async def run_agent(
             raise ValueError("code_evidence ownership requires evidence_region")
     main_denied_actions = frozenset(action_owners) & CODE_REGIME_TOOLS
     main_allowed_tools = ALLOWED_TOOLS - main_denied_actions
+    if evidence_assignment is None:
+        main_allowed_tools = main_allowed_tools - {"request_evidence"}
     cap_chars = max(2000, int(transcript_token_cap) * 4)
     advisory_context = str(advisory_context or "").strip()
     if len(advisory_context) > 12000:
@@ -1961,6 +1989,18 @@ async def run_agent(
                 "delivery_mode": _workbench_delivery_mode,
                 "contains_context_content": False,
             }
+            if evidence_region is not None:
+                evidence_state = evidence_region.snapshot()
+                traj.region_workbench.update(
+                    {
+                        "evidence_follow_up_requests": int(
+                            evidence_state["follow_up_requests"]
+                        ),
+                        "evidence_follow_up_remaining": int(
+                            evidence_state["follow_up_remaining"]
+                        ),
+                    }
+                )
 
         def _publish_workbench_blocks(
             region_name: str,
@@ -2645,6 +2685,46 @@ async def run_agent(
                     exec_err = None
                 except Exception as exc:  # noqa: BLE001 — region failure becomes tool feedback
                     result_str, exec_err = "", f"delegate_navigation 失败: {exc}"
+            elif (
+                call.tool == "request_evidence"
+                and evidence_region is not None
+                and evidence_assignment is not None
+            ):
+                try:
+                    request = evidence_region.follow_up_request(
+                        task,
+                        evidence_assignment,
+                        call.args,
+                    )
+                    evidence_option, evidence_blocks = _execute_evidence_option(
+                        traj,
+                        region=evidence_region,
+                        task=task,
+                        assignment=evidence_assignment,
+                        requests=(request,),
+                    )
+                    _publish_workbench_blocks(
+                        "evidence",
+                        evidence_blocks,
+                        ttl_steps=max_steps + 1,
+                    )
+                    _publish_option(
+                        evidence_option,
+                        trigger="main_evidence_request",
+                        inject_execution=False,
+                    )
+                    evidence_state = evidence_region.snapshot()
+                    result_str = _compact(
+                        {
+                            "status": "evidence_published",
+                            "action": request.action,
+                            "blocks_published": len(evidence_blocks),
+                            "follow_up_remaining": evidence_state["follow_up_remaining"],
+                        }
+                    )
+                    exec_err = None
+                except Exception as exc:  # noqa: BLE001 — invalid region request becomes tool feedback
+                    result_str, exec_err = "", f"request_evidence 失败: {exc}"
             else:
                 result_str, exec_err = dispatch_tool(call, portable_root=run_dir)
             patch_info = _last_patch_info.get() or {}

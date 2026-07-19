@@ -295,6 +295,7 @@ def test_code_regime_system_prompt_does_not_leak_env_tools():
     prompt = _build_system_prompt(task, sys.executable)
     assert "observe" not in prompt  # env 专属工具不泄漏
     assert "read_text" in prompt    # code 工具仍在(tool 列表快照不变)
+    assert "request_evidence" not in prompt  # 仅 compiled evidence assignment 可见
 
 
 def test_code_regime_prompt_exposes_only_actor_owned_tools():

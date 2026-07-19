@@ -288,8 +288,8 @@ def test_allowed_tools_exact():
     # code agent 的 system prompt 不列它们(不泄漏),仅幻觉调用时触发 → dispatch 显式报错。
     assert ALLOWED_TOOLS == frozenset(
         {"read_text", "search_text", "inspect_file", "apply_text_patch", "workspace_run_check",
-         "list_allowed_roots", "observe", "act", "recall_map", "plan", "recall_topo", "recall_path",
-         "delegate_navigation"}
+         "list_allowed_roots", "request_evidence", "observe", "act", "recall_map", "plan",
+         "recall_topo", "recall_path", "delegate_navigation"}
     )
 
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 from pathlib import Path
 
 import pytest
@@ -128,6 +129,169 @@ def test_evidence_region_executes_assignment_scoped_search_and_sanitizes_results
     assert content["matches"][0]["path"] == "src/parser.py"
     assert "D:/private" not in block.content
     assert region.snapshot()["searches_succeeded"] == 1
+
+
+def test_evidence_region_validates_and_budgets_main_brain_follow_up_requests():
+    task = SandboxTask(id="follow-up", goal="Diagnose behavior", test_args=[])
+    assignment = IntentCompiler().compile(
+        {
+            "intent_id": task.id,
+            "objective": task.goal,
+            "required_capabilities": ["code_evidence"],
+        }
+    ).assignment_for("code_evidence")
+    assert assignment is not None
+    region = EvidenceRegion(max_files=1, max_searches=1, max_follow_ups=2)
+
+    search = region.follow_up_request(
+        task,
+        assignment,
+        {"action": "search_text", "query": "def inclusive_total"},
+    )
+    read = region.follow_up_request(
+        task,
+        assignment,
+        {"action": "read_text", "path": "range_calc.py"},
+    )
+
+    assert search.max_results == region.max_results_per_search
+    assert read.max_bytes == region.max_bytes_per_file
+    assert region.snapshot()["follow_up_remaining"] == 0
+    with pytest.raises(ValueError, match="follow-up limit"):
+        region.follow_up_request(
+            task,
+            assignment,
+            {"action": "read_text", "path": "other.py"},
+        )
+
+    duplicate_region = EvidenceRegion()
+    duplicate_region.follow_up_request(
+        task,
+        assignment,
+        {"action": "search_text", "query": "inclusive_total"},
+    )
+    with pytest.raises(ValueError, match="already requested"):
+        duplicate_region.follow_up_request(
+            task,
+            assignment,
+            {"action": "search_text", "query": "inclusive_total"},
+        )
+    with pytest.raises(ValueError, match="unknown field"):
+        EvidenceRegion().follow_up_request(
+            task,
+            assignment,
+            {"action": "read_text", "path": "range_calc.py", "max_bytes": 999999},
+        )
+    with pytest.raises(ValueError, match="relative text file"):
+        EvidenceRegion().follow_up_request(
+            task,
+            assignment,
+            {"action": "read_text", "path": "../secret.py"},
+        )
+
+
+def test_main_brain_can_request_bounded_evidence_without_owning_reads_or_searches():
+    source = "def inclusive_total(start, end):\n    return sum(range(start, end))\n"
+    test_source = (
+        "from range_calc import inclusive_total\n\n"
+        "def test_includes_end():\n"
+        "    assert inclusive_total(1, 3) == 6\n"
+    )
+    task = SandboxTask(
+        id="follow-up-loop",
+        goal="Fix the inclusive total behavior without assuming which implementation file owns it.",
+        files={"range_calc.py": source},
+        tests={"tests/test_behavior.py": test_source},
+        test_args=["tests/test_behavior.py", "-q"],
+    )
+    compiled = IntentCompiler().compile(
+        {
+            "intent_id": task.id,
+            "objective": task.goal,
+            "required_capabilities": ["code_evidence"],
+        }
+    )
+    run_dir = make_run_dir(prefix="brainregion-evidence-follow-up-")
+    materialize_fixture(task, Path(run_dir))
+    with scoped_workspace_root(run_dir):
+        source_sha = read_text("range_calc.py")["sha256"]
+    backend = ScriptBackend(
+        [
+            _json(
+                {
+                    "thought": "Find the implementation named by the test.",
+                    "tool": "request_evidence",
+                    "args": {"action": "search_text", "query": "def inclusive_total"},
+                }
+            ),
+            _json(
+                {
+                    "thought": "Read the implementation found by the evidence region.",
+                    "tool": "request_evidence",
+                    "args": {"action": "read_text", "path": "range_calc.py"},
+                }
+            ),
+            _json(
+                {
+                    "thought": "Apply the grounded repair.",
+                    "tool": "apply_text_patch",
+                    "args": {
+                        "path": "range_calc.py",
+                        "expected_sha256": source_sha,
+                        "replacements": [
+                            {
+                                "old_text": "range(start, end)",
+                                "new_text": "range(start, end + 1)",
+                            }
+                        ],
+                        "dry_run": False,
+                    },
+                }
+            ),
+            _json({"thought": "Verification passed.", "done": True, "answer": "fixed"}),
+        ]
+    )
+    try:
+        trajectory = asyncio.run(
+            run_agent(
+                backend,
+                "mock",
+                task,
+                run_dir=run_dir,
+                max_steps=5,
+                compiled_intent=compiled,
+                evidence_region=EvidenceRegion(),
+                option_region=VerificationOptionRegion(),
+                option_continuous=True,
+                python_exe=sys.executable,
+            )
+        )
+    finally:
+        cleanup_run_dir(run_dir)
+
+    first_input = "\n".join(message["content"] for message in backend.message_history[0])
+    second_input = "\n".join(message["content"] for message in backend.message_history[1])
+    third_input = "\n".join(message["content"] for message in backend.message_history[2])
+    assert "- request_evidence(" in first_input
+    assert "tests/test_behavior.py" in first_input
+    assert "Search evidence: def inclusive_total" in second_input
+    assert "Source snapshot: range_calc.py" in third_input
+    assert trajectory.tests_green is True, [
+        (step.tool, step.error, step.result_preview) for step in trajectory.steps
+    ]
+    assert [step.tool for step in trajectory.steps] == [
+        "request_evidence",
+        "request_evidence",
+        "apply_text_patch",
+        None,
+    ]
+    assert not {"read_text", "search_text"} & {
+        step.tool for step in trajectory.steps if step.tool
+    }
+    assert trajectory.region_tool_calls == 4
+    assert trajectory.automatic_region_activations == 4
+    assert trajectory.region_workbench["evidence_follow_up_requests"] == 2
+    assert trajectory.region_workbench["evidence_follow_up_remaining"] == 1
 
 
 def test_empty_evidence_region_still_reports_enabled_workbench():

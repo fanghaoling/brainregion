@@ -70,6 +70,7 @@ class EvidenceRegion:
         max_bytes_per_file: int = 12000,
         max_searches: int = 3,
         max_results_per_search: int = 20,
+        max_follow_ups: int = 3,
     ) -> None:
         if isinstance(max_files, bool) or not isinstance(max_files, int) or max_files <= 0:
             raise ValueError("max_files must be a positive integer")
@@ -87,30 +88,47 @@ class EvidenceRegion:
             or max_results_per_search <= 0
         ):
             raise ValueError("max_results_per_search must be a positive integer")
+        if (
+            isinstance(max_follow_ups, bool)
+            or not isinstance(max_follow_ups, int)
+            or max_follow_ups <= 0
+        ):
+            raise ValueError("max_follow_ups must be a positive integer")
         self.max_files = max_files
         self.max_bytes_per_file = max_bytes_per_file
         self.max_searches = max_searches
         self.max_results_per_search = max_results_per_search
+        self.max_follow_ups = max_follow_ups
         self._results: list[tuple[EvidenceRequest, dict[str, Any]]] = []
         self._errors: list[tuple[EvidenceRequest, str]] = []
+        self._follow_up_requests: list[EvidenceRequest] = []
+
+    def _allowed_actions(
+        self,
+        task: SandboxTask | WorktreeTask,
+        assignment: IntentAssignment | None,
+    ) -> frozenset[str]:
+        if assignment is None:
+            return frozenset({"read_text"})
+        if assignment.task_id != task.id:
+            raise ValueError("evidence assignment task_id must match sandbox task")
+        if assignment.capability != "code_evidence" or assignment.region != self.name:
+            raise ValueError("evidence region requires a code_evidence assignment")
+        allowed_actions = frozenset(assignment.allowed_actions)
+        unsupported = allowed_actions - {"read_text", "search_text"}
+        if unsupported:
+            raise ValueError(f"unsupported evidence action(s): {sorted(unsupported)}")
+        return allowed_actions
 
     def requests(
         self,
         task: SandboxTask | WorktreeTask,
         assignment: IntentAssignment | None = None,
     ) -> tuple[EvidenceRequest, ...]:
-        allowed_actions = frozenset({"read_text"})
+        allowed_actions = self._allowed_actions(task, assignment)
         candidates: list[str] = []
         search_queries: tuple[str, ...] = ()
         if assignment is not None:
-            if assignment.task_id != task.id:
-                raise ValueError("evidence assignment task_id must match sandbox task")
-            if assignment.capability != "code_evidence" or assignment.region != self.name:
-                raise ValueError("evidence region requires a code_evidence assignment")
-            allowed_actions = frozenset(assignment.allowed_actions)
-            unsupported = allowed_actions - {"read_text", "search_text"}
-            if unsupported:
-                raise ValueError(f"unsupported evidence action(s): {sorted(unsupported)}")
             candidates.extend(assignment.resource_hints)
             search_queries = assignment.search_queries[: self.max_searches]
         candidates.extend(_PATH_RE.findall(str(task.goal or "")))
@@ -147,6 +165,62 @@ class EvidenceRegion:
                 if query.strip()
             )
         return tuple(requests)
+
+    def follow_up_request(
+        self,
+        task: SandboxTask | WorktreeTask,
+        assignment: IntentAssignment,
+        payload: dict[str, Any],
+    ) -> EvidenceRequest:
+        """Validate one main-brain evidence request without transferring read/search ownership."""
+        if not isinstance(payload, dict):
+            raise ValueError("evidence request args must be an object")
+        allowed_actions = self._allowed_actions(task, assignment)
+        action = str(payload.get("action") or "").strip().casefold()
+        if action not in {"read_text", "search_text"}:
+            raise ValueError("evidence request action must be read_text or search_text")
+        if action not in allowed_actions:
+            raise ValueError(f"evidence action {action!r} is not owned by the assignment")
+        allowed_fields = {"action", "path"} if action == "read_text" else {"action", "query"}
+        unknown = set(payload) - allowed_fields
+        if unknown:
+            raise ValueError(f"evidence request unknown field(s): {sorted(unknown)}")
+        if len(self._follow_up_requests) >= self.max_follow_ups:
+            raise ValueError("evidence follow-up limit reached")
+
+        observed = [request for request, _ in (*self._results, *self._errors)]
+        considered = observed + [
+            request for request in self._follow_up_requests if request not in observed
+        ]
+        if action == "read_text":
+            path = _normalize_relative_text_path(str(payload.get("path") or ""))
+            if not path:
+                raise ValueError("evidence read path must be a relative text file")
+            if sum(request.action == "read_text" for request in considered) >= self.max_files:
+                raise ValueError("evidence file limit reached")
+            request = EvidenceRequest(
+                action="read_text",
+                path=path,
+                max_bytes=self.max_bytes_per_file,
+            )
+            if any(item.action == "read_text" and item.path == path for item in considered):
+                raise ValueError("evidence path was already requested")
+        else:
+            query = str(payload.get("query") or "").strip()
+            if not query or len(query) > 500:
+                raise ValueError("evidence search query must contain 1..500 characters")
+            if sum(request.action == "search_text" for request in considered) >= self.max_searches:
+                raise ValueError("evidence search limit reached")
+            request = EvidenceRequest(
+                action="search_text",
+                query=query,
+                max_results=self.max_results_per_search,
+            )
+            if any(item.action == "search_text" and item.query == query for item in considered):
+                raise ValueError("evidence query was already requested")
+
+        self._follow_up_requests.append(request)
+        return request
 
     def observe(
         self,
@@ -262,6 +336,8 @@ class EvidenceRegion:
             "failed_paths": [request.path for request in failed_reads],
             "failed_queries": [request.query for request in failed_searches],
             "blocks_published": len(self._results),
+            "follow_up_requests": len(self._follow_up_requests),
+            "follow_up_remaining": self.max_follow_ups - len(self._follow_up_requests),
             "confidence": 1.0 if self._results else 0.0,
             "last_decision": "evidence_published" if self._results else "no_explicit_paths",
         }
