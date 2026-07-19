@@ -24,7 +24,7 @@ from typing import Any, Awaitable, Callable
 from brainregion.core.cognitive_workspace import CognitiveWorkspace
 from brainregion.core.context import ContextBlock
 from brainregion.core.intent import CompiledIntent, IntentAssignment
-from brainregion.core.stages.parse import extract_json_object
+from brainregion.core.stages.parse import extract_json_object_diagnostic
 from brainregion.core.wake.gate import wake_gate
 from brainregion.runtime import emit_event, merge_usage, normalize_usage
 from brainregion.workspace import (
@@ -326,6 +326,7 @@ class StepRecord:
     phase_after: str = ""
     effort_routing_shadow: dict[str, Any] = field(default_factory=dict)
     error_kind: str = ""
+    extraction_mode: str = ""
 
 
 @dataclass(frozen=True)
@@ -495,6 +496,14 @@ class Trajectory:
         )
 
     @property
+    def extraction_mode_counts(self) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for step in self.steps:
+            if step.extraction_mode:
+                counts[step.extraction_mode] = counts.get(step.extraction_mode, 0) + 1
+        return dict(sorted(counts.items()))
+
+    @property
     def progress_trace(self) -> list[dict[str, Any]]:
         """Content-free step metadata suitable for gate replay and reports."""
         return [
@@ -508,6 +517,7 @@ class Trajectory:
                 "verification_passed": step.verification_passed,
                 "error": bool(step.error),
                 "error_kind": step.error_kind,
+                "extraction_mode": step.extraction_mode,
             }
             for step in self.steps
         ]
@@ -556,6 +566,7 @@ class Trajectory:
             "adopted_assignment_ids": list(self.adopted_assignment_ids),
             "advisory_injections": list(self.advisory_injections),
             "progress_trace": self.progress_trace,
+            "extraction_mode_counts": self.extraction_mode_counts,
             "cognitive_state": self.cognitive_state.to_dict() if self.cognitive_state else None,
             "cognitive_scaffold": (
                 self.cognitive_state.public_metrics()
@@ -591,6 +602,7 @@ class Trajectory:
                     "result_preview": s.result_preview,
                     "error": s.error,
                     "error_kind": s.error_kind,
+                    "extraction_mode": s.extraction_mode,
                     "main_cost_usd": round(s.main_cost_usd, 6),
                     "arm_cost_usd": round(s.arm_cost_usd, 6),
                     "main_usage": normalize_usage(s.main_usage),
@@ -914,15 +926,23 @@ def _replace_region_workbench_message(messages: list[dict], view: dict[str, Any]
     )
 
 
-def parse_tool_call_diagnostic(
+def parse_tool_call_with_extraction(
     content: str,
     *,
     allowed_tools: frozenset[str] | set[str] | None = None,
-) -> tuple[ToolCall | None, str | None, str]:
+) -> tuple[ToolCall | None, str | None, str, str]:
     """解析并区分 JSON 提取失败与合法 JSON 的协议校验失败。"""
-    obj = extract_json_object(content)
+    obj, extraction_mode = extract_json_object_diagnostic(content)
+
+    def result(
+        call: ToolCall | None,
+        error: str | None,
+        error_kind: str,
+    ) -> tuple[ToolCall | None, str | None, str, str]:
+        return call, error, error_kind, extraction_mode
+
     if obj is None or not isinstance(obj, dict):
-        return (
+        return result(
             None,
             'no JSON object found; emit {"thought","tool","args"} or '
             '{"thought","done":true,"answer"}',
@@ -931,22 +951,26 @@ def parse_tool_call_diagnostic(
     thought = str(obj.get("thought", ""))
     raw_cognitive_update = obj.get("cognitive_update")
     if raw_cognitive_update is not None and not isinstance(raw_cognitive_update, dict):
-        return None, "'cognitive_update' must be a JSON object", "protocol_error"
+        return result(None, "'cognitive_update' must be a JSON object", "protocol_error")
     has_done = obj.get("done") is True
     has_tool = bool(obj.get("tool"))
     if has_done and has_tool:
-        return None, "'done' and 'tool' are mutually exclusive", "protocol_error"
+        return result(None, "'done' and 'tool' are mutually exclusive", "protocol_error")
     if has_done:
         raw_ids = obj.get("adopted_assignment_ids", [])
         if not isinstance(raw_ids, list):
-            return None, "'adopted_assignment_ids' must be an array", "protocol_error"
+            return result(None, "'adopted_assignment_ids' must be an array", "protocol_error")
         adopted: list[str] = []
         for raw_id in raw_ids:
             if not isinstance(raw_id, str):
-                return None, "'adopted_assignment_ids' entries must be strings", "protocol_error"
+                return result(
+                    None,
+                    "'adopted_assignment_ids' entries must be strings",
+                    "protocol_error",
+                )
             assignment_id = raw_id.strip()
             if not assignment_id or len(assignment_id) > 200:
-                return (
+                return result(
                     None,
                     "'adopted_assignment_ids' entries must be 1..200 characters",
                     "protocol_error",
@@ -954,42 +978,67 @@ def parse_tool_call_diagnostic(
             if assignment_id not in adopted:
                 adopted.append(assignment_id)
         if len(adopted) > 32:
-            return (
+            return result(
                 None,
                 "'adopted_assignment_ids' cannot contain more than 32 entries",
                 "protocol_error",
             )
-        return ToolCall(
-            thought,
+        return result(
+            ToolCall(
+                thought,
+                None,
+                {},
+                True,
+                str(obj.get("answer", "")),
+                tuple(adopted),
+                raw_cognitive_update,
+            ),
             None,
-            {},
-            True,
-            str(obj.get("answer", "")),
-            tuple(adopted),
-            raw_cognitive_update,
-        ), None, ""
+            "",
+        )
     if not has_tool:
-        return None, "missing 'tool' (or set 'done': true to finish)", "protocol_error"
+        return result(
+            None,
+            "missing 'tool' (or set 'done': true to finish)",
+            "protocol_error",
+        )
     tool = str(obj["tool"])
     available_tools = ALLOWED_TOOLS if allowed_tools is None else frozenset(allowed_tools)
     if not available_tools.issubset(ALLOWED_TOOLS):
         raise ValueError("allowed_tools must be a subset of ALLOWED_TOOLS")
     if tool not in ALLOWED_TOOLS:
-        return (
+        return result(
             None,
             f"unknown tool '{tool}'; allowed: {sorted(available_tools)}",
             "protocol_error",
         )
     if tool not in available_tools:
-        return (
+        return result(
             None,
             f"tool '{tool}' is unavailable to this actor; allowed: {sorted(available_tools)}",
             "protocol_error",
         )
     args = obj.get("args", {})
     if not isinstance(args, dict):
-        return None, "'args' must be a JSON object", "protocol_error"
-    return ToolCall(thought, tool, args, False, "", (), raw_cognitive_update), None, ""
+        return result(None, "'args' must be a JSON object", "protocol_error")
+    return result(
+        ToolCall(thought, tool, args, False, "", (), raw_cognitive_update),
+        None,
+        "",
+    )
+
+
+def parse_tool_call_diagnostic(
+    content: str,
+    *,
+    allowed_tools: frozenset[str] | set[str] | None = None,
+) -> tuple[ToolCall | None, str | None, str]:
+    """兼容诊断入口；解析恢复模式由运行时专用入口单独返回。"""
+    call, error, error_kind, _extraction_mode = parse_tool_call_with_extraction(
+        content,
+        allowed_tools=allowed_tools,
+    )
+    return call, error, error_kind
 
 
 def parse_tool_call(content: str) -> tuple[ToolCall | None, str | None]:
@@ -2368,7 +2417,7 @@ async def run_agent(
                 )
                 continue
 
-            call, parse_err, parse_error_kind = parse_tool_call_diagnostic(
+            call, parse_err, parse_error_kind, extraction_mode = parse_tool_call_with_extraction(
                 resp.content,
                 allowed_tools=main_allowed_tools,
             )
@@ -2383,6 +2432,7 @@ async def run_agent(
                     index=step, thought="", tool=None, args={}, done=False,
                     result_chars=0, result_preview="", error=parse_err,
                     error_kind=parse_error_kind,
+                    extraction_mode=extraction_mode,
                     main_cost_usd=step_main_cost, arm_cost_usd=0.0, status_injected=status_injected,
                     main_usage=step_main_usage, main_cost_source=step_main_cost_source,
                     main_input_attribution=step_main_input_attribution,
@@ -2399,6 +2449,7 @@ async def run_agent(
                         "step": step,
                         "parse_error": parse_err,
                         "error_kind": parse_error_kind,
+                        "extraction_mode": extraction_mode,
                         "phase": phase_controller.phase.value,
                         "recommended_tier": phase_controller.tier.value,
                         "difficulty_score": round(phase_controller.difficulty.score, 3),
@@ -2464,6 +2515,7 @@ async def run_agent(
                 traj.steps.append(StepRecord(
                     index=step, thought=call.thought, tool=None, args={}, done=True,
                     result_chars=0, result_preview=call.answer[:300], error=None,
+                    extraction_mode=extraction_mode,
                     main_cost_usd=step_main_cost, arm_cost_usd=0.0, status_injected=status_injected,
                     main_usage=step_main_usage, main_cost_source=step_main_cost_source,
                     main_input_attribution=step_main_input_attribution,
@@ -2485,6 +2537,7 @@ async def run_agent(
                         "arm": arm,
                         "step": step,
                         "done": True,
+                        "extraction_mode": extraction_mode,
                         "phase": phase_controller.phase.value,
                         "recommended_tier": phase_controller.tier.value,
                         "difficulty_score": round(phase_controller.difficulty.score, 3),
@@ -2643,6 +2696,7 @@ async def run_agent(
                 index=step, thought=call.thought, tool=call.tool, args=call.args, done=False,
                 result_chars=len(result_str), result_preview=preview, error=exec_err,
                 error_kind="tool_error" if exec_err else "",
+                extraction_mode=extraction_mode,
                 main_cost_usd=step_main_cost,
                 arm_cost_usd=traj.total_arm_cost_usd - _arm_cost_before,
                 status_injected=status_injected,
@@ -2686,6 +2740,7 @@ async def run_agent(
                     "tool": call.tool,
                     "error": exec_err,
                     "error_kind": step_record.error_kind,
+                    "extraction_mode": extraction_mode,
                     "phase": phase_controller.phase.value,
                     "recommended_tier": phase_controller.tier.value,
                     "difficulty_score": round(phase_controller.difficulty.score, 3),

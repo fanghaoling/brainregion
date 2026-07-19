@@ -1,7 +1,11 @@
 """ParseStage：JSON 提取（鲁棒 fallback）+ normalize_finding（放宽校验 + evidence 强制）。"""
 from __future__ import annotations
 
-from brainregion.core.stages.parse import extract_json_object, normalize_finding
+from brainregion.core.stages.parse import (
+    extract_json_object,
+    extract_json_object_diagnostic,
+    normalize_finding,
+)
 
 _GOOD = {
     "dimension": "ecs_perf",
@@ -32,11 +36,23 @@ def test_extract_prose_plus_json():
 def test_extract_json_ignores_trailing_prose():
     text = '{"issues":[]}\nNote: the object above is the requested machine-readable result.'
     assert extract_json_object(text) == {"issues": []}
+    assert extract_json_object_diagnostic(text) == ({"issues": []}, "trailing_text")
+
+
+def test_extract_json_diagnostic_reports_strict_and_truncated_modes():
+    assert extract_json_object_diagnostic('{"issues":[]}') == (
+        {"issues": []},
+        "strict_json",
+    )
+    obj, mode = extract_json_object_diagnostic('{"issues":[{"title":"partial')
+    assert obj is not None
+    assert mode == "truncated_repair"
 
 
 def test_extract_does_not_infer_object_from_natural_language():
     text = 'thought=inspect; tool=read_text; args(path="ranges.py")'
     assert extract_json_object(text) is None
+    assert extract_json_object_diagnostic(text) == (None, "failed")
 
 
 def test_extract_does_not_consume_object_nested_in_top_level_array():

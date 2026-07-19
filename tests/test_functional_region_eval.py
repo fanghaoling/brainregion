@@ -121,6 +121,7 @@ def test_functional_region_eval_separates_context_ownership_and_verification_eff
     assert report["n_runs"] == 4
     assert report["execution"]["actual_model_calls"] == 12
     assert report["execution"]["actual_tool_calls"] == 15
+    assert report["execution"]["extraction_mode_counts"] == {"strict_json": 12}
     assert report["execution"]["passive_region_input_contract"] == (
         "model_visible_context_equivalent_v1"
     )
@@ -128,6 +129,10 @@ def test_functional_region_eval_separates_context_ownership_and_verification_eff
         "main_only->passive_context->evidence_region->evidence_verification_regions": 1
     }
     assert all(summary["solve_rate"] == 1.0 for summary in report["per_arm"].values())
+    assert all(
+        summary["extraction_mode_counts"] == {"strict_json": int(summary["mean_steps"])}
+        for summary in report["per_arm"].values()
+    )
 
     per_arm = report["per_arm"]
     assert per_arm[ARM_MAIN_ONLY]["mean_steps"] == 4.0
@@ -201,6 +206,7 @@ def test_functional_region_eval_exposes_opt_in_intent_ownership_arm():
         "read_text",
         "search_text",
     ]
+    assert treatment["extraction_mode_counts"] == {"strict_json": 3}
     assert report["effects"]["intent_ownership"]["n_tasks"] == 1
 
 

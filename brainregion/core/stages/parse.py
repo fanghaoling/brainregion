@@ -75,34 +75,43 @@ def _repair_truncated_json(s: str) -> dict | None:
         return None
 
 
+def extract_json_object_diagnostic(text: str) -> tuple[dict | None, str]:
+    """提取 JSON 对象并返回内容无关的恢复模式。"""
+    if not text:
+        return None, "failed"
+    inner = _strip_fence(text)
+    brace = inner.find("{")
+    if brace < 0:
+        return None, "failed"
+    bracket = inner.find("[")
+    if 0 <= bracket < brace:
+        # This helper extracts objects only. Do not consume the first object nested in a
+        # top-level array; planner has a separate list-aware parser that needs the whole value.
+        return None, "failed"
+    cand = inner[brace:]
+    # raw_decode 保持 JSON 语法严格，但允许对象后出现 provider 文本回退常见的尾注。
+    # 后续调用方仍负责 schema / 工具白名单校验，提取器不把自然语言解释成动作。
+    try:
+        obj, end = json.JSONDecoder().raw_decode(cand)
+        if isinstance(obj, dict):
+            mode = "strict_json" if not cand[end:].strip() else "trailing_text"
+            return obj, mode
+    except Exception:  # noqa: BLE001
+        pass
+    repaired = _repair_truncated_json(cand)
+    if repaired is not None:
+        return repaired, "truncated_repair"
+    return None, "failed"
+
+
 def extract_json_object(text: str) -> dict | None:
     """提 JSON 对象，3 级 fallback（挽回模型非纯 JSON / 截断输出）：
     1) 去 ```json 围栏后从首个 { 起 raw_decode，允许完整对象后带简短说明
     2) 仍要求首个值本身是 JSON object，不从自然语言猜测结构或动作
     3) 截断修复（补未闭合括号/字符串）——模型超长输出被截断时
     """
-    if not text:
-        return None
-    inner = _strip_fence(text)
-    brace = inner.find("{")
-    if brace < 0:
-        return None
-    bracket = inner.find("[")
-    if 0 <= bracket < brace:
-        # This helper extracts objects only. Do not consume the first object nested in a
-        # top-level array; planner has a separate list-aware parser that needs the whole value.
-        return None
-    cand = inner[brace:]
-    # raw_decode 保持 JSON 语法严格，但允许对象后出现 provider 文本回退常见的尾注。
-    # 后续调用方仍负责 schema / 工具白名单校验，提取器不把自然语言解释成动作。
-    try:
-        obj, _ = json.JSONDecoder().raw_decode(cand)
-        if isinstance(obj, dict):
-            return obj
-    except Exception:  # noqa: BLE001
-        pass
-    # 2) 截断修复（glm-5.2 等偶发截断，外层括号没闭合）
-    return _repair_truncated_json(cand)
+    obj, _mode = extract_json_object_diagnostic(text)
+    return obj
 
 
 _VALID_SEVERITY = {"high", "medium", "low"}

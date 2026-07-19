@@ -26,7 +26,12 @@ from brainregion.sandbox import (
 )
 from brainregion.sandbox.eval import evaluate_gate, run_sandbox_eval
 from brainregion.sandbox.fixtures import SANDBOX_FIXTURES, get_fixture
-from brainregion.sandbox.loop import ALLOWED_TOOLS, dispatch_tool, parse_tool_call
+from brainregion.sandbox.loop import (
+    ALLOWED_TOOLS,
+    dispatch_tool,
+    parse_tool_call,
+    parse_tool_call_with_extraction,
+)
 from brainregion.sandbox.isolation import FixturePathError
 from brainregion.sandbox.task import SandboxTask
 from brainregion.workspace import apply_text_patch, read_text
@@ -245,6 +250,10 @@ def test_parse_tool_accepts_json_followed_by_provider_text_fallback_note():
     )
     call, err = parse_tool_call(content)
     assert err is None and call.tool == "read_text" and call.args == {"path": "a"}
+    call, err, error_kind, extraction_mode = parse_tool_call_with_extraction(content)
+    assert err is None and error_kind == ""
+    assert call.tool == "read_text"
+    assert extraction_mode == "trailing_text"
 
 
 def test_parse_done_and_tool_mutually_exclusive():
@@ -297,6 +306,8 @@ def test_loop_solves_happy_path():
         assert traj.done and traj.n_steps == 4
         assert traj.termination_reason == "done"
         assert traj.steps[1].tool == "apply_text_patch"
+        assert traj.extraction_mode_counts == {"strict_json": 4}
+        assert {step["extraction_mode"] for step in traj.progress_trace} == {"strict_json"}
     finally:
         cleanup_run_dir(run_dir)
 
@@ -456,6 +467,8 @@ def test_loop_consecutive_parse_error_early_stop():
         assert traj.n_steps == 3
         assert {step.error_kind for step in traj.steps} == {"parse_error"}
         assert {step["error_kind"] for step in traj.progress_trace} == {"parse_error"}
+        assert traj.extraction_mode_counts == {"failed": 3}
+        assert {step["extraction_mode"] for step in traj.progress_trace} == {"failed"}
     finally:
         cleanup_run_dir(run_dir)
 
