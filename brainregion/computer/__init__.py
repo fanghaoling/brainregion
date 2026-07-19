@@ -22,6 +22,7 @@ from .perception import PerceptionRegion, ResolutionResult
 from .session import ComputerUseSession
 from .targeting import TargetingController
 from .unity_mock import UnityEditorMockAdapter
+from .vision_adapter import PRESETS as VISION_PRESETS, VisionAdapter, VisionModelConfig
 
 __all__ = [
     "ActionIntent",
@@ -43,5 +44,8 @@ __all__ = [
     "TargetingController",
     "UIElement",
     "UnityEditorMockAdapter",
+    "VISION_PRESETS",
+    "VisionAdapter",
+    "VisionModelConfig",
     "WithinPanel",
 ]
