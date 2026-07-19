@@ -78,7 +78,7 @@ Parse this Unity Editor screenshot into structured UI elements. Output ONLY a JS
 object (no prose, no markdown fences) with this exact shape:
 {
   "panels": [
-    {"name": "<panel label as shown>", "role": "hierarchy|inspector|scene|game|toolbar|project|console|menu_bar|other", "bbox": [x1,y1,x2,y2]}
+    {"name": "<panel label>", "role": "hierarchy|inspector|scene|game|toolbar|project|console|menu_bar|menu|popup|other", "transient_kind": "persistent|context_menu|submenu|popup", "bbox": [x1,y1,x2,y2]}
   ],
   "elements": [
     {"panel": "<panel name or role>", "role": "button|menu_item|input|tab|list_item|tree_item|dropdown|slider|header|component|other", "label": "<visible text/label>", "bbox": [x1,y1,x2,y2], "interactable": true}
@@ -86,8 +86,10 @@ object (no prose, no markdown fences) with this exact shape:
 }
 Rules:
 - Coordinates are NORMALIZED to [0,1000], origin top-left, bbox = [x1,y1,x2,y2].
-- First identify the main persistent panel regions (Hierarchy usually left, Inspector \
-right, Scene viewport center, Game, Toolbar top, Project/Console bottom, menu bar top).
+- First identify the main panel regions (Hierarchy left, Inspector right, Scene \
+center, Game, Toolbar top, Project/Console bottom, menu bar). Mark transient_kind: \
+"persistent" for docked panels, "context_menu" for a right-click popup menu, "submenu" \
+for a menu's expanded sub-items, "popup" for a floating dialog (e.g. Add Component search).
 - Then list INTERACTABLE UI elements inside each panel: buttons, menu items, tabs, input \
 fields, list/tree items, dropdowns, sliders, headers. Include their visible label/text.
 - Do NOT treat 3D objects inside the Scene/Game viewport as UI elements — the viewport is \
@@ -103,23 +105,29 @@ def _norm(value: Any) -> str:
 
 
 def _build_scene(
-    parsed: dict, *, session_id: str, sequence: int, app_id: str, window_id: str
-) -> tuple[SceneObservation, dict[str, list[int]]]:
-    """Map VLM panels/elements -> (SceneObservation, element_id->bbox).
+    parsed: dict, *, session_id: str, sequence: int, app_id: str, window_id: str, digest: str
+) -> tuple[SceneObservation, dict[str, list[int]], dict[str, list[int]]]:
+    """Map VLM panels/elements -> (SceneObservation, element_id->bbox, panel_id->bbox).
 
-    bbox stays out of the contract (returned separately for the adapter's execute()).
+    bbox stays out of the contract (returned separately for execute() and panel viz).
     """
     pid_by_key: dict[str, str] = {}
     panels: list[Panel] = []
+    panel_bbox_map: dict[str, list[int]] = {}
     for p in parsed.get("panels", []):
         role = _norm(p.get("role")) or "other"
         name = str(p.get("name") or p.get("role") or "panel")
         pid = role if role != "other" else _norm(name)
         if any(pp.panel_id == pid for pp in panels):
             continue
-        panels.append(Panel(panel_id=pid, role=role, label=name))
+        tk_raw = _norm(p.get("transient_kind"))
+        tk = None if tk_raw in ("", "persistent", "none", "null") else tk_raw
+        panels.append(Panel(panel_id=pid, role=role, label=name, transient_kind=tk))
         pid_by_key[_norm(name)] = pid
         pid_by_key[role] = pid
+        pbbox = p.get("bbox") or []
+        if len(pbbox) == 4:
+            panel_bbox_map[pid] = [int(v) for v in pbbox]
 
     by_panel: dict[str, list[dict]] = {}
     unassigned = 0
@@ -144,12 +152,15 @@ def _build_scene(
             role = _norm(e.get("role")) or "element"
             label = str(e.get("label") or "")
             eid = f"{pid}-{i}"
+            # context-menu items: VLM inconsistently files them under hierarchy/other;
+            # normalize into a synthetic context_menu transient panel (not menu_bar's).
+            elem_pid = "context_menu" if role == "menu_item" and pid != "menu_bar" else pid
             elements.append(
                 UIElement(
                     element_id=eid,
                     role=role,
                     label=label,
-                    panel_id=pid,
+                    panel_id=elem_pid,
                     enabled=bool(e.get("interactable", True)),
                     visible=True,
                 )
@@ -158,7 +169,10 @@ def _build_scene(
             if len(bbox) == 4:
                 bbox_map[eid] = [int(v) for v in bbox]
 
-    digest = hashlib.sha256(json.dumps(parsed, sort_keys=True).encode()).hexdigest()
+    # synthetic context_menu transient panel for any menu_items we normalized above.
+    if any(e.panel_id == "context_menu" for e in elements) and not any(p.panel_id == "context_menu" for p in panels):
+        panels.append(Panel(panel_id="context_menu", role="menu", label="Context Menu", transient_kind="context_menu"))
+
     obs = SceneObservation(
         session_id=session_id,
         sequence=sequence,
@@ -177,7 +191,25 @@ def _build_scene(
         elements=tuple(elements),
         panels=tuple(panels),
     )
-    return obs, bbox_map
+    return obs, bbox_map, panel_bbox_map
+
+
+def _map_crop_bbox(crop_bbox: list[int], region: tuple[int, int, int, int], full_w: int, full_h: int) -> list[int]:
+    """Map a [0,1000]-normalized bbox inside a crop back to [0,1000] full-screen normalized.
+
+    region = (x1, y1, x2, y2) full-screen pixel box. A bbox at normalized ``v`` inside the
+    crop sits at full-screen pixel ``x1 + v/1000*(x2-x1)``; re-normalize by full screen size.
+    """
+    x1, y1, x2, y2 = region
+    cw, ch = x2 - x1, y2 - y1
+
+    def mx(v: int) -> int:
+        return int((x1 + v / 1000 * cw) / full_w * 1000)
+
+    def my(v: int) -> int:
+        return int((y1 + v / 1000 * ch) / full_h * 1000)
+
+    return [mx(crop_bbox[0]), my(crop_bbox[1]), mx(crop_bbox[2]), my(crop_bbox[3])]
 
 
 # ----------------------------------------------------------------- adapter
@@ -208,21 +240,74 @@ class VisionAdapter:
             raise ValueError(f"{vision.api_key_env} not set (vision={vision.name})")
         self._sequence = 0
         self._bbox_map: dict[str, list[int]] = {}
+        self._panel_bbox_map: dict[str, list[int]] = {}
 
     # -- ComputerUseAdapter protocol ----------------------------------------
 
     def observe(self, *, session_id: str) -> SceneObservation:
         self._sequence += 1
         img_bytes = self._capture()
-        parsed = self._parse(img_bytes)
-        obs, bbox_map = _build_scene(
+        # downsample the full screen before VLM: a 2560x1528 PNG is ~3-5MB base64 and
+        # stalls 8B on the full-screen parse. bbox is normalized [0,1000] so resolution
+        # does not affect coordinates. observe_focus crops first (already small), so it
+        # skips this.
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(img_bytes))
+        maxw = 1600
+        if img.width > maxw:
+            img = img.resize((maxw, round(img.height * maxw / img.width)))
+        vbuf = io.BytesIO()
+        img.save(vbuf, format="PNG")
+        parsed = self._parse(vbuf.getvalue())
+        digest = hashlib.sha256(img_bytes).hexdigest()
+        obs, bbox_map, panel_bbox_map = _build_scene(
             parsed,
             session_id=session_id,
             sequence=self._sequence,
             app_id=self.app_id,
             window_id=self.window_id,
+            digest=digest,
         )
         self._bbox_map = bbox_map
+        self._panel_bbox_map = panel_bbox_map
+        return obs
+
+    def observe_focus(self, *, session_id: str, region: tuple[int, int, int, int]) -> SceneObservation:
+        """Crop the screen to ``region`` (full-screen pixel box x1,y1,x2,y2), run the VLM on
+        the CROP only, and map element bboxes back to full-screen normalized [0,1000] coords.
+
+        Full-screen 8B misses small/transient regions (eg a right-click context menu overlaid
+        on Hierarchy) — the probe showed 0 -> 23 menu items when narrowed. Bboxes are mapped
+        back to full-screen so ``execute()`` clicks the correct pixel without changes.
+        """
+        self._sequence += 1
+        img_bytes = self._capture()
+        from PIL import Image
+
+        img = Image.open(io.BytesIO(img_bytes))
+        full_w, full_h = img.size
+        crop = img.crop(region)
+        buf = io.BytesIO()
+        crop.save(buf, format="PNG")
+        _dbg = os.environ.get("VISION_FOCUS_DEBUG")
+        if _dbg:
+            try:
+                crop.save(_dbg)
+            except Exception:
+                pass
+        parsed = self._parse(buf.getvalue())
+        digest = hashlib.sha256(img_bytes).hexdigest()
+        obs, bbox_map, panel_bbox_map = _build_scene(
+            parsed,
+            session_id=session_id,
+            sequence=self._sequence,
+            app_id=self.app_id,
+            window_id=self.window_id,
+            digest=digest,
+        )
+        self._bbox_map = {eid: _map_crop_bbox(bb, region, full_w, full_h) for eid, bb in bbox_map.items()}
+        self._panel_bbox_map = {pid: _map_crop_bbox(bb, region, full_w, full_h) for pid, bb in panel_bbox_map.items()}
         return obs
 
     def execute(self, intent: ActionIntent) -> AdapterExecution:
@@ -308,6 +393,35 @@ class VisionAdapter:
             raise RuntimeError(f"VLM returned no JSON: {text[:200]}")
         return _parse_vlm_json(m.group(0))
 
+    def _denorm_center(self, bbox: list[int]) -> tuple[int, int]:
+        """Normalized [0,1000] bbox -> screen pixel center (assumes screenshot == full screen)."""
+        import pyautogui
+
+        sw, sh = pyautogui.size()
+        cx = (bbox[0] + bbox[2]) / 2 / 1000 * sw
+        cy = (bbox[1] + bbox[3]) / 2 / 1000 * sh
+        return int(cx), int(cy)
+
+    def _click(self, x: int, y: int, *, button: str) -> None:
+        import pyautogui
+
+        pyautogui.click(x, y, button=button)
+
+    def _move(self, x: int, y: int) -> None:
+        import pyautogui
+
+        pyautogui.moveTo(x, y)
+
+    def _type(self, text: str) -> None:
+        import pyautogui
+
+        pyautogui.write(text)
+
+    def _press(self, key: str) -> None:
+        import pyautogui
+
+        pyautogui.press(key)
+
 
 def _parse_vlm_json(raw: str) -> dict:
     """Lenient VLM-JSON parse. VLMs occasionally emit trailing commas or an unescaped
@@ -363,32 +477,3 @@ def _lenient_extract_arrays(raw: str) -> dict:
             except json.JSONDecodeError:
                 continue
     return out
-
-    def _denorm_center(self, bbox: list[int]) -> tuple[int, int]:
-        """Normalized [0,1000] bbox -> screen pixel center (assumes screenshot == full screen)."""
-        import pyautogui
-
-        sw, sh = pyautogui.size()
-        cx = (bbox[0] + bbox[2]) / 2 / 1000 * sw
-        cy = (bbox[1] + bbox[3]) / 2 / 1000 * sh
-        return int(cx), int(cy)
-
-    def _click(self, x: int, y: int, *, button: str) -> None:
-        import pyautogui
-
-        pyautogui.click(x, y, button=button)
-
-    def _move(self, x: int, y: int) -> None:
-        import pyautogui
-
-        pyautogui.moveTo(x, y)
-
-    def _type(self, text: str) -> None:
-        import pyautogui
-
-        pyautogui.write(text)
-
-    def _press(self, key: str) -> None:
-        import pyautogui
-
-        pyautogui.press(key)
