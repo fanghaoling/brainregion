@@ -288,6 +288,8 @@ class SceneObservation:
     panels: tuple[Panel, ...] = ()
     focus_root_panel_id: str | None = None
     focus_ancestor_path: tuple[str, ...] = ()
+    observation_kind: str = "raw"
+    source_frame_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "session_id", _identifier(self.session_id, "session_id"))
@@ -356,6 +358,18 @@ class SceneObservation:
             object.__setattr__(self, "focus_root_panel_id", _identifier(focus_root, "focus_root_panel_id"))
             if focus_root not in known_panels:
                 raise ValueError(f"focus_root_panel_id {focus_root!r} not found in scene panels")
+
+        # G plan S2: observation provenance. "raw" = one adapter observation; "composite" =
+        # bridge-merged base + transient-focus subtree (NOT a single screenshot — its
+        # frame_id/state_sha256 are canonical-merged, so a later raw observation must not be
+        # strictly compared to it). source_frame_ids names the merged frames for composite.
+        kind = self.observation_kind
+        if kind not in ("raw", "composite"):
+            raise ValueError(f"observation_kind must be 'raw' or 'composite', got {kind!r}")
+        src = self.source_frame_ids
+        if not isinstance(src, tuple):
+            raise ValueError("source_frame_ids must be a tuple")
+        object.__setattr__(self, "source_frame_ids", tuple(str(f) for f in src))
 
     def element(self, element_id: str) -> UIElement | None:
         return next((element for element in self.elements if element.element_id == element_id), None)
