@@ -190,7 +190,9 @@ class UnityEditorMockAdapter:
     def _create_object(self, *, name: str, obj_type: str) -> None:
         self._object_counter += 1
         obj_id = f"{obj_type}-{self._object_counter}"
-        self._state["scene_objects"].append({"id": obj_id, "name": name, "type": obj_type, "components": []})
+        # every GameObject carries a Transform (real Unity invariant); it nests a Position
+        # sub-panel so the inspector tree reaches depth 3 (缝 6).
+        self._state["scene_objects"].append({"id": obj_id, "name": name, "type": obj_type, "components": ["Transform"]})
         self._state["selected_object_id"] = obj_id
 
     def _add_component_to_selected(self, component: str) -> None:
@@ -214,6 +216,31 @@ class UnityEditorMockAdapter:
             Panel(panel_id="toolbar", role="toolbar", label="Toolbar", ordinal="top"),
             Panel(panel_id="inspector", role="inspector", label="Inspector", ordinal="rightmost"),
         ]
+        # selected object's components are nested sub-panels of the inspector (缝 6);
+        # Transform further nests a Position sub-panel so the tree reaches depth 3.
+        # Transients below remain overlays (parent_panel_id=None; 缝 7) — components model
+        # persistent structure, not transient geometry.
+        selected = self._selected_object()
+        if selected is not None:
+            for component in selected["components"]:
+                cid = f"inspector-component-{str(component).casefold()}"
+                panels.append(
+                    Panel(
+                        panel_id=cid,
+                        role="inspector_component",
+                        label=component,
+                        parent_panel_id="inspector",
+                    )
+                )
+                if str(component).casefold() == "transform":
+                    panels.append(
+                        Panel(
+                            panel_id=f"{cid}-position",
+                            role="inspector_component",
+                            label="Position",
+                            parent_panel_id=cid,
+                        )
+                    )
         if self._state["context_menu_open"]:
             panels.append(
                 Panel(
@@ -299,15 +326,32 @@ class UnityEditorMockAdapter:
                     panel_id="inspector",
                 )
             )
+            # component foldout headers hang under their component sub-panels (缝 6); the
+            # header stays an interactable element so the component remains a resolvable
+            # target, while the structural nesting lives in the panel tree. Transform's
+            # Position sub-panel carries X/Y/Z number fields (depth 3).
             for component in selected["components"]:
+                cid = f"inspector-component-{str(component).casefold()}"
                 elements.append(
                     UIElement(
-                        element_id=f"inspector-component-{component.lower()}",
+                        element_id=f"{cid}-header",
                         role="component",
                         label=component,
-                        panel_id="inspector",
+                        panel_id=cid,
                     )
                 )
+                if str(component).casefold() == "transform":
+                    position_id = f"{cid}-position"
+                    for axis in ("X", "Y", "Z"):
+                        elements.append(
+                            UIElement(
+                                element_id=f"{position_id}-{axis.casefold()}",
+                                role="number_field",
+                                label=axis,
+                                panel_id=position_id,
+                                attributes=(("value", 0.0),),
+                            )
+                        )
             elements.append(
                 UIElement(
                     element_id="inspector-add-component",
