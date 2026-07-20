@@ -579,12 +579,14 @@ def test_vision_config_from_env_overrides_preset(monkeypatch):
     monkeypatch.setenv("VISION_BASE_URL", "http://x/v1/")
     monkeypatch.setenv("VISION_THINKING", "false")
     monkeypatch.setenv("VISION_DIGEST_MODE", "semantic")
+    monkeypatch.setenv("VISION_MAX_IMAGE_WIDTH", "800")
     cfg = vision_config_from_env()
     assert cfg is not None
     assert cfg.model == "my-glm"
     assert cfg.base_url == "http://x/v1"  # trailing slash stripped
     assert cfg.thinking is False
     assert cfg.digest_mode == "semantic"
+    assert cfg.max_image_width == 800
 
 
 def test_vision_config_from_env_none_when_no_model(monkeypatch):

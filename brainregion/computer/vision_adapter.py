@@ -52,6 +52,9 @@ class VisionModelConfig:
     thinking: bool | None = (
         None  # G plan 视觉配置:None=不传(provider 默认);False=disabled(推理 VLM 如智谱 GLM-4.6V 关思考,否则 reasoning_content 烧光 max_tokens→content 空);True=enabled
     )
+    max_image_width: int = (
+        1600  # G plan 视觉配置:observe 全屏降采样宽度(px);降→视觉 token 少 VLM 快,但 elements label 精度降
+    )
 
 
 PRESETS: dict[str, VisionModelConfig] = {
@@ -105,6 +108,7 @@ def vision_config_from_env() -> VisionModelConfig | None:
         digest_mode=os.environ.get("VISION_DIGEST_MODE", "raw").strip() or "raw",
         thinking=_optbool(os.environ.get("VISION_THINKING", "").strip()),
         max_tokens=int(os.environ.get("VISION_MAX_TOKENS", "4096")),
+        max_image_width=int(os.environ.get("VISION_MAX_IMAGE_WIDTH", "1600")),
     )
 
 
@@ -468,7 +472,7 @@ class VisionAdapter:
         from PIL import Image
 
         img = Image.open(io.BytesIO(img_bytes))
-        maxw = 1600
+        maxw = self.vision.max_image_width
         if img.width > maxw:
             img = img.resize((maxw, round(img.height * maxw / img.width)))
         vbuf = io.BytesIO()
