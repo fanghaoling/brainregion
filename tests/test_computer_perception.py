@@ -24,8 +24,15 @@ def _frame() -> FrameRef:
 
 def _scene(elements=(), panels=()) -> SceneObservation:
     return SceneObservation(
-        session_id="s", sequence=1, app_id="a", window_id="w", window_title="T",
-        frame=_frame(), state_sha256=_DIGEST, elements=elements, panels=panels,
+        session_id="s",
+        sequence=1,
+        app_id="a",
+        window_id="w",
+        window_title="T",
+        frame=_frame(),
+        state_sha256=_DIGEST,
+        elements=elements,
+        panels=panels,
     )
 
 
@@ -65,7 +72,10 @@ def test_scene_rejects_dangling_element_panel_id():
 
 def test_scene_rejects_dangling_spawned_by():
     panel = Panel(
-        panel_id="cm", role="menu", label="CM", transient_kind="context_menu",
+        panel_id="cm",
+        role="menu",
+        label="CM",
+        transient_kind="context_menu",
         spawned_by_element_id="missing",
     )
     with pytest.raises(ValueError):
@@ -91,8 +101,12 @@ def _inspector_scene() -> SceneObservation:
         UIElement(element_id="m", role="component", label="Mesh", panel_id="inspector"),
         UIElement(element_id="c", role="component", label="Collider", panel_id="inspector"),
         UIElement(
-            element_id="ac", role="button", label="Add Component", panel_id="inspector",
-            semantic_band="bottom", attributes=(("below_fold", True),),
+            element_id="ac",
+            role="button",
+            label="Add Component",
+            panel_id="inspector",
+            semantic_band="bottom",
+            attributes=(("below_fold", True),),
         ),
     )
     return _scene(elements=elements, panels=(inspector,))
@@ -128,7 +142,8 @@ def test_resolve_not_found_enumerates_candidates():
 
 def test_resolve_ambiguous_returns_all():
     locator = Locator(
-        anchor=PanelAnchor(panel_name="inspector"), descriptor=ElementDescriptor(role="component"),
+        anchor=PanelAnchor(panel_name="inspector"),
+        descriptor=ElementDescriptor(role="component"),
     )
     result = _quiet().resolve(locator, _inspector_scene())
     assert result.status == "ambiguous"
@@ -157,7 +172,10 @@ def test_resolve_beside_is_unsupported_relation():
 def test_resolve_descriptor_matches_icon_shape_attribute():
     toolbar = Panel(panel_id="toolbar", role="toolbar", label="Toolbar", ordinal="top")
     play = UIElement(
-        element_id="play", role="button", label="Play", panel_id="toolbar",
+        element_id="play",
+        role="button",
+        label="Play",
+        panel_id="toolbar",
         attributes=(("icon_shape", "play"),),
     )
     observation = _scene(elements=(play,), panels=(toolbar,))
@@ -174,8 +192,12 @@ def test_resolve_transient_just_opened_via_spawn_sequence():
     hierarchy = Panel(panel_id="h", role="hierarchy", label="Hierarchy", ordinal="leftmost")
     background = UIElement(element_id="hb", role="canvas", label="Hierarchy blank", panel_id="h")
     menu = Panel(
-        panel_id="cm", role="menu", label="Context Menu", transient_kind="context_menu",
-        spawned_by_element_id="hb", spawn_sequence=5,
+        panel_id="cm",
+        role="menu",
+        label="Context Menu",
+        transient_kind="context_menu",
+        spawned_by_element_id="hb",
+        spawn_sequence=5,
     )
     item = UIElement(element_id="m3d", role="menu_item", label="3D Object", panel_id="cm")
     observation = _scene(elements=(background, item), panels=(hierarchy, menu))
@@ -205,9 +227,7 @@ def test_resolve_empty_panel_band_is_not_found_not_index_error():
 
 
 def test_find_not_found_truncates_candidates():
-    elements = tuple(
-        UIElement(element_id=f"e{i}", role="x", label=f"L{i}", panel_id="p") for i in range(30)
-    )
+    elements = tuple(UIElement(element_id=f"e{i}", role="x", label=f"L{i}", panel_id="p") for i in range(30))
     panel = Panel(panel_id="p", role="r", label="P")
     observation = _scene(elements=elements, panels=(panel,))
     result = _quiet().find(observation, ElementDescriptor(role="nomatch"), max_candidates=5)
@@ -230,3 +250,47 @@ def test_perception_events_do_not_leak_element_content():
     for event in events:
         assert "trace" not in event  # resolution trace is user-visible only
         assert "label" not in event
+
+
+# --- 缝 8: survey/focus feedback carries descriptors, not raw panel_id ---
+
+
+def test_survey_does_not_leak_panel_id():
+    obs = _scene(panels=(Panel(panel_id="inspector", role="inspector", label="Inspector", ordinal="rightmost"),))
+    entries = _quiet().survey(obs)["result"]["panels"]
+    assert entries
+    for entry in entries:
+        assert "panel_id" not in entry  # main brain sees descriptors, not the internal handle
+        assert {"role", "label", "ordinal", "transient_kind", "element_count"} <= set(entry)
+
+
+def test_focus_does_not_leak_panel_id():
+    obs = _scene(
+        panels=(Panel(panel_id="inspector", role="inspector", label="Inspector"),),
+        elements=(UIElement(element_id="i", role="button", label="Add Component", panel_id="inspector"),),
+    )
+    panel = _quiet().focus(obs, "inspector")["result"]["panel"]
+    assert "panel_id" not in panel
+    assert panel["label"] == "Inspector"
+
+
+# --- resolve_panel: anchor → panel_id (for session.focus) ---
+
+
+def test_resolve_panel_single_match():
+    obs = _scene(panels=(Panel(panel_id="inspector", role="inspector", label="Inspector", ordinal="rightmost"),))
+    assert _quiet().resolve_panel(PanelAnchor(panel_name="inspector"), obs) == ("resolved", "inspector")
+
+
+def test_resolve_panel_ambiguous_and_not_found():
+    two_region = _scene(
+        panels=(
+            Panel(panel_id="a", role="region", label="A"),
+            Panel(panel_id="b", role="region", label="B"),
+        )
+    )
+    # both share role="region" → panel_name="region" matches both
+    status, _pid = _quiet().resolve_panel(PanelAnchor(panel_name="region"), two_region)
+    assert status == "ambiguous"
+    status, pid = _quiet().resolve_panel(PanelAnchor(panel_name="ghost"), two_region)
+    assert (status, pid) == ("not_found", None)

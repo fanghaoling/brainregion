@@ -6,7 +6,9 @@ import pytest
 
 from brainregion.computer.adapter import FocusableComputerUseAdapter, FocusNotSupported
 from brainregion.computer.contracts import ActionIntent
+from brainregion.computer.locator import PanelAnchor
 from brainregion.computer.mock import MockComputerUseAdapter
+from brainregion.computer.session import ComputerUseSession
 from brainregion.computer.unity_mock import UnityEditorMockAdapter
 
 
@@ -141,3 +143,29 @@ def test_mock_is_focusable_v1_mock_opts_out():
     err = FocusNotSupported("x.app")
     assert err.app_id == "x.app"
     assert "focus" in str(err)
+
+
+def test_session_focus_by_descriptor_crops_panel():
+    adapter = _adapter_with_cube()
+    session = ComputerUseSession(session_id="s", adapter=adapter, allowed_apps={"unity.editor"})
+    session.observe()  # establish the latest observation
+    focused = session.focus(PanelAnchor(panel_name="inspector"))
+    # descriptor resolved to the internal handle, adapter cropped it, result is focused
+    assert focused.focus_root_panel_id == "inspector"
+    assert all(e.panel_id == "inspector" for e in focused.elements)  # scope narrowed
+    assert session._latest is focused  # session adopted the focused obs
+
+
+def test_session_focus_non_focusable_adapter_raises_focus_not_supported():
+    adapter = MockComputerUseAdapter()
+    session = ComputerUseSession(session_id="s", adapter=adapter, allowed_apps={adapter.app_id})
+    with pytest.raises(FocusNotSupported):
+        session.focus(PanelAnchor(panel_name="x"))
+
+
+def test_session_focus_unresolved_anchor_raises():
+    adapter = UnityEditorMockAdapter()
+    session = ComputerUseSession(session_id="s", adapter=adapter, allowed_apps={"unity.editor"})
+    session.observe()
+    with pytest.raises(ValueError, match="not_found"):
+        session.focus(PanelAnchor(panel_name="ghost-panel"))

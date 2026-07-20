@@ -137,9 +137,7 @@ def _match_panels(anchor: PanelAnchor, obs: SceneObservation) -> tuple[list[Reso
     if anchor.spawned_by is not None:
         parent_ids = {e.element_id for e in obs.elements if anchor.spawned_by.matches(e)}
         panels = [p for p in panels if p.spawned_by_element_id in parent_ids]
-        steps.append(
-            ResolutionStep("anchor", f"spawned_by (parents={len(parent_ids)})", len(panels))
-        )
+        steps.append(ResolutionStep("anchor", f"spawned_by (parents={len(parent_ids)})", len(panels)))
 
     if anchor.ordinal is not None:
         ordinal = anchor.ordinal
@@ -203,20 +201,14 @@ def _within_filter(
         if length == 0:
             survivors = []
         else:
-            kept = [
-                e
-                for i, e in enumerate(survivors)
-                if _element_band(e, i, length) == band
-            ]
+            kept = [e for i, e in enumerate(survivors) if _element_band(e, i, length) == band]
             survivors = kept
         steps.append(ResolutionStep("within", f"{stage_detail} band={band!r}", len(survivors)))
 
     return survivors, None
 
 
-def resolve_locator(
-    locator: Locator, obs: SceneObservation, *, max_candidates: int = 20
-) -> ResolutionResult:
+def resolve_locator(locator: Locator, obs: SceneObservation, *, max_candidates: int = 20) -> ResolutionResult:
     """Single source of truth for locator → ResolvedTarget resolution."""
     all_steps: list[ResolutionStep] = []
 
@@ -236,17 +228,13 @@ def resolve_locator(
     for panel in panels:
         ordered = list(obs.elements_in(panel.panel_id))
         if locator.within is not None:
-            kept, reason = _within_filter(
-                locator.within, ordered, obs, all_steps, f"panel={panel.panel_id}"
-            )
+            kept, reason = _within_filter(locator.within, ordered, obs, all_steps, f"panel={panel.panel_id}")
             if reason is not None:
                 unsupported = reason
                 break
             ordered = kept
         else:
-            all_steps.append(
-                ResolutionStep("within", f"panel={panel.panel_id} (no within filter)", len(ordered))
-            )
+            all_steps.append(ResolutionStep("within", f"panel={panel.panel_id} (no within filter)", len(ordered)))
         descriptor_survivors.extend(ordered)
 
     if unsupported:
@@ -259,9 +247,7 @@ def resolve_locator(
     # --- descriptor stage ---
     if locator.descriptor is not None:
         descriptor_survivors = [e for e in descriptor_survivors if locator.descriptor.matches(e)]
-        all_steps.append(
-            ResolutionStep("descriptor", "descriptor filter", len(descriptor_survivors))
-        )
+        all_steps.append(ResolutionStep("descriptor", "descriptor filter", len(descriptor_survivors)))
 
     if not descriptor_survivors:
         scope_elements = []
@@ -302,7 +288,6 @@ class PerceptionRegion:
     def survey(self, obs: SceneObservation) -> dict[str, Any]:
         panels = [
             {
-                "panel_id": p.panel_id,
                 "role": p.role,
                 "label": p.label,
                 "ordinal": p.ordinal,
@@ -346,7 +331,7 @@ class PerceptionRegion:
                 }
             )
         result = {
-            "panel": {"panel_id": panel.panel_id, "role": panel.role, "label": panel.label},
+            "panel": {"role": panel.role, "label": panel.label},
             "element_count": len(elements),
             "elements": rendered,
         }
@@ -358,6 +343,21 @@ class PerceptionRegion:
             blocker_counts=_count_blockers(elements),
         )
         return self._envelope("focus", obs, "ok", result)
+
+    def resolve_panel(self, anchor: PanelAnchor, obs: SceneObservation) -> tuple[str, str | None]:
+        """Resolve a PanelAnchor to a single panel_id (anchor → panel, no element).
+
+        Returns ``(status, panel_id)``: ``resolved`` + id for exactly one match,
+        ``ambiguous`` + None for >1, ``not_found`` + None for 0. Used by ``session.focus``
+        (缝 2/8) to turn a descriptor into the internal handle the adapter crops — the main
+        brain never holds a raw panel_id.
+        """
+        _steps, panels = _match_panels(anchor, obs)
+        if not panels:
+            return "not_found", None
+        if len(panels) > 1:
+            return "ambiguous", None
+        return "resolved", panels[0].panel_id
 
     def find(
         self,
@@ -423,9 +423,7 @@ class PerceptionRegion:
         )
         return self._envelope("describe", obs, "ok", result)
 
-    def resolve(
-        self, locator: Locator, obs: SceneObservation, *, max_candidates: int = 20
-    ) -> ResolutionResult:
+    def resolve(self, locator: Locator, obs: SceneObservation, *, max_candidates: int = 20) -> ResolutionResult:
         result = resolve_locator(locator, obs, max_candidates=max_candidates)
         self._emit(
             "computer.perception.resolve",

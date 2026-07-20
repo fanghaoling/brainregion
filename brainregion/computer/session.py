@@ -6,8 +6,15 @@ from collections.abc import Callable, Iterable
 
 from brainregion.runtime import emit_event
 
-from .adapter import AdapterExecution, ComputerUseAdapter
+from .adapter import (
+    AdapterExecution,
+    ComputerUseAdapter,
+    FocusableComputerUseAdapter,
+    FocusNotSupported,
+)
 from .contracts import ActionIntent, ActionReceipt, SceneObservation, VerificationStatus
+from .locator import PanelAnchor
+from .perception import PerceptionRegion
 
 
 EventSink = Callable[..., object]
@@ -59,6 +66,31 @@ class ComputerUseSession:
             element_count=len(observation.elements),
         )
         return observation
+
+    def focus(self, anchor: PanelAnchor) -> SceneObservation:
+        """Focus a panel by descriptor (缝 2/8): resolve the anchor against the latest
+        observation, then crop via the adapter. The main brain uses descriptors, never a
+        raw panel_id. ``FocusNotSupported`` if the adapter lacks the capability;
+        ``NoRegionForPanel`` (from the adapter) propagates for the caller to fall back.
+        """
+        if not isinstance(self.adapter, FocusableComputerUseAdapter):
+            raise FocusNotSupported(self.adapter.app_id)
+        obs = self._latest if self._latest is not None else self.observe()
+        status, panel_id = PerceptionRegion().resolve_panel(anchor, obs)
+        if status != "resolved" or panel_id is None:
+            raise ValueError(f"focus anchor {status}: cannot resolve to a single panel")
+        focused = self.adapter.observe_focus(session_id=self.session_id, panel_id=panel_id)
+        self._validate_observation(focused)
+        self._latest = focused
+        self._emit(
+            "computer.focused",
+            session_id=self.session_id,
+            app_id=focused.app_id,
+            frame_id=focused.frame.frame_id,
+            focus_root_panel_id=focused.focus_root_panel_id,
+            element_count=len(focused.elements),
+        )
+        return focused
 
     def perform(self, intent: ActionIntent, *, approved: bool = False) -> ActionReceipt:
         before = self.observe()
