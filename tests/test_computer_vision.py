@@ -12,7 +12,8 @@ import pytest
 
 from brainregion.computer import VISION_PRESETS, VisionAdapter
 from brainregion.computer.adapter import NoRegionForPanel
-from brainregion.computer.vision_adapter import CursorAnchor
+from brainregion.computer.contracts import Panel
+from brainregion.computer.vision_adapter import CursorAnchor, infer_missing_panel_parents
 
 pytest.importorskip("PIL.Image")
 from PIL import Image  # noqa: E402
@@ -235,3 +236,150 @@ def test_observe_focus_anchor_session_mismatch_raises_session_mismatch():
     )
     with pytest.raises(NoRegionForPanel, match="session_mismatch"):
         adapter.observe_focus(session_id="t", panel_id="context_menu")
+
+
+# --- 缝 7: bbox-containment parent inference ---
+
+
+def _panel(pid, role, label=None, transient_kind=None, parent=None):
+    return Panel(
+        panel_id=pid,
+        role=role,
+        label=label or pid,
+        transient_kind=transient_kind,
+        parent_panel_id=parent,
+    )
+
+
+def test_infer_nests_panel_inside_container():
+    panels = (
+        _panel("outer", "group", "Outer"),
+        _panel("inner", "group", "Inner"),
+    )
+    bbox = {"outer": [0, 0, 1000, 1000], "inner": [100, 100, 200, 200]}
+    result = infer_missing_panel_parents(panels, bbox)
+    by_id = {p.panel_id: p for p in result}
+    assert by_id["inner"].parent_panel_id == "outer"
+    assert by_id["outer"].parent_panel_id is None
+
+
+def test_infer_smallest_containing_container_wins():
+    # outer ⊃ middle ⊃ inner; inner's parent is middle (tightest), middle's is outer
+    panels = (
+        _panel("outer", "group", "Outer"),
+        _panel("middle", "section", "Middle"),
+        _panel("inner", "group", "Inner"),
+    )
+    bbox = {
+        "outer": [0, 0, 1000, 1000],
+        "middle": [100, 100, 800, 800],
+        "inner": [200, 200, 300, 300],
+    }
+    result = infer_missing_panel_parents(panels, bbox)
+    by_id = {p.panel_id: p for p in result}
+    assert by_id["inner"].parent_panel_id == "middle"
+    assert by_id["middle"].parent_panel_id == "outer"
+    assert by_id["outer"].parent_panel_id is None
+
+
+def test_infer_tiebreak_smaller_area_beats_larger():
+    # both big and tight contain inner; tight (smaller area) wins
+    panels = (
+        _panel("big", "group", "Big"),
+        _panel("tight", "group", "Tight"),
+        _panel("inner", "group", "Inner"),
+    )
+    bbox = {
+        "big": [0, 0, 1000, 1000],
+        "tight": [150, 150, 250, 250],
+        "inner": [180, 180, 200, 200],
+    }
+    result = infer_missing_panel_parents(panels, bbox)
+    by_id = {p.panel_id: p for p in result}
+    assert by_id["inner"].parent_panel_id == "tight"
+
+
+def test_infer_excludes_transient_panels_as_independent_roots():
+    # a transient inside a container stays parent=None (overlay, not structural child);
+    # a transient is also not a container candidate.
+    panels = (
+        _panel("container", "group", "C"),
+        _panel("popup", "popup", "P", transient_kind="popup"),
+    )
+    bbox = {"container": [0, 0, 1000, 1000], "popup": [400, 400, 600, 600]}
+    result = infer_missing_panel_parents(panels, bbox)
+    by_id = {p.panel_id: p for p in result}
+    assert by_id["popup"].parent_panel_id is None
+    assert by_id["container"].parent_panel_id is None
+
+
+def test_infer_excludes_non_nestable_roles():
+    # role "other" (non-nestable) inside a group → not nested, and not a container
+    panels = (
+        _panel("grp", "group", "G"),
+        _panel("deco", "other", "Deco"),
+    )
+    bbox = {"grp": [0, 0, 1000, 1000], "deco": [100, 100, 200, 200]}
+    result = infer_missing_panel_parents(panels, bbox)
+    by_id = {p.panel_id: p for p in result}
+    assert by_id["deco"].parent_panel_id is None
+
+
+def test_infer_identical_bboxes_stay_siblings():
+    panels = (
+        _panel("a", "group", "A"),
+        _panel("b", "group", "B"),
+    )
+    same = [100, 100, 500, 500]
+    bbox = {"a": list(same), "b": list(same)}
+    result = infer_missing_panel_parents(panels, bbox)
+    by_id = {p.panel_id: p for p in result}
+    assert by_id["a"].parent_panel_id is None
+    assert by_id["b"].parent_panel_id is None
+
+
+def test_infer_zero_area_bbox_skipped():
+    # a zero-height bbox is neither nested nor a container
+    panels = (
+        _panel("big", "group", "Big"),
+        _panel("flat", "group", "Flat"),
+    )
+    bbox = {"big": [0, 0, 1000, 1000], "flat": [100, 100, 200, 100]}
+    result = infer_missing_panel_parents(panels, bbox)
+    by_id = {p.panel_id: p for p in result}
+    assert by_id["flat"].parent_panel_id is None
+
+
+def test_infer_preserves_explicit_parent_over_containment():
+    # explicit parent (adapter/VLM) wins; containment does not override it
+    panels = (
+        _panel("outer", "group", "Outer"),
+        _panel("declared-parent", "group", "DP"),
+        _panel("explicit", "section", "E", parent="declared-parent"),
+    )
+    bbox = {
+        "outer": [0, 0, 1000, 1000],
+        "declared-parent": [50, 50, 250, 250],
+        "explicit": [100, 100, 200, 200],
+    }
+    result = infer_missing_panel_parents(panels, bbox)
+    by_id = {p.panel_id: p for p in result}
+    assert by_id["explicit"].parent_panel_id == "declared-parent"  # not overridden to outer
+    assert by_id["declared-parent"].parent_panel_id == "outer"  # inferred (no explicit parent)
+
+
+def test_observe_infers_containment_parents_for_nestable_panels():
+    # integration: a group nested inside a window (both nestable, contained bbox) is wired
+    # through observe() → _build_scene → infer_missing_panel_parents.
+    parsed = {
+        "panels": [
+            {"name": "Root Window", "role": "window", "bbox": [0, 0, 1000, 1000]},
+            {"name": "Inner Group", "role": "group", "bbox": [100, 100, 300, 300]},
+        ],
+        "elements": [],
+    }
+    adapter = _adapter_with_parse(_fake_image_bytes(1000, 600), parsed)
+    obs = adapter.observe(session_id="t")
+    by_role = {p.role: p for p in obs.panels}
+    assert by_role["group"].parent_panel_id == by_role["window"].panel_id
+    assert by_role["window"].parent_panel_id is None

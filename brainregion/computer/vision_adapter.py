@@ -187,6 +187,11 @@ def _build_scene(
     if any(e.panel_id == "context_menu" for e in elements) and not any(p.panel_id == "context_menu" for p in panels):
         panels.append(Panel(panel_id="context_menu", role="menu", label="Context Menu", transient_kind="context_menu"))
 
+    # 缝 7: infer parent_panel_id for persistent nestable panels via bbox containment.
+    # Transients (incl. the synthetic context_menu above) stay independent roots; an
+    # explicit parent (already set) is never overridden.
+    panels = infer_missing_panel_parents(tuple(panels), panel_bbox_map)
+
     obs = SceneObservation(
         session_id=session_id,
         sequence=sequence,
@@ -206,6 +211,69 @@ def _build_scene(
         panels=tuple(panels),
     )
     return obs, bbox_map, panel_bbox_map
+
+
+# 缝 7: persistent-panel roles eligible for bbox-containment nesting. Decorative /
+# overlay / unknown roles are excluded so a background or transient layer cannot create
+# meaningless depth. Transient panels are independent roots regardless of geometry.
+NESTABLE_PANEL_ROLES = frozenset({"window", "panel", "group", "section", "inspector_component"})
+
+
+def _bbox_area(bbox: list[int]) -> int:
+    return max(0, bbox[2] - bbox[0]) * max(0, bbox[3] - bbox[1])
+
+
+def _bbox_contains(outer: list[int], inner: list[int]) -> bool:
+    """True if ``inner`` lies entirely within ``outer`` (boundary-inclusive)."""
+    return outer[0] <= inner[0] and outer[1] <= inner[1] and outer[2] >= inner[2] and outer[3] >= inner[3]
+
+
+def _bbox_same(a: list[int], b: list[int]) -> bool:
+    return a[0] == b[0] and a[1] == b[1] and a[2] == b[2] and a[3] == b[3]
+
+
+def infer_missing_panel_parents(panels: tuple[Panel, ...], panel_bbox_map: dict[str, list[int]]) -> tuple[Panel, ...]:
+    """Infer ``parent_panel_id`` for persistent nestable panels via bbox containment (缝 7).
+
+    Priority: explicit parent (already set) > bbox containment > None — containment never
+    overrides an existing parent. Only persistent panels (transients are independent roots)
+    with a nestable container role AND a non-zero bbox participate, keeping decorative /
+    unknown layers from creating meaningless depth. When several containers qualify, the
+    smallest (tightest) wins; ties break by ``panel_id`` lexicographically. Identical
+    bboxes stay siblings (neither parents the other); zero-area bboxes are skipped.
+    """
+    # candidate containers: persistent + nestable + non-zero bbox, sorted smallest-first
+    # (tightest container wins) with a panel_id tiebreak for determinism.
+    containers: list[tuple[Panel, list[int]]] = []
+    for panel in panels:
+        if panel.transient or panel.role not in NESTABLE_PANEL_ROLES:
+            continue
+        bb = panel_bbox_map.get(panel.panel_id)
+        if bb is None or len(bb) != 4 or _bbox_area(bb) <= 0:
+            continue
+        containers.append((panel, bb))
+    containers.sort(key=lambda t: (_bbox_area(t[1]), t[0].panel_id))
+
+    parent_of: dict[str, str] = {}
+    for panel in panels:
+        if panel.parent_panel_id is not None or panel.transient or panel.role not in NESTABLE_PANEL_ROLES:
+            continue  # explicit parent wins; transients / non-nestable excluded
+        bb = panel_bbox_map.get(panel.panel_id)
+        if bb is None or len(bb) != 4 or _bbox_area(bb) <= 0:
+            continue
+        for cand, cbb in containers:
+            if cand.panel_id == panel.panel_id or _bbox_same(cbb, bb):
+                continue  # never self-parent; identical bboxes stay siblings
+            if _bbox_contains(cbb, bb):
+                parent_of[panel.panel_id] = cand.panel_id
+                break  # first (smallest) containing container wins
+
+    if not parent_of:
+        return panels
+    return tuple(
+        replace(panel, parent_panel_id=parent_of[panel.panel_id]) if panel.panel_id in parent_of else panel
+        for panel in panels
+    )
 
 
 def _map_crop_bbox(crop_bbox: list[int], region: tuple[int, int, int, int], full_w: int, full_h: int) -> list[int]:
