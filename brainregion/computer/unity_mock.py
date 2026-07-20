@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from dataclasses import replace
 from typing import Any
 
 from .adapter import AdapterExecution
@@ -67,6 +68,20 @@ class UnityEditorMockAdapter:
             elements=elements,
             panels=panels,
         )
+
+    def observe_focus(self, *, session_id: str, panel_id: str) -> SceneObservation:
+        """LOCAL observation scoped to ``panel_id`` + its descendants (logical tree crop).
+
+        The mock's full observation carries the complete panel tree, so focus selects the
+        subtree via ``SceneObservation.focused_view`` and stamps a fresh sequence. Same
+        logical scope as VisionAdapter's pixel crop: focus root + visible descendants,
+        root ``parent_panel_id`` normalized to None (self-contained), ancestors in
+        ``focus_ancestor_path``. No pixel cropping — the mock is full-fidelity.
+        """
+        full = self.observe(session_id=session_id)
+        focused = full.focused_view(panel_id)
+        self._sequence += 1
+        return replace(focused, sequence=self._sequence)
 
     # ----------------------------------------------------------------- execute
 
@@ -175,9 +190,7 @@ class UnityEditorMockAdapter:
     def _create_object(self, *, name: str, obj_type: str) -> None:
         self._object_counter += 1
         obj_id = f"{obj_type}-{self._object_counter}"
-        self._state["scene_objects"].append(
-            {"id": obj_id, "name": name, "type": obj_type, "components": []}
-        )
+        self._state["scene_objects"].append({"id": obj_id, "name": name, "type": obj_type, "components": []})
         self._state["selected_object_id"] = obj_id
 
     def _add_component_to_selected(self, component: str) -> None:

@@ -417,6 +417,49 @@ class SceneObservation:
         _walk(panel_id, 0)
         return tuple(out)
 
+    def focused_view(self, panel_id: str) -> SceneObservation:
+        """Return a LOCAL observation scoped to ``panel_id`` + its descendants.
+
+        Pure-data transform (缝 3): selects the subtree, normalizes the focus root's
+        ``parent_panel_id`` to None so the focused obs is self-contained, and records
+        focus metadata. Frame/state are preserved (same underlying frame); callers that
+        need a distinct observation sequence rebuild around this view (see mock
+        ``observe_focus``). Adapters producing a focused obs by other means (VisionAdapter
+        cropping pixels) must apply the same root-normalization invariant.
+        """
+        root = self.panel(panel_id)
+        if root is None:
+            raise ValueError(f"focused_view: panel {panel_id!r} not in scene")
+        descendant_panels = self.descendants_of(panel_id)
+        subtree_ids = {panel_id} | {panel.panel_id for panel in descendant_panels}
+        normalized_root = Panel(
+            panel_id=root.panel_id,
+            role=root.role,
+            label=root.label,
+            transient_kind=root.transient_kind,
+            ordinal=root.ordinal,
+            parent_panel_id=None,
+            spawned_by_element_id=root.spawned_by_element_id,
+            spawn_sequence=root.spawn_sequence,
+            scroll_position=root.scroll_position,
+        )
+        focused_panels = (normalized_root,) + descendant_panels
+        focused_elements = tuple(e for e in self.elements if e.panel_id in subtree_ids)
+        ancestor_path = tuple(panel.label for panel in self.ancestors_of(panel_id))
+        return SceneObservation(
+            session_id=self.session_id,
+            sequence=self.sequence,
+            app_id=self.app_id,
+            window_id=self.window_id,
+            window_title=self.window_title,
+            frame=self.frame,
+            state_sha256=self.state_sha256,
+            elements=focused_elements,
+            panels=focused_panels,
+            focus_root_panel_id=panel_id,
+            focus_ancestor_path=ancestor_path,
+        )
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,

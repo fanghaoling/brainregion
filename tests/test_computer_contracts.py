@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import pytest
 
-from brainregion.computer.contracts import FrameRef, Panel, SceneObservation
+from brainregion.computer.contracts import FrameRef, Panel, SceneObservation, UIElement
 
 
 _DIGEST = "a" * 64
@@ -244,3 +244,59 @@ def test_default_scene_has_no_focus_metadata():
     assert obs.focus_root_panel_id is None
     assert obs.focus_ancestor_path == ()
     assert obs.to_dict()["focus_root_panel_id"] is None
+
+
+# --- focused_view: local observation (缝 3) ---
+
+
+def test_focused_view_selects_subtree_and_normalizes_root():
+    panels = (
+        _panel("root"),
+        _panel("inspector", parent="root"),
+        _panel("transform", parent="inspector"),
+        _panel("position", parent="transform"),
+        _panel("hierarchy", parent="root"),  # sibling subtree, must be excluded
+    )
+    elements = (
+        UIElement(element_id="insp-hdr", role="header", label="H", panel_id="inspector"),
+        UIElement(element_id="pos-x", role="input", label="X", panel_id="position"),
+        UIElement(element_id="hier-bg", role="canvas", label="bg", panel_id="hierarchy"),
+    )
+    obs = _scene(panels=panels, elements=elements)
+    focused = obs.focused_view("inspector")
+
+    # subtree only: inspector + descendants (transform, position); root + hierarchy excluded
+    assert {p.panel_id for p in focused.panels} == {"inspector", "transform", "position"}
+    # focus root parent normalized to None (self-contained focused obs)
+    assert focused.panel("inspector").parent_panel_id is None
+    # descendants keep their in-scene parents
+    assert focused.panel("transform").parent_panel_id == "inspector"
+    assert focused.panel("position").parent_panel_id == "transform"
+    # focus metadata
+    assert focused.focus_root_panel_id == "inspector"
+    assert focused.focus_ancestor_path == ("root",)  # ancestor labels, not ids
+    # elements filtered to the subtree (hierarchy's element excluded)
+    assert {e.element_id for e in focused.elements} == {"insp-hdr", "pos-x"}
+    # frame preserved (same underlying frame); caller stamps a fresh sequence
+    assert focused.frame is obs.frame
+
+
+def test_focused_view_on_deep_panel_records_multi_ancestor_path():
+    panels = (
+        _panel("root"),
+        _panel("inspector", parent="root"),
+        _panel("transform", parent="inspector"),
+    )
+    obs = _scene(panels=panels)
+    focused = obs.focused_view("transform")
+    assert focused.focus_root_panel_id == "transform"
+    assert focused.panel("transform").parent_panel_id is None
+    # ancestors walked to root: immediate parent first
+    assert [p.panel_id for p in obs.ancestors_of("transform")] == ["inspector", "root"]
+    assert focused.focus_ancestor_path == ("inspector", "root")
+
+
+def test_focused_view_rejects_unknown_panel():
+    obs = _scene(panels=(_panel("inspector"),))
+    with pytest.raises(ValueError, match="focused_view"):
+        obs.focused_view("ghost")
