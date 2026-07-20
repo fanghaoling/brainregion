@@ -432,3 +432,71 @@ def test_focus_chain_empty_anchors_raises():
     controller = _chain_controller(adapter)
     with pytest.raises(ValueError):
         controller.focus_chain([])
+
+
+# --- 阶段 7 集成 capstone (缝 8 确认: 主脑全程只用描述符, locator.py diff==0) ---
+
+
+def test_capstone_focus_chain_to_position_x_with_reveal_and_resolve():
+    """§206 D 集成 capstone — full stack to a depth-3 element, descriptors only.
+
+    Inspector → Transform → Position X, WITH reveal-before-focus (Position below-fold)
+    and id re-resolution across the reveal (position-0 → position-1, 缝 8). The main
+    brain holds only ``PanelAnchor`` descriptors + a ``Locator`` throughout; the resolved
+    element is reached without ever exposing a raw panel_id or a coordinate.
+    """
+    adapter = _NestedRevealAdapter()
+    controller = _chain_controller(adapter)
+    perception = PerceptionRegion(event_sink=lambda *a, **k: None)
+
+    # focus chain: descriptors only — no raw panel_id anywhere in the input
+    result = controller.focus_chain(
+        [
+            PanelAnchor(panel_name="inspector"),
+            PanelAnchor(panel_name="transform"),
+            PanelAnchor(panel_name="position"),
+        ]
+    )
+    assert result.outcome == "focused"
+    assert result.semantic_path == ("Inspector", "Transform", "Position")
+    # reveal-before-focus fired at the Position level + id was re-resolved (not cached)
+    assert result.reveals_used == 1
+    assert "position-0" in adapter.focus_calls  # first attempt (blocked, below_fold)
+    assert "position-1" in adapter.focus_calls  # re-resolved id after the reveal
+
+    # within the focused Position obs, resolve the X field via a Locator (descriptors only)
+    locator = Locator(
+        anchor=PanelAnchor(panel_name="position"),
+        descriptor=ElementDescriptor(role="number_field", label="X"),
+    )
+    resolved = perception.resolve(locator, result.observation)
+    assert resolved.status == "resolved"
+    assert resolved.first.element_id == "position-1-x"
+
+
+def test_capstone_focus_chain_on_unity_mock_to_position_x():
+    """Unity mock (full-fidelity, stable ids, no reveal): focus_chain reaches Position X.
+
+    Exercises the REAL ``UnityEditorMockAdapter`` nesting from 缝 6 (inspector → transform
+    → position) through ``focus_chain`` and a Locator resolve — happy path, no reveal.
+    """
+    _adapter, session, perception = _setup()  # cube created → Transform component
+    controller = TargetingController(session=session, perception=perception)
+    result = controller.focus_chain(
+        [
+            PanelAnchor(panel_name="inspector"),
+            PanelAnchor(panel_name="transform"),
+            PanelAnchor(panel_name="position"),
+        ]
+    )
+    assert result.outcome == "focused"
+    assert result.semantic_path == ("Inspector", "Transform", "Position")
+    assert result.reveals_used == 0  # Unity mock is full-fidelity — no below-fold at panel level
+
+    locator = Locator(
+        anchor=PanelAnchor(panel_name="position"),
+        descriptor=ElementDescriptor(role="number_field", label="X"),
+    )
+    resolved = perception.resolve(locator, result.observation)
+    assert resolved.status == "resolved"
+    assert resolved.first.element_id == "inspector-component-transform-position-x"
