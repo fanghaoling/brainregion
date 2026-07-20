@@ -47,3 +47,31 @@ class FocusNotSupported(Exception):
     def __init__(self, app_id: str) -> None:
         super().__init__(f"adapter {app_id!r} does not support panel focus")
         self.app_id = app_id
+
+
+class NoRegionForPanel(Exception):
+    """Raised by ``observe_focus`` when a panel's crop region cannot be determined.
+
+    Reasons: ``panel_not_found`` (no bbox and no usable cursor anchor), ``below_fold``
+    (panel exists but is scrolled out of view — reveal the parent first), ``bbox_missing``
+    (panel known but no bbox recorded), ``cursor_anchor_stale`` (anchor consumed/invalid),
+    ``session_mismatch``. ``nearest_visible_ancestor_panel_id`` guides reveal-before-focus
+    (缝 5); ``source_frame_id``/``source_state_sha256`` identify the observation the panel
+    id came from (ids are only unique within one observation — 缝 8).
+    """
+
+    def __init__(
+        self,
+        *,
+        panel_id: str,
+        reason: str,
+        nearest_visible_ancestor_panel_id: str | None = None,
+        source_frame_id: str | None = None,
+        source_state_sha256: str | None = None,
+    ) -> None:
+        self.panel_id = panel_id
+        self.reason = reason
+        self.nearest_visible_ancestor_panel_id = nearest_visible_ancestor_panel_id
+        self.source_frame_id = source_frame_id
+        self.source_state_sha256 = source_state_sha256
+        super().__init__(f"no region for panel {panel_id!r}: {reason}")

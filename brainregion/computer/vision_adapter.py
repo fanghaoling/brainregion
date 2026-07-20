@@ -26,12 +26,12 @@ import json
 import os
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any
 
 import requests
 
-from .adapter import AdapterExecution
+from .adapter import AdapterExecution, NoRegionForPanel
 from .contracts import ActionIntent, FrameRef, Panel, SceneObservation, UIElement
 
 
@@ -114,12 +114,26 @@ def _build_scene(
     pid_by_key: dict[str, str] = {}
     panels: list[Panel] = []
     panel_bbox_map: dict[str, list[int]] = {}
+    used_pids: set[str] = set()
+
+    def _unique_pid(base: str) -> str:
+        # 缝 8: panel_id must be unique within the scene. Same-role siblings used to
+        # collide (pid = role) and get silently dropped by the dup-skip — a nesting
+        # blocker. Disambiguate by suffix so every parsed panel survives.
+        if base not in used_pids:
+            used_pids.add(base)
+            return base
+        i = 2
+        while f"{base}-{i}" in used_pids:
+            i += 1
+        used_pids.add(f"{base}-{i}")
+        return f"{base}-{i}"
+
     for p in parsed.get("panels", []):
         role = _norm(p.get("role")) or "other"
         name = str(p.get("name") or p.get("role") or "panel")
-        pid = role if role != "other" else _norm(name)
-        if any(pp.panel_id == pid for pp in panels):
-            continue
+        base = role if role != "other" else _norm(name)
+        pid = _unique_pid(base)
         tk_raw = _norm(p.get("transient_kind"))
         tk = None if tk_raw in ("", "persistent", "none", "null") else tk_raw
         panels.append(Panel(panel_id=pid, role=role, label=name, transient_kind=tk))
@@ -212,6 +226,45 @@ def _map_crop_bbox(crop_bbox: list[int], region: tuple[int, int, int, int], full
     return [mx(crop_bbox[0]), my(crop_bbox[1]), mx(crop_bbox[2]), my(crop_bbox[3])]
 
 
+@dataclass(frozen=True)
+class CursorAnchor:
+    """A screen-region hint derived from the click that opened a transient panel.
+
+    Transient panels (eg a right-click context menu) are absent from the full-screen
+    parse (no bbox in ``_panel_bbox_map``), so ``observe_focus`` falls back to cropping
+    around the click that opened them. Lifecycle (缝 4): invalidated by any subsequent
+    execute (rule ③), consumed after one focus use, session-scoped. ``click_xy`` is a
+    full-screen pixel point; ``source_state_sha256`` is the observation the click acted on.
+    """
+
+    session_id: str
+    click_xy: tuple[int, int]
+    expected_transient_kind: str | None
+    source_state_sha256: str | None
+    consumed: bool = False
+
+
+def _bbox_to_region(bbox: list[int], full_w: int, full_h: int) -> tuple[int, int, int, int]:
+    """Normalized [0,1000] panel bbox → full-screen pixel crop region (clamped, non-degenerate)."""
+    x1 = max(0, int(bbox[0] / 1000 * full_w))
+    y1 = max(0, int(bbox[1] / 1000 * full_h))
+    x2 = min(full_w, int(bbox[2] / 1000 * full_w))
+    y2 = min(full_h, int(bbox[3] / 1000 * full_h))
+    if x2 <= x1:
+        x2 = min(full_w, x1 + 1)
+    if y2 <= y1:
+        y2 = min(full_h, y1 + 1)
+    return (x1, y1, x2, y2)
+
+
+def _anchor_region(
+    click_xy: tuple[int, int], full_w: int, full_h: int, *, radius: int = 320
+) -> tuple[int, int, int, int]:
+    """A full-screen pixel box around a cursor click — the fallback region for transients."""
+    cx, cy = click_xy
+    return (max(0, cx - radius), max(0, cy - radius), min(full_w, cx + radius), min(full_h, cy + radius))
+
+
 # ----------------------------------------------------------------- adapter
 
 
@@ -241,6 +294,8 @@ class VisionAdapter:
         self._sequence = 0
         self._bbox_map: dict[str, list[int]] = {}
         self._panel_bbox_map: dict[str, list[int]] = {}
+        self._cursor_anchor: CursorAnchor | None = None
+        self._last_state_sha256: str | None = None
 
     # -- ComputerUseAdapter protocol ----------------------------------------
 
@@ -271,21 +326,21 @@ class VisionAdapter:
         )
         self._bbox_map = bbox_map
         self._panel_bbox_map = panel_bbox_map
+        self._last_state_sha256 = digest
         return obs
 
-    def observe_focus(self, *, session_id: str, region: tuple[int, int, int, int]) -> SceneObservation:
-        """Crop the screen to ``region`` (full-screen pixel box x1,y1,x2,y2), run the VLM on
-        the CROP only, and map element bboxes back to full-screen normalized [0,1000] coords.
-
-        Full-screen 8B misses small/transient regions (eg a right-click context menu overlaid
-        on Hierarchy) — the probe showed 0 -> 23 menu items when narrowed. Bboxes are mapped
-        back to full-screen so ``execute()`` clicks the correct pixel without changes.
+    def _focus_core(
+        self,
+        *,
+        session_id: str,
+        region: tuple[int, int, int, int],
+        img: Any,
+        img_bytes: bytes,
+    ) -> SceneObservation:
+        """Crop ``img`` to ``region`` (full-screen pixel box), VLM-parse the crop, map bboxes
+        back to full-screen normalized [0,1000]. Shared by region-based and panel_id-based
+        focus. Caller stamps ``focus_root_panel_id`` once the panel is confirmed in the crop.
         """
-        self._sequence += 1
-        img_bytes = self._capture()
-        from PIL import Image
-
-        img = Image.open(io.BytesIO(img_bytes))
         full_w, full_h = img.size
         crop = img.crop(region)
         buf = io.BytesIO()
@@ -308,9 +363,73 @@ class VisionAdapter:
         )
         self._bbox_map = {eid: _map_crop_bbox(bb, region, full_w, full_h) for eid, bb in bbox_map.items()}
         self._panel_bbox_map = {pid: _map_crop_bbox(bb, region, full_w, full_h) for pid, bb in panel_bbox_map.items()}
+        self._last_state_sha256 = digest
         return obs
 
+    def _observe_focus_region(self, *, session_id: str, region: tuple[int, int, int, int]) -> SceneObservation:
+        """Low-level: focus an explicit full-screen pixel region (no panel_id resolution).
+
+        Retained for tests of the crop→coord mapping and as a primitive. Full-screen 8B
+        misses small/transient regions (eg a right-click context menu); narrowing to a crop
+        recovered 0 -> 23 menu items in the probe.
+        """
+        from PIL import Image
+
+        self._sequence += 1
+        img_bytes = self._capture()
+        img = Image.open(io.BytesIO(img_bytes))
+        return self._focus_core(session_id=session_id, region=region, img=img, img_bytes=img_bytes)
+
+    def observe_focus(self, *, session_id: str, panel_id: str) -> SceneObservation:
+        """LOCAL observation scoped to ``panel_id`` (FocusableComputerUseAdapter capability).
+
+        Region resolution (缝 3/4): (1) ``_panel_bbox_map`` hit → crop that panel's region;
+        (2) transient panel with a live ``CursorAnchor`` → crop around the click that opened
+        it (one-shot, then consumed); (3) otherwise ``NoRegionForPanel``. The result carries
+        ``focus_root_panel_id``. Coordinates stay adapter-internal; the contract never sees them.
+        """
+        from PIL import Image
+
+        self._sequence += 1
+        img_bytes = self._capture()
+        img = Image.open(io.BytesIO(img_bytes))
+        full_w, full_h = img.size
+        bbox = self._panel_bbox_map.get(panel_id)
+        if bbox is not None:
+            region = _bbox_to_region(bbox, full_w, full_h)
+            focused = self._focus_core(session_id=session_id, region=region, img=img, img_bytes=img_bytes)
+            return self._stamp_focus_root(focused, panel_id)
+        anchor = self._cursor_anchor
+        if anchor is not None and not anchor.consumed and anchor.session_id == session_id:
+            region = _anchor_region(anchor.click_xy, full_w, full_h)
+            focused = self._focus_core(session_id=session_id, region=region, img=img, img_bytes=img_bytes)
+            self._cursor_anchor = replace(anchor, consumed=True)
+            return self._stamp_focus_root(focused, panel_id)
+        if anchor is None:
+            reason = "panel_not_found"
+        elif anchor.consumed:
+            reason = "cursor_anchor_stale"
+        else:
+            reason = "session_mismatch"
+        raise NoRegionForPanel(
+            panel_id=panel_id,
+            reason=reason,
+            source_state_sha256=self._last_state_sha256,
+        )
+
+    def _stamp_focus_root(self, focused: SceneObservation, panel_id: str) -> SceneObservation:
+        """Mark ``focused`` with ``focus_root_panel_id`` only if the crop actually revealed
+        the panel; otherwise the focus failed (the region did not contain it)."""
+        if not any(p.panel_id == panel_id for p in focused.panels):
+            raise NoRegionForPanel(
+                panel_id=panel_id,
+                reason="panel_not_found",
+                source_state_sha256=self._last_state_sha256,
+            )
+        return replace(focused, focus_root_panel_id=panel_id)
+
     def execute(self, intent: ActionIntent) -> AdapterExecution:
+        self._cursor_anchor = None  # 缝 4 rule ③: any execute invalidates a pending anchor
         act = intent.action
         if act == "wait":
             return AdapterExecution(True, "wait_completed")
@@ -327,6 +446,7 @@ class VisionAdapter:
                 return AdapterExecution(True, f"key_pressed:{intent.key}")
             if act == "click":
                 x, y = self._denorm_center(bbox)
+                self._record_anchor(intent, x, y)
                 self._click(x, y, button=intent.button or "left")
                 return AdapterExecution(True, f"clicked:{tid}")
             if act == "hover":
@@ -341,6 +461,16 @@ class VisionAdapter:
         except Exception as exc:  # pyautogui failures must not crash the session
             return AdapterExecution(False, f"actuator_error:{exc}")
         return AdapterExecution(False, "unsupported_vision_action")
+
+    def _record_anchor(self, intent: ActionIntent, x: int, y: int) -> None:
+        """Record a cursor anchor for the transient a click may open (right-click → context menu)."""
+        button = intent.button or "left"
+        self._cursor_anchor = CursorAnchor(
+            session_id=intent.session_id,
+            click_xy=(x, y),
+            expected_transient_kind="context_menu" if button == "right" else None,
+            source_state_sha256=self._last_state_sha256,
+        )
 
     # -- internals ----------------------------------------------------------
 
