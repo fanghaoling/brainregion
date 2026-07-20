@@ -5,6 +5,7 @@ verifier(tests-green 为主)、loop(solve/parse-error 早停/budget/未知工具
 parse_tool_call 校验、scoped_workspace_root 收容 + 优先级、eval gate 决策。
 loop 用 mock backend(不调真模型);verifier/isolation 真跑 pytest。
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -59,7 +60,12 @@ def test_complete_messages_passes_history_through(monkeypatch):
 
     monkeypatch.setattr(litellm, "acompletion", fake_acompletion)
     backend = LiteLLMBackend()
-    msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "u1"}, {"role": "assistant", "content": "a1"}, {"role": "user", "content": "u2"}]
+    msgs = [
+        {"role": "system", "content": "s"},
+        {"role": "user", "content": "u1"},
+        {"role": "assistant", "content": "a1"},
+        {"role": "user", "content": "u2"},
+    ]
     resp = asyncio.run(backend.complete_messages(msgs, model="some/model"))
     assert resp.ok
     assert captured["messages"] == msgs  # history passed through verbatim
@@ -105,7 +111,8 @@ def test_deepseek_thinking_kwargs():
     }
     # thinking on + effort → enabled + reasoning_effort
     assert _effort_kwargs("openai/deepseek-v4-pro", effort="high", thinking=True) == {
-        "extra_body": {"thinking": {"type": "enabled"}}, "reasoning_effort": "high",
+        "extra_body": {"thinking": {"type": "enabled"}},
+        "reasoning_effort": "high",
     }
     # thinking None(未显式)→ 保持原契约:effort 对 deepseek no-op(§15.6)
     assert _effort_kwargs("openai/deepseek-v4-flash", effort="high", thinking=None) == {}
@@ -113,10 +120,15 @@ def test_deepseek_thinking_kwargs():
     # 非 deepseek 不受 thinking 影响
     assert _effort_kwargs("zhipu/glm-5.2", effort=None, thinking=False) == {}
     # sampling:deepseek 思考关(False)/默认(None) → 正常采样;显式开(True) → 不采样(文档:思考忽略 temp/top_p)
-    assert LiteLLMBackend._sampling_for("openai/deepseek-v4-flash", 0.0, 0.95, None, False) == {"temperature": 0.0, "top_p": 0.95}
-    assert LiteLLMBackend._sampling_for("openai/deepseek-v4-flash", 0.0, 0.95, None, None) == {"temperature": 0.0, "top_p": 0.95}
+    assert LiteLLMBackend._sampling_for("openai/deepseek-v4-flash", 0.0, 0.95, None, False) == {
+        "temperature": 0.0,
+        "top_p": 0.95,
+    }
+    assert LiteLLMBackend._sampling_for("openai/deepseek-v4-flash", 0.0, 0.95, None, None) == {
+        "temperature": 0.0,
+        "top_p": 0.95,
+    }
     assert LiteLLMBackend._sampling_for("openai/deepseek-v4-flash", 0.0, 0.95, None, True) == {}
-
 
 
 class MockBackend:
@@ -141,8 +153,11 @@ class MockBackend:
         content = self.script[min(self.i, len(self.script) - 1)]
         self.i += 1
         return ModelResponse(
-            model=kw.get("model", "mock"), content=content, usage=dict(self.usage),
-            cost_usd=self.cost, cost_source=self.cost_source,
+            model=kw.get("model", "mock"),
+            content=content,
+            usage=dict(self.usage),
+            cost_usd=self.cost,
+            cost_source=self.cost_source,
             transport_mode=self.transport_mode,
         )
 
@@ -164,6 +179,7 @@ def _sha(run_dir, path):
 
 
 # ---------- materialize path validation ----------
+
 
 def test_materialize_rejects_absolute_path(tmp_path):
     task = SandboxTask(id="x", goal="g", files={"abs": "x"})
@@ -212,6 +228,7 @@ def test_sandbox_tool_result_uses_portable_workspace_root():
 
 # ---------- verifier ----------
 
+
 @pytest.mark.parametrize("task_id", [t.id for t in SANDBOX_FIXTURES])
 def test_verifier_buggy_fails(task_id):
     task, run_dir = _materialized(task_id)
@@ -229,7 +246,8 @@ def test_verifier_solved_when_green():
         with scoped_workspace_root(run_dir):
             sha = read_text("ranges.py")["sha256"]
             apply_text_patch(
-                "ranges.py", expected_sha256=sha,
+                "ranges.py",
+                expected_sha256=sha,
                 replacements=[{"old_text": "range(start, end)", "new_text": "range(start, end + 1)"}],
                 dry_run=False,
             )
@@ -242,6 +260,7 @@ def test_verifier_solved_when_green():
 
 
 # ---------- parse_tool_call validation ----------
+
 
 def test_parse_done():
     call, err = parse_tool_call(_J({"thought": "x", "done": True, "answer": "done"}))
@@ -285,25 +304,52 @@ def test_allowed_tools_exact():
     # env 工具(observe/act=Phase A,recall_map=Phase C 记忆脑区,plan=Phase D.3 策略脑区,
     # recall_topo=Phase 4.6 拓扑记忆脑区,recall_path=Phase 4.7 路径轨迹记忆脑区,
     # delegate_navigation=Phase 4.9 导航执行脑区)在 union;
-    # code agent 的 system prompt 不列它们(不泄漏),仅幻觉调用时触发 → dispatch 显式报错。
+    # act_cu/focus_cu=G plan S4 computer-use 桥工具(cu_bridge-gated;run_agent 拦截,dispatch raise
+    # 兜底);code agent 的 system prompt 不列它们(不泄漏),仅幻觉调用时触发 → dispatch 显式报错。
     assert ALLOWED_TOOLS == frozenset(
-        {"read_text", "search_text", "inspect_file", "apply_text_patch", "workspace_run_check",
-         "list_allowed_roots", "request_evidence", "observe", "act", "recall_map", "plan",
-         "recall_topo", "recall_path", "delegate_navigation"}
+        {
+            "read_text",
+            "search_text",
+            "inspect_file",
+            "apply_text_patch",
+            "workspace_run_check",
+            "list_allowed_roots",
+            "request_evidence",
+            "observe",
+            "act",
+            "recall_map",
+            "plan",
+            "recall_topo",
+            "recall_path",
+            "delegate_navigation",
+            "act_cu",
+            "focus_cu",
+        }
     )
 
 
 # ---------- loop driver (mock backend) ----------
 
+
 def _solve_script(run_dir):
     sha = _sha(run_dir, "ranges.py")
     return [
         _J({"thought": "read", "tool": "read_text", "args": {"path": "ranges.py"}}),
-        _J({"thought": "fix", "tool": "apply_text_patch", "args": {
-            "path": "ranges.py", "expected_sha256": sha,
-            "replacements": [{"old_text": "range(start, end)", "new_text": "range(start, end + 1)"}],
-            "dry_run": False}}),
-        _J({"thought": "test", "tool": "workspace_run_check", "args": {"argv": [sys.executable, "-m", "pytest", "-q"]}}),
+        _J(
+            {
+                "thought": "fix",
+                "tool": "apply_text_patch",
+                "args": {
+                    "path": "ranges.py",
+                    "expected_sha256": sha,
+                    "replacements": [{"old_text": "range(start, end)", "new_text": "range(start, end + 1)"}],
+                    "dry_run": False,
+                },
+            }
+        ),
+        _J(
+            {"thought": "test", "tool": "workspace_run_check", "args": {"argv": [sys.executable, "-m", "pytest", "-q"]}}
+        ),
         _J({"thought": "done", "done": True, "answer": "fixed"}),
     ]
 
@@ -311,29 +357,27 @@ def _solve_script(run_dir):
 def test_loop_solves_happy_path():
     task, run_dir = _materialized("off_by_one")
     try:
-        traj = asyncio.run(run_agent(
-            MockBackend(
-                _solve_script(run_dir),
-                transport_mode="responses_text_fallback",
-            ),
-            "mock",
-            task,
-            run_dir=run_dir,
-            arm="none",
-        ))
+        traj = asyncio.run(
+            run_agent(
+                MockBackend(
+                    _solve_script(run_dir),
+                    transport_mode="responses_text_fallback",
+                ),
+                "mock",
+                task,
+                run_dir=run_dir,
+                arm="none",
+            )
+        )
         assert traj.solve_status == "solved"
         assert traj.done and traj.n_steps == 4
         assert traj.termination_reason == "done"
         assert traj.steps[1].tool == "apply_text_patch"
         assert traj.extraction_mode_counts == {"strict_json": 4}
         assert traj.transport_mode_counts == {"responses_text_fallback": 4}
-        assert traj.transport_extraction_counts == {
-            "responses_text_fallback|strict_json": 4
-        }
+        assert traj.transport_extraction_counts == {"responses_text_fallback|strict_json": 4}
         assert {step["extraction_mode"] for step in traj.progress_trace} == {"strict_json"}
-        assert {step["transport_mode"] for step in traj.progress_trace} == {
-            "responses_text_fallback"
-        }
+        assert {step["transport_mode"] for step in traj.progress_trace} == {"responses_text_fallback"}
     finally:
         cleanup_run_dir(run_dir)
 
@@ -348,13 +392,20 @@ def test_loop_records_per_step_and_total_model_usage():
         "completion_tokens_details": {"reasoning_tokens": 5},
     }
     try:
-        traj = asyncio.run(run_agent(
-            MockBackend(
-                [_J({"thought": "done", "done": True, "answer": "stop"})],
-                cost=0.002, usage=usage, cost_source="builtin",
-            ),
-            "mock", task, run_dir=run_dir, arm="none",
-        ))
+        traj = asyncio.run(
+            run_agent(
+                MockBackend(
+                    [_J({"thought": "done", "done": True, "answer": "stop"})],
+                    cost=0.002,
+                    usage=usage,
+                    cost_source="builtin",
+                ),
+                "mock",
+                task,
+                run_dir=run_dir,
+                arm="none",
+            )
+        )
         out = traj.to_dict()
         assert out["main_usage"] == {
             "input_tokens": 100,
@@ -371,10 +422,7 @@ def test_loop_records_per_step_and_total_model_usage():
         attribution = out["main_input_attribution"]
         assert attribution["actual_input_tokens"] == 100
         assert attribution["provider_reported_calls"] == 1
-        assert sum(
-            values["actual_input_tokens"]
-            for values in attribution["categories"].values()
-        ) == 100
+        assert sum(values["actual_input_tokens"] for values in attribution["categories"].values()) == 100
         assert attribution["contains_content"] is False
         assert out["steps"][0]["main_input_attribution"] == attribution
     finally:
@@ -434,10 +482,7 @@ def test_compact_lifecycle_reduces_usage_aware_backend_input_tokens():
         async def complete_messages(self, messages, **kwargs):
             content = self.script[self.index]
             self.index += 1
-            input_tokens = sum(
-                estimate_context_tokens(str(message.get("content") or ""))
-                for message in messages
-            )
+            input_tokens = sum(estimate_context_tokens(str(message.get("content") or "")) for message in messages)
             return ModelResponse(
                 model="mock",
                 content=content,
@@ -474,20 +519,27 @@ def test_compact_lifecycle_reduces_usage_aware_backend_input_tokens():
     compact = run("compact")
 
     assert compact.total_main_usage["input_tokens"] < full.total_main_usage["input_tokens"]
-    assert compact.main_input_attribution["categories"]["tool_transcript"][
-        "actual_input_tokens"
-    ] < full.main_input_attribution["categories"]["tool_transcript"][
-        "actual_input_tokens"
-    ]
+    assert (
+        compact.main_input_attribution["categories"]["tool_transcript"]["actual_input_tokens"]
+        < full.main_input_attribution["categories"]["tool_transcript"]["actual_input_tokens"]
+    )
     assert compact.tool_result_lifecycle["compacted_results"] == 1
 
 
 def test_loop_consecutive_parse_error_early_stop():
     task, run_dir = _materialized("off_by_one")
     try:
-        traj = asyncio.run(run_agent(
-            MockBackend(["nope", "still nope", "again nope"]), "mock", task,
-            run_dir=run_dir, arm="none", max_steps=10, consecutive_error_limit=3))
+        traj = asyncio.run(
+            run_agent(
+                MockBackend(["nope", "still nope", "again nope"]),
+                "mock",
+                task,
+                run_dir=run_dir,
+                arm="none",
+                max_steps=10,
+                consecutive_error_limit=3,
+            )
+        )
         assert traj.solve_status == "parse_error"
         assert traj.termination_reason == "parse_error"
         assert traj.n_steps == 3
@@ -528,9 +580,17 @@ def test_loop_consecutive_backend_errors_are_infrastructure_failures():
 def test_loop_budget_exceeded_terminates():
     task, run_dir = _materialized("off_by_one")
     try:
-        traj = asyncio.run(run_agent(
-            MockBackend([_J({"thought": "x", "tool": "list_allowed_roots", "args": {}})] * 50, cost=0.5),
-            "mock", task, run_dir=run_dir, arm="none", max_steps=20, max_cost_usd=0.5))
+        traj = asyncio.run(
+            run_agent(
+                MockBackend([_J({"thought": "x", "tool": "list_allowed_roots", "args": {}})] * 50, cost=0.5),
+                "mock",
+                task,
+                run_dir=run_dir,
+                arm="none",
+                max_steps=20,
+                max_cost_usd=0.5,
+            )
+        )
         assert traj.termination_reason == "budget_exceeded"
         assert traj.solve_status in ("budget_exceeded", "tests_fail")
     finally:
@@ -540,9 +600,15 @@ def test_loop_budget_exceeded_terminates():
 def test_loop_unknown_tool_error_feedback_no_crash():
     task, run_dir = _materialized("off_by_one")
     try:
-        traj = asyncio.run(run_agent(
-            MockBackend([_J({"thought": "x", "tool": "delete_all", "args": {}})] + _solve_script(run_dir)),
-            "mock", task, run_dir=run_dir, arm="none"))
+        traj = asyncio.run(
+            run_agent(
+                MockBackend([_J({"thought": "x", "tool": "delete_all", "args": {}})] + _solve_script(run_dir)),
+                "mock",
+                task,
+                run_dir=run_dir,
+                arm="none",
+            )
+        )
         assert traj.steps[0].error and "unknown tool" in traj.steps[0].error
         assert traj.steps[0].error_kind == "protocol_error"
         assert traj.solve_status == "solved"  # recovered and solved
@@ -577,8 +643,9 @@ def test_loop_tool_execution_error_is_classified_after_valid_protocol():
 def test_loop_brainregion_arm_calls_wake_gate():
     task, run_dir = _materialized("off_by_one")
     try:
-        traj = asyncio.run(run_agent(
-            MockBackend(_solve_script(run_dir)), "mock", task, run_dir=run_dir, arm="brainregion"))
+        traj = asyncio.run(
+            run_agent(MockBackend(_solve_script(run_dir)), "mock", task, run_dir=run_dir, arm="brainregion")
+        )
         assert traj.solve_status == "solved"
         assert traj.wake_calls == 1
     finally:
@@ -588,9 +655,17 @@ def test_loop_brainregion_arm_calls_wake_gate():
 def test_loop_max_steps_terminates():
     task, run_dir = _materialized("off_by_one")
     try:
-        traj = asyncio.run(run_agent(
-            MockBackend([_J({"thought": "x", "tool": "list_allowed_roots", "args": {}})] * 50, cost=0.0),
-            "mock", task, run_dir=run_dir, arm="none", max_steps=3, max_cost_usd=10.0))
+        traj = asyncio.run(
+            run_agent(
+                MockBackend([_J({"thought": "x", "tool": "list_allowed_roots", "args": {}})] * 50, cost=0.0),
+                "mock",
+                task,
+                run_dir=run_dir,
+                arm="none",
+                max_steps=3,
+                max_cost_usd=10.0,
+            )
+        )
         assert traj.termination_reason == "max_steps"
         assert traj.n_steps == 3
     finally:
@@ -599,6 +674,7 @@ def test_loop_max_steps_terminates():
 
 # ---------- scoped_workspace_root ----------
 
+
 def test_scoped_root_overrides_env(tmp_path, monkeypatch):
     a = tmp_path / "a"
     a.mkdir()
@@ -606,6 +682,7 @@ def test_scoped_root_overrides_env(tmp_path, monkeypatch):
     b.mkdir()
     monkeypatch.setenv("BRAIN_REGION_WORKSPACE_ROOTS", str(a))
     from brainregion.workspace.files import list_allowed_roots
+
     assert list_allowed_roots()["roots"][0]["path"] == str(a.resolve())
     with scoped_workspace_root(str(b)):
         roots = list_allowed_roots()["roots"]
@@ -622,6 +699,7 @@ def test_scoped_root_confines_to_scoped_dir(tmp_path):
     outside = tmp_path / "outside.py"
     outside.write_text("x = 2", encoding="utf-8")
     from brainregion.workspace import inspect_file
+
     with scoped_workspace_root(str(sub)):
         # 内部路径 OK
         assert inspect_file("inside.py")["is_file"] is True
@@ -631,6 +709,7 @@ def test_scoped_root_confines_to_scoped_dir(tmp_path):
 
 
 # ---------- eval gate ----------
+
 
 def test_gate_go_when_solve_rate_ci_above_zero():
     sr = {"point": 0.5, "low": 0.1, "high": 0.8, "n": 30}
@@ -668,11 +747,25 @@ def test_run_sandbox_eval_end_to_end_mock():
 
     def script_factory():
         return [
-            _J({"thought": "fix", "tool": "apply_text_patch", "args": {
-                "path": "ranges.py", "expected_sha256": sha,
-                "replacements": [{"old_text": "range(start, end)", "new_text": "range(start, end + 1)"}],
-                "dry_run": False}}),
-            _J({"thought": "test", "tool": "workspace_run_check", "args": {"argv": [sys.executable, "-m", "pytest", "-q"]}}),
+            _J(
+                {
+                    "thought": "fix",
+                    "tool": "apply_text_patch",
+                    "args": {
+                        "path": "ranges.py",
+                        "expected_sha256": sha,
+                        "replacements": [{"old_text": "range(start, end)", "new_text": "range(start, end + 1)"}],
+                        "dry_run": False,
+                    },
+                }
+            ),
+            _J(
+                {
+                    "thought": "test",
+                    "tool": "workspace_run_check",
+                    "args": {"argv": [sys.executable, "-m", "pytest", "-q"]},
+                }
+            ),
             _J({"thought": "done", "done": True, "answer": "fixed"}),
         ]
 
@@ -685,9 +778,15 @@ def test_run_sandbox_eval_end_to_end_mock():
             self._inner = MockBackend(script_factory())
             return await self._inner.complete_messages(messages, **kw)
 
-    report = asyncio.run(run_sandbox_eval(
-        PerCallScriptBackend(), "mock", [task], max_steps=6, max_cost_usd=1.0,
-    ))
+    report = asyncio.run(
+        run_sandbox_eval(
+            PerCallScriptBackend(),
+            "mock",
+            [task],
+            max_steps=6,
+            max_cost_usd=1.0,
+        )
+    )
     assert report["n"] == 1
     assert set(report["per_arm"]) == {"none", "brainregion"}
     assert report["per_arm"]["none"]["solve_rate"] == 1.0
