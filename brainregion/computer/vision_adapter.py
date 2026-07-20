@@ -49,6 +49,9 @@ class VisionModelConfig:
     max_tokens: int = 4096
     temperature: float = 0.1
     digest_mode: str = "raw"  # G plan S3: "raw" (sha256 of image bytes, today's behavior) | "semantic" (sha256 of canonical scene structure — filters cursor/PNG/sub-pixel noise)
+    thinking: bool | None = (
+        None  # G plan 视觉配置:None=不传(provider 默认);False=disabled(推理 VLM 如智谱 GLM-4.6V 关思考,否则 reasoning_content 烧光 max_tokens→content 空);True=enabled
+    )
 
 
 PRESETS: dict[str, VisionModelConfig] = {
@@ -61,15 +64,48 @@ PRESETS: dict[str, VisionModelConfig] = {
     "siliconflow-glm-4.5v": VisionModelConfig(
         "siliconflow-glm-4.5v", "zai-org/GLM-4.5V", "https://api.siliconflow.cn/v1", "SILICONFLOW_API_KEY"
     ),
-    # Zhipu official (ZAI_API_KEY) — GLM-4.6V / GLM-5V-Turbo are newer than SiliconFlow
-    # carries; model ids to confirm at test time (Zhipu vision naming convention = +v):
+    # Zhipu official (ZAI_API_KEY) — GLM-4.6V / GLM-5V-Turbo are reasoning VLMs: thinking=False
+    # or they burn max_tokens in reasoning_content → content empty (ISS-007 视觉版).
     "zhipu-glm-4.6v": VisionModelConfig(
-        "zhipu-glm-4.6v", "glm-4.6v", "https://open.bigmodel.cn/api/paas/v4", "ZAI_API_KEY"
+        "zhipu-glm-4.6v",
+        "glm-4.6v",
+        "https://open.bigmodel.cn/api/paas/v4",
+        "ZAI_API_KEY",
+        thinking=False,
     ),
     "zhipu-glm-5v-turbo": VisionModelConfig(
-        "zhipu-glm-5v-turbo", "glm-5v-turbo", "https://open.bigmodel.cn/api/paas/v4", "ZAI_API_KEY"
+        "zhipu-glm-5v-turbo",
+        "glm-5v-turbo",
+        "https://open.bigmodel.cn/api/paas/v4",
+        "ZAI_API_KEY",
+        thinking=False,
     ),
 }
+
+
+def vision_config_from_env() -> VisionModelConfig | None:
+    """G plan 视觉配置(像 consult_panel 那样灵活配置,不硬编码 preset):从 env 构造自定义
+    VisionModelConfig。读 VISION_MODEL/VISION_BASE_URL/VISION_API_KEY_ENV/VISION_DIGEST_MODE/
+    VISION_THINKING/VISION_MAX_TOKENS;未设 VISION_MODEL → None(caller 用 VISION_PRESETS)。
+    """
+    model = os.environ.get("VISION_MODEL", "").strip()
+    if not model:
+        return None
+
+    def _optbool(v: str) -> bool | None:
+        if not v:
+            return None
+        return v.casefold() in ("1", "true", "yes", "on")
+
+    return VisionModelConfig(
+        name="env",
+        model=model,
+        base_url=os.environ.get("VISION_BASE_URL", "").strip().rstrip("/"),
+        api_key_env=os.environ.get("VISION_API_KEY_ENV", "SILICONFLOW_API_KEY").strip(),
+        digest_mode=os.environ.get("VISION_DIGEST_MODE", "raw").strip() or "raw",
+        thinking=_optbool(os.environ.get("VISION_THINKING", "").strip()),
+        max_tokens=int(os.environ.get("VISION_MAX_TOKENS", "4096")),
+    )
 
 
 # ---------------------------------------------------------------- parse prompt
@@ -626,6 +662,10 @@ class VisionAdapter:
             "max_tokens": self.vision.max_tokens,
             "temperature": self.vision.temperature,
         }
+        if self.vision.thinking is not None:
+            # 推理 VLM(智谱 GLM-4.6V/5V-Turbo)默认 thinking=enabled,会把 max_tokens 烧在
+            # reasoning_content 导致 content 空;显式 disabled 让它直接吐 JSON。
+            payload["thinking"] = {"type": "enabled" if self.vision.thinking else "disabled"}
         url = self.vision.base_url + "/chat/completions"
         headers = {"Authorization": f"Bearer {self._api_key}", "Content-Type": "application/json"}
         resp = None

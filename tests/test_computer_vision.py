@@ -15,9 +15,11 @@ from brainregion.computer.adapter import NoRegionForPanel
 from brainregion.computer.contracts import Panel, UIElement
 from brainregion.computer.vision_adapter import (
     CursorAnchor,
+    VisionModelConfig,
     _build_scene,
     _semantic_state_digest,
     infer_missing_panel_parents,
+    vision_config_from_env,
 )
 
 pytest.importorskip("PIL.Image")
@@ -525,3 +527,67 @@ def test_observe_semantic_digest_mode_propagates_to_state_sha256():
     assert obs.state_sha256 != raw  # semantic, not raw bytes
     assert obs.frame.sha256 == raw  # frame stays raw artifact identity
     assert adapter._last_state_sha256 == obs.state_sha256
+
+
+# ---------------------------------------------------------------------------
+# G plan 视觉配置: thinking 控制(推理 VLM 兼容)+ env 自定义(像 consult_panel 灵活配置)
+# ---------------------------------------------------------------------------
+
+
+class _FakeVlmResp:
+    status_code = 200
+    text = '{"choices":[{"message":{"content":"{}"}}]}'
+
+    def json(self):
+        return {"choices": [{"message": {"content": "{}"}}]}
+
+
+def _capture_payload(adapter, monkeypatch):
+    captured = {}
+
+    def fake_post(url, **kw):
+        captured.update(kw.get("json", {}))
+        return _FakeVlmResp()
+
+    import brainregion.computer.vision_adapter as va
+
+    monkeypatch.setattr(va.requests, "post", fake_post)
+    adapter._parse(_fake_image_bytes(10, 10))
+    return captured
+
+
+def test_vision_thinking_disabled_injects_payload(monkeypatch):
+    """cfg.thinking=False → _parse payload 含 thinking:{type:disabled}(关推理 VLM 的思考)。"""
+    cfg = VisionModelConfig("t", "glm-4.6v", "http://x/v1", "K", thinking=False)
+    adapter = VisionAdapter(vision=cfg, screenshot=lambda: _fake_image_bytes(10, 10), api_key="k")
+    payload = _capture_payload(adapter, monkeypatch)
+    assert payload["thinking"] == {"type": "disabled"}
+
+
+def test_vision_thinking_none_omits_from_payload(monkeypatch):
+    """cfg.thinking=None(默认)→ payload 不含 thinking(用 provider 默认,如硅基流动 Qwen3-VL)。"""
+    cfg = VisionModelConfig("t", "qwen3vl", "http://x/v1", "K")  # thinking=None
+    adapter = VisionAdapter(vision=cfg, screenshot=lambda: _fake_image_bytes(10, 10), api_key="k")
+    payload = _capture_payload(adapter, monkeypatch)
+    assert "thinking" not in payload
+
+
+def test_vision_config_from_env_overrides_preset(monkeypatch):
+    """env VISION_MODEL/BASE_URL/THINKING/DIGEST_MODE → vision_config_from_env 构造自定义 cfg
+    (像 consult_panel 那样灵活配置,不硬编码 VISION_PRESETS)。"""
+    monkeypatch.setenv("VISION_MODEL", "my-glm")
+    monkeypatch.setenv("VISION_BASE_URL", "http://x/v1/")
+    monkeypatch.setenv("VISION_THINKING", "false")
+    monkeypatch.setenv("VISION_DIGEST_MODE", "semantic")
+    cfg = vision_config_from_env()
+    assert cfg is not None
+    assert cfg.model == "my-glm"
+    assert cfg.base_url == "http://x/v1"  # trailing slash stripped
+    assert cfg.thinking is False
+    assert cfg.digest_mode == "semantic"
+
+
+def test_vision_config_from_env_none_when_no_model(monkeypatch):
+    """未设 VISION_MODEL → None(caller 回落 VISION_PRESETS)。"""
+    monkeypatch.delenv("VISION_MODEL", raising=False)
+    assert vision_config_from_env() is None
