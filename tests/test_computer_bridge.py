@@ -115,6 +115,23 @@ def test_act_click_does_one_observe_zero_pre_one_post():
     assert calls["n"] - seed == 1, f"act observed {calls['n'] - seed}x, expected 1 (post-execute only)"
 
 
+def test_act_seeds_current_when_none_no_prime_required():
+    """review_code #1: act() before any prime()/wait() must still work — it seeds _current
+    on entry (no None-resolve). Locks the guard at bridge.py act() entry against regression."""
+    _adapter, bridge = _bridge()
+    assert bridge.current is None
+    decision = {
+        "action": "click",
+        "locator": {
+            "anchor": {"panel_name": "toolbar"},
+            "descriptor": {"role": "button", "attributes": {"icon_shape": "play"}},
+        },
+    }
+    result = bridge.act(decision, step=0)
+    assert result["status"] == "executed"
+    assert bridge.current is not None
+
+
 def test_act_unresolved_locator_returns_unresolved_not_crash():
     _adapter, bridge = _bridge()
     bridge.prime()
