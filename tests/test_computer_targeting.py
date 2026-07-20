@@ -22,7 +22,7 @@ from brainregion.computer.locator import (
     WithinPanel,
 )
 from brainregion.computer.perception import PerceptionRegion
-from brainregion.computer.session import ComputerUseSession
+from brainregion.computer.session import BoundFreshness, ComputerUseSession, STRICT, StrictFreshness
 from brainregion.computer.targeting import FocusBudget, TargetingController
 from brainregion.computer.unity_mock import UnityEditorMockAdapter
 
@@ -500,3 +500,144 @@ def test_capstone_focus_chain_on_unity_mock_to_position_x():
     resolved = perception.resolve(locator, result.observation)
     assert resolved.status == "resolved"
     assert resolved.first.element_id == "inspector-component-transform-position-x"
+
+
+# ---------------------------------------------------------------------------
+# G plan S1 — FreshnessPolicy (StrictFreshness default / BoundFreshness bound+_latest+TTL)
+# ---------------------------------------------------------------------------
+
+
+def _setup_bound(
+    ttl_ms: float = 10000.0, *, now: float | None = None
+) -> tuple[UnityEditorMockAdapter, ComputerUseSession, PerceptionRegion, dict]:
+    """Like ``_setup`` but with BoundFreshness + an injected fake clock (no real sleep)."""
+    adapter = UnityEditorMockAdapter()
+    adapter.execute(_intent("hierarchy-background", button="right"))
+    adapter.execute(_intent("menu-3d-object", action="hover"))
+    adapter.execute(_intent("submenu-cube"))
+    clock = {"now": 0.0 if now is None else now}
+    session = ComputerUseSession(
+        session_id="s",
+        adapter=adapter,
+        allowed_apps={"unity.editor"},
+        freshness=BoundFreshness(ttl_ms=ttl_ms),
+        monotonic_ms=lambda: clock["now"],
+    )
+    perception = PerceptionRegion(event_sink=lambda *a, **k: None)
+    return adapter, session, perception, clock
+
+
+def _toolbar_play_locator() -> Locator:
+    """A target that resolves without reveal (toolbar is always visible) — used to measure
+    perform's observe count without controller reveal noise."""
+    return Locator(
+        anchor=PanelAnchor(panel_name="toolbar"),
+        descriptor=ElementDescriptor(role="button", attributes=(("icon_shape", "play"),)),
+    )
+
+
+def test_default_freshness_is_strict():
+    session = ComputerUseSession(session_id="s", adapter=UnityEditorMockAdapter(), allowed_apps={"unity.editor"})
+    assert isinstance(session._freshness, StrictFreshness)
+    assert session._freshness is STRICT
+    assert session._freshness.name == "strict"
+
+
+def test_ttl_ms_kwarg_builds_bound_freshness():
+    session = ComputerUseSession(
+        session_id="s",
+        adapter=UnityEditorMockAdapter(),
+        allowed_apps={"unity.editor"},
+        ttl_ms=2000.0,
+    )
+    assert isinstance(session._freshness, BoundFreshness)
+    assert session._freshness.ttl_ms == 2000.0
+
+
+def test_explicit_freshness_kwarg_wins_over_ttl_ms():
+    session = ComputerUseSession(
+        session_id="s",
+        adapter=UnityEditorMockAdapter(),
+        allowed_apps={"unity.editor"},
+        freshness=BoundFreshness(ttl_ms=500.0),
+        ttl_ms=2000.0,
+    )
+    assert isinstance(session._freshness, BoundFreshness)
+    assert session._freshness.ttl_ms == 500.0
+
+
+def test_bound_freshness_acquire_before_seeds_then_binds():
+    """First call seeds _latest via observe; subsequent calls return _latest (no re-observe)."""
+    _adapter, session, _perception, _clock = _setup_bound(ttl_ms=10000.0)
+    policy = BoundFreshness(ttl_ms=10000.0)
+    assert session._latest is None
+    first = policy.acquire_before(session)
+    assert session._latest is first
+    second = policy.acquire_before(session)
+    assert second is session._latest
+    assert second is first  # same object — no re-observe
+
+
+def test_bound_freshness_does_not_re_observe_before_execute():
+    """G plan S1 / GPT #1+#2: perform does 0 pre-execute + 1 post-execute observe.
+    BoundFreshness binds _latest so the pre-execute re-observe is skipped; the only
+    observe inside perform is the post-execute receipt observe."""
+    adapter, session, perception, clock = _setup_bound(ttl_ms=10000.0)
+    observe_calls = {"n": 0}
+    real_observe = adapter.observe
+
+    def counting(*, session_id):
+        observe_calls["n"] += 1
+        return real_observe(session_id=session_id)
+
+    adapter.observe = counting  # type: ignore[method-assign]
+    controller = TargetingController(session=session, perception=perception)
+    session.observe()  # bridge primes _latest
+    result = controller.target(_toolbar_play_locator())
+    assert result.status == "resolved"
+    intent = result.first.to_action_intent(action="click", intent_id="act1", session_id="s", app_id="unity.editor")
+    pre = observe_calls["n"]
+    clock["now"] = 5.0  # within ttl
+    receipt = session.perform(intent)
+    post = observe_calls["n"]
+    assert post - pre == 1, f"perform observed {post - pre}x, expected 1 (post-execute only)"
+    assert receipt.status == "executed"
+
+
+def test_bound_freshness_tolerates_out_of_band_drift_no_re_observe():
+    """Counterpart to test_stale_after_out_of_band_change_between_resolve_and_perform:
+    BoundFreshness binds _latest (no re-observe) so out-of-band drift is NOT detected.
+    TTL is the only honest guard — documented tradeoff (GPT #4)."""
+    adapter, session, perception, clock = _setup_bound(ttl_ms=100000.0)  # wide ttl
+    controller = TargetingController(session=session, perception=perception, max_reveals=3)
+    result = controller.target(_add_component_locator())
+    intent = result.first.to_action_intent(action="click", intent_id="act1", session_id="s", app_id="unity.editor")
+    adapter.mutate_out_of_band(component_search="changed")  # state drifts out of band
+    clock["now"] = 5.0  # within wide ttl
+    receipt = session.perform(intent)
+    assert receipt.status == "executed"  # NOT stale — _latest bound, no re-observe
+
+
+def test_bound_freshness_ttl_expired_rejects_stale():
+    adapter, session, perception, clock = _setup_bound(ttl_ms=100.0, now=0.0)
+    controller = TargetingController(session=session, perception=perception, max_reveals=3)
+    result = controller.target(_add_component_locator())
+    intent = result.first.to_action_intent(action="click", intent_id="act1", session_id="s", app_id="unity.editor")
+    clock["now"] = 500.0  # advance past ttl_ms=100
+    receipt = session.perform(intent)
+    assert receipt.status == "stale"
+    assert receipt.reason == "ttl_expired"
+
+
+def test_strict_freshness_re_observe_detects_out_of_band_drift():
+    """StrictFreshness (default) re-observes and detects drift — byte-identical to pre-S1
+    behavior. Confirms the S1 refactor did not change StrictFreshness semantics."""
+    adapter, session, perception = _setup()  # StrictFreshness default
+    assert isinstance(session._freshness, StrictFreshness)
+    controller = TargetingController(session=session, perception=perception, max_reveals=3)
+    result = controller.target(_add_component_locator())
+    intent = result.first.to_action_intent(action="click", intent_id="act1", session_id="s", app_id="unity.editor")
+    adapter.mutate_out_of_band(component_search="changed")
+    receipt = session.perform(intent)
+    assert receipt.status == "stale"
+    assert receipt.reason in {"frame_precondition_failed", "state_precondition_failed"}

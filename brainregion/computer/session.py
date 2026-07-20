@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Iterable
+from typing import Protocol
 
 from brainregion.runtime import emit_event
 
@@ -20,6 +22,84 @@ from .perception import PerceptionRegion
 EventSink = Callable[..., object]
 
 
+def _default_monotonic_ms() -> float:
+    return time.monotonic() * 1000.0
+
+
+class FreshnessPolicy(Protocol):
+    """How ``perform()`` obtains its before-observation and freshness gate (G plan S1).
+
+    ``StrictFreshness`` re-observes every action and compares the bound frame/state
+    against the freshly observed scene (today's behavior, byte-identical). It honestly
+    reflects drift but costs an extra observe per action and rejects on VLM jitter.
+
+    ``BoundFreshness`` binds to ``session._latest`` (no re-observe); the intent is bound
+    to that same observation, so frame/state checks constructively pass (bound obs IS the
+    gate obs → no mix-and-match). Its honest guard is a TTL on when ``_latest`` was
+    observed.
+    """
+
+    name: str
+
+    def acquire_before(self, session: ComputerUseSession) -> SceneObservation: ...
+
+    def freshness_rejection(
+        self, session: ComputerUseSession, intent: ActionIntent, before: SceneObservation
+    ) -> tuple[str, str] | None: ...
+
+
+class StrictFreshness:
+    """Re-observe before each action; reject ``stale`` when bound frame/state drift."""
+
+    name = "strict"
+
+    def acquire_before(self, session: ComputerUseSession) -> SceneObservation:
+        return session.observe()
+
+    def freshness_rejection(
+        self, session: ComputerUseSession, intent: ActionIntent, before: SceneObservation
+    ) -> tuple[str, str] | None:
+        if intent.expected_frame_id != before.frame.frame_id:
+            return "stale", "frame_precondition_failed"
+        if intent.expected_state_sha256 != before.state_sha256:
+            return "stale", "state_precondition_failed"
+        return None
+
+
+class BoundFreshness:
+    """Bind to ``_latest`` (no re-observe); bound intent shares ``_latest`` so frame/state
+    constructively pass. Honest guard = TTL on ``_latest_observed_at``.
+
+    This prevents observation mix-and-match (the bound observation IS the gate
+    observation). The TTL only bounds exposure to unobserved external mutation — it does
+    NOT prove the UI stayed unchanged (a user can still move a window, a transient can
+    close, play-mode can toggle within ``ttl_ms``). Use a tight ``ttl_ms``.
+    """
+
+    name = "bound"
+
+    def __init__(self, ttl_ms: float | None = None) -> None:
+        self.ttl_ms = ttl_ms
+
+    def acquire_before(self, session: ComputerUseSession) -> SceneObservation:
+        if session._latest is None:
+            return session.observe()  # seed _latest on the first perform
+        return session._latest
+
+    def freshness_rejection(
+        self, session: ComputerUseSession, intent: ActionIntent, before: SceneObservation
+    ) -> tuple[str, str] | None:
+        if self.ttl_ms is None or session._latest_observed_at is None:
+            return None
+        age_ms = session._monotonic_ms() - session._latest_observed_at
+        if age_ms > self.ttl_ms:
+            return "stale", "ttl_expired"
+        return None
+
+
+STRICT: FreshnessPolicy = StrictFreshness()
+
+
 class ComputerUseSession:
     """Own policy, freshness checks, budgets and post-action verification."""
 
@@ -32,6 +112,9 @@ class ComputerUseSession:
         allowed_actions: Iterable[str] = ("click", "type_text", "press_key", "wait", "hover"),
         max_actions: int = 50,
         event_sink: EventSink = emit_event,
+        freshness: FreshnessPolicy | None = None,
+        ttl_ms: float | None = None,
+        monotonic_ms: Callable[[], float] | None = None,
     ) -> None:
         self.session_id = str(session_id or "").strip()
         if not self.session_id:
@@ -47,6 +130,17 @@ class ComputerUseSession:
         self._event_sink = event_sink
         self._actions_executed = 0
         self._latest: SceneObservation | None = None
+        self._latest_observed_at: float | None = None
+        self._monotonic_ms = monotonic_ms or _default_monotonic_ms
+        self._freshness: FreshnessPolicy = self._resolve_freshness(freshness, ttl_ms)
+
+    @staticmethod
+    def _resolve_freshness(freshness: FreshnessPolicy | None, ttl_ms: float | None) -> FreshnessPolicy:
+        if freshness is not None:
+            return freshness
+        if ttl_ms is not None:
+            return BoundFreshness(ttl_ms=ttl_ms)
+        return STRICT
 
     @property
     def actions_executed(self) -> int:
@@ -56,6 +150,7 @@ class ComputerUseSession:
         observation = self.adapter.observe(session_id=self.session_id)
         self._validate_observation(observation)
         self._latest = observation
+        self._latest_observed_at = self._monotonic_ms()
         self._emit(
             "computer.observed",
             session_id=self.session_id,
@@ -94,6 +189,7 @@ class ComputerUseSession:
         focused = self.adapter.observe_focus(session_id=self.session_id, panel_id=panel_id)
         self._validate_observation(focused)
         self._latest = focused
+        self._latest_observed_at = self._monotonic_ms()
         self._emit(
             "computer.focused",
             session_id=self.session_id,
@@ -105,8 +201,10 @@ class ComputerUseSession:
         return focused
 
     def perform(self, intent: ActionIntent, *, approved: bool = False) -> ActionReceipt:
-        before = self.observe()
-        rejection = self._policy_rejection(intent, before=before, approved=approved)
+        before = self._freshness.acquire_before(self)
+        rejection = self._common_rejection(intent, before=before, approved=approved)
+        if rejection is None:
+            rejection = self._freshness.freshness_rejection(self, intent, before)
         if rejection is not None:
             status, reason = rejection
             return self._receipt(intent, before=before, after=before, status=status, reason=reason)
@@ -142,7 +240,7 @@ class ComputerUseSession:
             verification=verification,
         )
 
-    def _policy_rejection(
+    def _common_rejection(
         self,
         intent: ActionIntent,
         *,
@@ -160,10 +258,7 @@ class ComputerUseSession:
         if intent.requires_approval or intent.risk == "high":
             if not approved:
                 return "rejected", "approval_required"
-        if intent.expected_frame_id != before.frame.frame_id:
-            return "stale", "frame_precondition_failed"
-        if intent.expected_state_sha256 != before.state_sha256:
-            return "stale", "state_precondition_failed"
+        # frame/state freshness delegated to FreshnessPolicy.freshness_rejection (G plan S1).
         if intent.target_id is not None:
             target = before.element(intent.target_id)
             if target is None:
