@@ -138,8 +138,7 @@ class UIElement:
             raise ValueError("element must be an object")
         _strict_fields(
             data,
-            {"element_id", "role", "label", "enabled", "visible", "attributes",
-             "panel_id", "semantic_band"},
+            {"element_id", "role", "label", "enabled", "visible", "attributes", "panel_id", "semantic_band"},
             "element",
         )
         panel_id = data.get("panel_id")
@@ -188,6 +187,7 @@ class Panel:
     label: str
     transient_kind: TransientKind | None = None
     ordinal: str | None = None
+    parent_panel_id: str | None = None
     spawned_by_element_id: str | None = None
     spawn_sequence: int = 0
     scroll_position: str | None = None
@@ -205,11 +205,12 @@ class Panel:
         ordinal = self.ordinal
         if ordinal is not None:
             object.__setattr__(self, "ordinal", _identifier(ordinal, "ordinal"))
+        parent = self.parent_panel_id
+        if parent is not None:
+            object.__setattr__(self, "parent_panel_id", _identifier(parent, "parent_panel_id"))
         spawned = self.spawned_by_element_id
         if spawned is not None:
-            object.__setattr__(
-                self, "spawned_by_element_id", _identifier(spawned, "spawned_by_element_id")
-            )
+            object.__setattr__(self, "spawned_by_element_id", _identifier(spawned, "spawned_by_element_id"))
         if self.spawn_sequence < 0:
             raise ValueError("spawn_sequence cannot be negative")
         scroll = self.scroll_position
@@ -226,8 +227,17 @@ class Panel:
             raise ValueError("panel must be an object")
         _strict_fields(
             data,
-            {"panel_id", "role", "label", "transient_kind", "ordinal",
-             "spawned_by_element_id", "spawn_sequence", "scroll_position"},
+            {
+                "panel_id",
+                "role",
+                "label",
+                "transient_kind",
+                "ordinal",
+                "parent_panel_id",
+                "spawned_by_element_id",
+                "spawn_sequence",
+                "scroll_position",
+            },
             "panel",
         )
         kind = data.get("transient_kind")
@@ -236,6 +246,7 @@ class Panel:
             if kind not in _TRANSIENT_KINDS:
                 raise ValueError(f"transient_kind must be one of {sorted(_TRANSIENT_KINDS)}")
         ordinal = data.get("ordinal")
+        parent = data.get("parent_panel_id")
         spawned = data.get("spawned_by_element_id")
         scroll = data.get("scroll_position")
         return cls(
@@ -244,9 +255,8 @@ class Panel:
             label=_required_text(data.get("label"), "label", max_length=500),
             transient_kind=kind,  # type: ignore[arg-type]
             ordinal=_identifier(ordinal, "ordinal") if ordinal is not None else None,
-            spawned_by_element_id=(
-                _identifier(spawned, "spawned_by_element_id") if spawned is not None else None
-            ),
+            parent_panel_id=(_identifier(parent, "parent_panel_id") if parent is not None else None),
+            spawned_by_element_id=(_identifier(spawned, "spawned_by_element_id") if spawned is not None else None),
             spawn_sequence=int(data.get("spawn_sequence") or 0),
             scroll_position=_identifier(scroll, "scroll_position") if scroll is not None else None,
         )
@@ -258,6 +268,7 @@ class Panel:
             "label": self.label,
             "transient_kind": self.transient_kind,
             "ordinal": self.ordinal,
+            "parent_panel_id": self.parent_panel_id,
             "spawned_by_element_id": self.spawned_by_element_id,
             "spawn_sequence": self.spawn_sequence,
             "scroll_position": self.scroll_position,
@@ -275,6 +286,8 @@ class SceneObservation:
     state_sha256: str
     elements: tuple[UIElement, ...] = ()
     panels: tuple[Panel, ...] = ()
+    focus_root_panel_id: str | None = None
+    focus_ancestor_path: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "session_id", _identifier(self.session_id, "session_id"))
@@ -299,19 +312,50 @@ class SceneObservation:
         known_panels = set(panel_ids)
         for element in self.elements:
             if element.panel_id is not None and element.panel_id not in known_panels:
-                raise ValueError(
-                    f"element {element.element_id} references unknown panel_id {element.panel_id!r}"
-                )
+                raise ValueError(f"element {element.element_id} references unknown panel_id {element.panel_id!r}")
         known_elements = set(ids)
         for panel in self.panels:
-            if (
-                panel.spawned_by_element_id is not None
-                and panel.spawned_by_element_id not in known_elements
-            ):
+            if panel.spawned_by_element_id is not None and panel.spawned_by_element_id not in known_elements:
                 raise ValueError(
                     f"panel {panel.panel_id} spawned_by_element_id "
                     f"{panel.spawned_by_element_id!r} not found in scene elements"
                 )
+
+        # focus_ancestor_path: descriptive context labels (NOT resolvable ids; 缝 8 — ids are
+        # only unique within one observation, so ancestor references carry labels, not ids).
+        ancestor_path = self.focus_ancestor_path
+        if not isinstance(ancestor_path, tuple):
+            raise ValueError("focus_ancestor_path must be a tuple")
+        object.__setattr__(self, "focus_ancestor_path", tuple(str(lbl).strip() for lbl in ancestor_path))
+
+        # parent_panel_id containment tree: dangling refs + cycle detection (O(n) single-parent forest)
+        parent_map: dict[str, str | None] = {}
+        for panel in self.panels:
+            parent = panel.parent_panel_id
+            if parent is not None and parent not in known_panels:
+                raise ValueError(f"panel {panel.panel_id} parent_panel_id {parent!r} not found in scene panels")
+            parent_map[panel.panel_id] = parent
+        seen: set[str] = set()
+        for start in panel_ids:
+            if start in seen:
+                continue
+            path: list[str] = []
+            path_set: set[str] = set()
+            cur: str | None = start
+            while cur is not None and cur not in seen:
+                if cur in path_set:
+                    raise ValueError(f"panel parent cycle: {' -> '.join(path + [cur])}")
+                path.append(cur)
+                path_set.add(cur)
+                cur = parent_map.get(cur)
+            seen.update(path)
+
+        # focus_root_panel_id (focused observation): must reference a panel in this scene
+        focus_root = self.focus_root_panel_id
+        if focus_root is not None:
+            object.__setattr__(self, "focus_root_panel_id", _identifier(focus_root, "focus_root_panel_id"))
+            if focus_root not in known_panels:
+                raise ValueError(f"focus_root_panel_id {focus_root!r} not found in scene panels")
 
     def element(self, element_id: str) -> UIElement | None:
         return next((element for element in self.elements if element.element_id == element_id), None)
@@ -330,6 +374,49 @@ class SceneObservation:
         """Elements whose panel_id matches, preserving scene order (top→bottom = first→last)."""
         return tuple(element for element in self.elements if element.panel_id == panel_id)
 
+    def children_of(self, panel_id: str) -> tuple[Panel, ...]:
+        """Panels whose parent_panel_id == panel_id, preserving scene order."""
+        return tuple(panel for panel in self.panels if panel.parent_panel_id == panel_id)
+
+    def ancestors_of(self, panel_id: str, *, max_depth: int = 100) -> tuple[Panel, ...]:
+        """Walk the parent chain toward the root (immediate parent first).
+
+        max_depth is a defensive cap against pathological cycles; validation already
+        rejects cycles so this is belt-and-suspenders.
+        """
+        by_id = {panel.panel_id: panel for panel in self.panels}
+        out: list[Panel] = []
+        visited: set[str] = set()
+        cur = by_id.get(panel_id)
+        while (
+            cur is not None and cur.parent_panel_id is not None and len(out) < max_depth and cur.panel_id not in visited
+        ):
+            visited.add(cur.panel_id)
+            parent = by_id.get(cur.parent_panel_id)
+            if parent is None:
+                break
+            out.append(parent)
+            cur = parent
+        return tuple(out)
+
+    def descendants_of(self, panel_id: str, *, max_depth: int = 100) -> tuple[Panel, ...]:
+        """Pre-order DFS over children (deterministic scene order). Defensive max_depth cap."""
+        out: list[Panel] = []
+        visited: set[str] = {panel_id}
+
+        def _walk(parent_id: str, depth: int) -> None:
+            if depth >= max_depth:
+                return
+            for child in self.children_of(parent_id):
+                if child.panel_id in visited:
+                    continue
+                visited.add(child.panel_id)
+                out.append(child)
+                _walk(child.panel_id, depth + 1)
+
+        _walk(panel_id, 0)
+        return tuple(out)
+
     def to_dict(self) -> dict[str, Any]:
         return {
             "session_id": self.session_id,
@@ -341,6 +428,8 @@ class SceneObservation:
             "state_sha256": self.state_sha256,
             "elements": [element.to_dict() for element in self.elements],
             "panels": [panel.to_dict() for panel in self.panels],
+            "focus_root_panel_id": self.focus_root_panel_id,
+            "focus_ancestor_path": list(self.focus_ancestor_path),
         }
 
     def to_public_dict(self) -> dict[str, Any]:
@@ -356,6 +445,8 @@ class SceneObservation:
             "panel_count": len(self.panels),
             "panel_roles": sorted({panel.role for panel in self.panels}),
             "transient_count": sum(1 for panel in self.panels if panel.transient),
+            "focus_root_panel_id": self.focus_root_panel_id,
+            "focus_ancestor_depth": len(self.focus_ancestor_path),
             "content_redacted": True,
         }
 
