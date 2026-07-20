@@ -48,6 +48,7 @@ class VisionModelConfig:
     api_key_env: str
     max_tokens: int = 4096
     temperature: float = 0.1
+    digest_mode: str = "raw"  # G plan S3: "raw" (sha256 of image bytes, today's behavior) | "semantic" (sha256 of canonical scene structure — filters cursor/PNG/sub-pixel noise)
 
 
 PRESETS: dict[str, VisionModelConfig] = {
@@ -104,12 +105,61 @@ def _norm(value: Any) -> str:
     return str(value or "").strip().casefold()
 
 
+def _semantic_state_digest(elements: list[UIElement], panels: list[Panel]) -> str:
+    """Structural digest over the parsed scene (G plan S3).
+
+    Filters visual noise — cursor blink, PNG re-encode, sub-pixel jitter, downsample
+    rounding — that flips the raw byte digest but leaves the parsed structure unchanged.
+    Two logically-identical scenes yield the same semantic digest; a real UI change
+    (checkbox toggle, value edit, element add/remove) changes it.
+
+    Residual noise: VLM non-determinism (a re-parse may drop a field) can still flip this
+    — that is §187 multi-observation fusion's problem, not S3's. S3 only separates raw
+    (artifact identity / debug) from semantic (state identity / change detection).
+    """
+    payload = {
+        "panels": [
+            {
+                "id": p.panel_id,
+                "role": p.role,
+                "label": p.label,
+                "parent": p.parent_panel_id,
+                "transient": p.transient_kind,
+            }
+            for p in sorted(panels, key=lambda x: x.panel_id)
+        ],
+        "elements": [
+            {
+                "id": e.element_id,
+                "role": e.role,
+                "label": e.label,
+                "panel": e.panel_id,
+                "enabled": e.enabled,
+                "visible": e.visible,
+                "attrs": sorted((e.attribute_map() or {}).items()),
+            }
+            for e in sorted(elements, key=lambda x: x.element_id)
+        ],
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+
 def _build_scene(
-    parsed: dict, *, session_id: str, sequence: int, app_id: str, window_id: str, digest: str
+    parsed: dict,
+    *,
+    session_id: str,
+    sequence: int,
+    app_id: str,
+    window_id: str,
+    digest: str,
+    digest_mode: str = "raw",
 ) -> tuple[SceneObservation, dict[str, list[int]], dict[str, list[int]]]:
     """Map VLM panels/elements -> (SceneObservation, element_id->bbox, panel_id->bbox).
 
     bbox stays out of the contract (returned separately for execute() and panel viz).
+    ``digest`` is always the raw sha256 of image bytes (FrameRef.sha256 = artifact
+    identity). ``state_sha256`` follows ``digest_mode``: "raw" (today's behavior) or
+    "semantic" (structural digest that filters visual noise — G plan S3).
     """
     pid_by_key: dict[str, str] = {}
     panels: list[Panel] = []
@@ -192,6 +242,11 @@ def _build_scene(
     # explicit parent (already set) is never overridden.
     panels = infer_missing_panel_parents(tuple(panels), panel_bbox_map)
 
+    # G plan S3: frame.sha256 is always the raw image-bytes digest (artifact identity).
+    # state_sha256 follows digest_mode — semantic filters the visual noise that would
+    # otherwise flip the bound observation's state under BoundFreshness / receipt.
+    state_digest = _semantic_state_digest(elements, panels) if digest_mode == "semantic" else digest
+
     obs = SceneObservation(
         session_id=session_id,
         sequence=sequence,
@@ -206,7 +261,7 @@ def _build_scene(
             artifact_uri="mock://vision",
             sensitivity="private",
         ),
-        state_sha256=digest,
+        state_sha256=state_digest,
         elements=tuple(elements),
         panels=tuple(panels),
     )
@@ -391,10 +446,11 @@ class VisionAdapter:
             app_id=self.app_id,
             window_id=self.window_id,
             digest=digest,
+            digest_mode=self.vision.digest_mode,
         )
         self._bbox_map = bbox_map
         self._panel_bbox_map = panel_bbox_map
-        self._last_state_sha256 = digest
+        self._last_state_sha256 = obs.state_sha256
         return obs
 
     def _focus_core(
@@ -428,10 +484,11 @@ class VisionAdapter:
             app_id=self.app_id,
             window_id=self.window_id,
             digest=digest,
+            digest_mode=self.vision.digest_mode,
         )
         self._bbox_map = {eid: _map_crop_bbox(bb, region, full_w, full_h) for eid, bb in bbox_map.items()}
         self._panel_bbox_map = {pid: _map_crop_bbox(bb, region, full_w, full_h) for pid, bb in panel_bbox_map.items()}
-        self._last_state_sha256 = digest
+        self._last_state_sha256 = obs.state_sha256
         return obs
 
     def _observe_focus_region(self, *, session_id: str, region: tuple[int, int, int, int]) -> SceneObservation:

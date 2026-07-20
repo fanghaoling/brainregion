@@ -12,8 +12,13 @@ import pytest
 
 from brainregion.computer import VISION_PRESETS, VisionAdapter
 from brainregion.computer.adapter import NoRegionForPanel
-from brainregion.computer.contracts import Panel
-from brainregion.computer.vision_adapter import CursorAnchor, infer_missing_panel_parents
+from brainregion.computer.contracts import Panel, UIElement
+from brainregion.computer.vision_adapter import (
+    CursorAnchor,
+    _build_scene,
+    _semantic_state_digest,
+    infer_missing_panel_parents,
+)
 
 pytest.importorskip("PIL.Image")
 from PIL import Image  # noqa: E402
@@ -383,3 +388,140 @@ def test_observe_infers_containment_parents_for_nestable_panels():
     by_role = {p.role: p for p in obs.panels}
     assert by_role["group"].parent_panel_id == by_role["window"].panel_id
     assert by_role["window"].parent_panel_id is None
+
+
+# ---------------------------------------------------------------------------
+# G plan S3 — dual digest (raw artifact identity + semantic structural state)
+# ---------------------------------------------------------------------------
+
+
+def _scene_parsed(*, with_element: bool = True) -> dict:
+    """Minimal VLM parse for _build_scene: one inspector panel + one Position X input."""
+    elements = (
+        [{"panel": "Inspector", "role": "input", "label": "position x", "bbox": [10, 10, 40, 30]}]
+        if with_element
+        else []
+    )
+    return {
+        "panels": [{"name": "Inspector", "role": "inspector", "bbox": [0, 0, 100, 100]}],
+        "elements": elements,
+    }
+
+
+def test_semantic_state_digest_stable_across_element_order():
+    """Canonical sort: same elements in different order → same semantic digest."""
+    e1 = [
+        UIElement(element_id="inspector-1", role="input", label="y", panel_id="inspector"),
+        UIElement(element_id="inspector-0", role="input", label="x", panel_id="inspector"),
+    ]
+    e2 = [
+        UIElement(element_id="inspector-0", role="input", label="x", panel_id="inspector"),
+        UIElement(element_id="inspector-1", role="input", label="y", panel_id="inspector"),
+    ]
+    panels = [_panel("inspector", "inspector", "Inspector")]
+    assert _semantic_state_digest(e1, panels) == _semantic_state_digest(e2, panels)
+
+
+def test_semantic_state_digest_changes_on_real_ui_change():
+    """A real UI change (element added / label changed) → semantic digest changes."""
+    panels = [_panel("inspector", "inspector", "Inspector")]
+    base = [UIElement(element_id="inspector-0", role="input", label="position x", panel_id="inspector")]
+    added = base + [UIElement(element_id="inspector-1", role="input", label="position y", panel_id="inspector")]
+    relabeled = [UIElement(element_id="inspector-0", role="input", label="position z", panel_id="inspector")]
+    d_base = _semantic_state_digest(base, panels)
+    assert _semantic_state_digest(added, panels) != d_base
+    assert _semantic_state_digest(relabeled, panels) != d_base
+
+
+def test_build_scene_raw_mode_state_matches_raw_digest():
+    """digest_mode='raw' (default): state_sha256 == the raw image-bytes digest; frame.sha256
+    also raw (artifact identity)."""
+    obs, _bbox, _pbox = _build_scene(
+        _scene_parsed(),
+        session_id="t",
+        sequence=1,
+        app_id="unity.editor",
+        window_id="w",
+        digest="a" * 64,
+        digest_mode="raw",
+    )
+    assert obs.state_sha256 == "a" * 64
+    assert obs.frame.sha256 == "a" * 64
+
+
+def test_build_scene_semantic_mode_filters_byte_noise_nuisance_invariance():
+    """GPT #6 nuisance invariance: same logical scene, different image bytes (cursor blink,
+    PNG re-encode, sub-pixel jitter) → raw state flips but semantic state is stable. Under
+    BoundFreshness the semantic state_sha256 won't flip → no false stale."""
+    parsed = _scene_parsed()
+    obs_raw1, _, _ = _build_scene(
+        parsed, session_id="t", sequence=1, app_id="unity.editor", window_id="w", digest="a" * 64, digest_mode="raw"
+    )
+    obs_raw2, _, _ = _build_scene(
+        parsed, session_id="t", sequence=1, app_id="unity.editor", window_id="w", digest="b" * 64, digest_mode="raw"
+    )
+    obs_sem1, _, _ = _build_scene(
+        parsed,
+        session_id="t",
+        sequence=1,
+        app_id="unity.editor",
+        window_id="w",
+        digest="a" * 64,
+        digest_mode="semantic",
+    )
+    obs_sem2, _, _ = _build_scene(
+        parsed,
+        session_id="t",
+        sequence=1,
+        app_id="unity.editor",
+        window_id="w",
+        digest="b" * 64,
+        digest_mode="semantic",
+    )
+    assert obs_raw1.state_sha256 != obs_raw2.state_sha256  # raw: byte noise → false state_changed
+    assert obs_sem1.state_sha256 == obs_sem2.state_sha256  # semantic: stable under byte noise
+    assert obs_sem1.frame.sha256 == "a" * 64  # frame.sha256 stays raw (artifact identity / debug)
+    assert obs_sem2.frame.sha256 == "b" * 64
+
+
+def test_build_scene_semantic_mode_detects_structural_change_sensitivity():
+    """GPT #6 semantic sensitivity: a real UI change (element removed) flips the semantic
+    digest (a pure quantized-image digest might swallow a small change; structural does not)."""
+    obs_with, _, _ = _build_scene(
+        _scene_parsed(with_element=True),
+        session_id="t",
+        sequence=1,
+        app_id="unity.editor",
+        window_id="w",
+        digest="a" * 64,
+        digest_mode="semantic",
+    )
+    obs_without, _, _ = _build_scene(
+        _scene_parsed(with_element=False),
+        session_id="t",
+        sequence=1,
+        app_id="unity.editor",
+        window_id="w",
+        digest="a" * 64,
+        digest_mode="semantic",
+    )
+    assert obs_with.state_sha256 != obs_without.state_sha256
+
+
+def test_observe_semantic_digest_mode_propagates_to_state_sha256():
+    """End-to-end via observe(): digest_mode='semantic' makes state_sha256 the structural
+    digest (≠ raw bytes); frame.sha256 stays raw; _last_state_sha256 tracks state."""
+    import hashlib
+    from dataclasses import replace as _replace
+
+    parsed = _scene_parsed()
+    cfg = VISION_PRESETS["siliconflow-qwen3vl-8b"]
+    assert cfg.digest_mode == "raw"  # default preserved
+    cfg_sem = _replace(cfg, digest_mode="semantic")
+    adapter = VisionAdapter(vision=cfg_sem, screenshot=lambda: _fake_image_bytes(200, 200), api_key="fake")
+    adapter._parse = lambda ib: parsed  # type: ignore[method-assign]
+    obs = adapter.observe(session_id="t")
+    raw = hashlib.sha256(_fake_image_bytes(200, 200)).hexdigest()
+    assert obs.state_sha256 != raw  # semantic, not raw bytes
+    assert obs.frame.sha256 == raw  # frame stays raw artifact identity
+    assert adapter._last_state_sha256 == obs.state_sha256
