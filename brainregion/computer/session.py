@@ -79,6 +79,18 @@ class ComputerUseSession:
         status, panel_id = PerceptionRegion().resolve_panel(anchor, obs)
         if status != "resolved" or panel_id is None:
             raise ValueError(f"focus anchor {status}: cannot resolve to a single panel")
+        return self.focus_panel_id(panel_id)
+
+    def focus_panel_id(self, panel_id: str) -> SceneObservation:
+        """Lower-level focus by internal ``panel_id`` handle (controller path; 缝 5).
+
+        The main brain uses ``focus(anchor)`` with a descriptor; the TargetingController
+        resolves the descriptor itself against a specific parent obs and passes the
+        handle here. ``NoRegionForPanel`` from the adapter propagates so the controller
+        can run reveal-before-focus.
+        """
+        if not isinstance(self.adapter, FocusableComputerUseAdapter):
+            raise FocusNotSupported(self.adapter.app_id)
         focused = self.adapter.observe_focus(session_id=self.session_id, panel_id=panel_id)
         self._validate_observation(focused)
         self._latest = focused
