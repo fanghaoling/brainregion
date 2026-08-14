@@ -89,6 +89,7 @@ from .privacy import build_policy  # noqa: E402
 from .providers import LiteLLMBackend  # noqa: E402
 from .probe import capability as _probe_capability  # noqa: E402
 from .probe import fingerprint as _probe_fingerprint  # noqa: E402
+from .probe import logprob_lt as _probe_logprob  # noqa: E402
 from .probe import storage as _probe_storage  # noqa: E402
 from .workspace import apply_text_patch as _apply_text_patch  # noqa: E402
 from .workspace import inspect_file as _inspect_file  # noqa: E402
@@ -2641,7 +2642,7 @@ async def model_fingerprint_check(
 ) -> dict:
     """模型指纹检查:检测端点是否被偷换模型/降智(主动探针,会真实调用模型产生少量费用)。
 
-    三类探针(checks 可单选或组合):
+    四类探针(checks 可单选或组合):
     - "usage"(默认,1 次请求):固定 canonical prompt 的 tokenizer 计数指纹
       + served_model/system_fingerprint 元数据 + 注水/隐藏 prompt 检查。不同
       tokenizer(o200k/cl100k/GLM/Qwen)对同一文本计数差异通常 >5%。
@@ -2652,6 +2653,10 @@ async def model_fingerprint_check(
       代码输出/NIAH),本地算期望答案全确定性判分。抓"指纹一致但能力下降"
       (量化/snapshot 降级),整体通过率下降 >=20pp 判 degraded、>=10pp 判
       suspicious。
+    - "logprob"(2x10 次 1-token 请求,需端点支持 top_logprobs):首 token
+      top-k logprob 分布的置换检验(arXiv:2512.03816)。最灵敏——能检出一次
+      微调/剪枝级变更;p<=0.01 mismatch / p<=0.05 suspicious。不支持 logprobs
+      的端点返回 unknown+hint,不算失败。
 
     mode="baseline" 建立基线(覆盖该 model 的旧基线);mode="compare" 与基线
     对比,无基线返回 need_baseline。model 支持 "endpoint_id/model" 短引用
@@ -2661,10 +2666,10 @@ async def model_fingerprint_check(
     if mode not in ("baseline", "compare"):
         raise ValueError('mode must be "baseline" or "compare"')
     selected = list(checks) if checks else ["usage"]
-    unknown = [c for c in selected if c not in ("usage", "behavior", "capability")]
+    unknown = [c for c in selected if c not in ("usage", "behavior", "capability", "logprob")]
     if unknown or not selected:
         raise ValueError(
-            f'checks only supports "usage"/"behavior"/"capability" (non-empty), got {checks!r}'
+            f'checks only supports "usage"/"behavior"/"capability"/"logprob" (non-empty), got {checks!r}'
         )
     all_defaults = _defaults_mod.get_all()
     defaults = {key: value["value"] for key, value in all_defaults.items()}
@@ -2696,6 +2701,13 @@ async def model_fingerprint_check(
                 for k in ("ok", "categories", "overall_rate", "items", "seed", "n_items", "served_model")
             }
             compare_fn = _probe_capability.compare_capability
+            cost = cur.get("cost_usd")
+        elif check == "logprob":
+            cur = await _probe_logprob.run_logprob_probe(
+                backend, model=resolved_model, endpoint_id=resolved_ep
+            )
+            baseline_payload = cur
+            compare_fn = _probe_logprob.compare_logprob
             cost = cur.get("cost_usd")
         else:
             cur = await _probe_fingerprint.run_behavior_probe(
@@ -2737,6 +2749,8 @@ async def model_fingerprint_check(
                     score = outcome["overall"].get("drop_pp")
                 if score is None and isinstance(outcome.get("prompt_tokens"), dict):
                     score = outcome["prompt_tokens"].get("delta_ratio")
+                if score is None and "p_value" in outcome:
+                    score = outcome["p_value"]
         _probe_storage.append_run(
             key,
             check,

@@ -28,6 +28,8 @@ class ModelResponse:
         served_model: provider 响应里回显的 model 字段（=实际服务模型；None=未回显）。
             与请求的 model 不一致是端点偷换模型的直接信号（可被中转伪造，仅作辅助）。
         system_fingerprint: OpenAI 风格的系统指纹（snapshot 变更会变；其他 provider 多为 None）。
+        first_token_logprobs: chat_completions 模式下首个输出 token 的 top-k logprob
+            （logprob LT 探针用；None=未请求或端点不支持）。{"sampled": {...}, "top": [...]}。
     """
 
     model: str
@@ -39,6 +41,7 @@ class ModelResponse:
     transport_mode: str = ""
     served_model: str | None = None
     system_fingerprint: str | None = None
+    first_token_logprobs: dict | None = None
 
     @property
     def ok(self) -> bool:

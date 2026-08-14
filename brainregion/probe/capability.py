@@ -447,6 +447,7 @@ async def run_capability_probe(
     cost = 0.0
     served_model = None
     n_err = 0
+    n_rescues = 0
     for it in items:
         resp = await _complete(
             backend,
@@ -464,11 +465,34 @@ async def run_capability_probe(
             continue
         cost += getattr(resp, "cost_usd", None) or 0.0
         served_model = getattr(resp, "served_model", None) or served_model
+        content = getattr(resp, "content", "") or ""
+        passed = grade(content, it["check"])
+        rescued = False
+        if not passed and not content.strip():
+            # 始终思考模型(实测 glm-5.3):思考烧光小上限 → content 空被误判零分。
+            # 放大上限重测该项;rescued 标记保留,空答案事件本身也是端点信号。
+            resp2 = await _complete(
+                backend,
+                model=model,
+                system="你是能力基准的被测端点。严格遵守每道题的输出格式要求,不要解释。",
+                user=it["prompt"],
+                temperature=0.0,
+                max_tokens=1024,
+                endpoint_id=endpoint_id,
+                thinking=False,
+            )
+            if getattr(resp2, "ok", False):
+                cost += getattr(resp2, "cost_usd", None) or 0.0
+                content2 = getattr(resp2, "content", "") or ""
+                passed = grade(content2, it["check"])
+                rescued = True
+                n_rescues += 1
         per_item.append(
             {
                 "id": it["id"],
                 "category": it["category"],
-                "passed": grade(getattr(resp, "content", "") or "", it["check"]),
+                "passed": passed,
+                "rescued_truncation": rescued,
             }
         )
     cats: dict[str, dict] = {}
@@ -487,6 +511,7 @@ async def run_capability_probe(
         "items": per_item,
         "n_items": total_n,
         "n_errors": n_err,
+        "n_truncation_rescues": n_rescues,
         "seed": seed,
         "cost_usd": round(cost, 6),
         "served_model": served_model,
@@ -530,6 +555,10 @@ def compare_capability(cur: dict, base: dict) -> dict:
     if (cur.get("n_errors") or 0) > 2:
         flags.append("high_call_failure_rate")
         verdict = "suspicious" if verdict == "match" else verdict
+    if (cur.get("n_truncation_rescues") or 0) >= 5:
+        # 端点频繁烧光小 token 上限(始终思考模型/注水):能力分是放大上限后的"真实能力",
+        # 但这个端点对小请求的可用性确实差,单独亮旗
+        flags.append("many_truncation_rescues")
     if (cur.get("n_items") or 0) < 20:
         flags.append("low_confidence_few_items")
     if b_all is not None and c_all is not None and (c_all - b_all) * 100 >= SUSPICIOUS_DROP_PP:

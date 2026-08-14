@@ -146,6 +146,11 @@ def model_key(model: str, endpoint_id: str | None = None) -> str:
     return f"{model}@{endpoint_id}" if endpoint_id else model
 
 
+#: "始终思考"模型缓存(model@endpoint):探针撞过一次 API 拒绝后,后续直接 thinking="low"
+_ALWAYS_THINKING: set[str] = set()
+_ALWAYS_THINKING_MARKERS = ("不支持关闭思考", "始终思考")
+
+
 # ---------------------------------------------------------------------------
 # 数学与归一化
 # ---------------------------------------------------------------------------
@@ -238,12 +243,34 @@ def distribution(samples: list[str]) -> dict[str, float]:
 
 
 async def _complete(backend, **kwargs) -> "object":
+    """探针统一调用入口:兼容老式 backend(不认识扩展参数)+ 始终思考模型自适应。
+
+    始终思考模型(实测 glm-5.3 拒绝 thinking=disabled,要求 low/high/max):首次撞错后
+    记入 _ALWAYS_THINKING 缓存,该 model@endpoint 后续调用直接用 thinking="low" 并放宽
+    max_tokens(思考内容走 reasoning_content,content 仍是最终答案)。
+    """
+    key = f"{kwargs.get('model')}@{kwargs.get('endpoint_id')}"
+    if kwargs.get("thinking") is False and key in _ALWAYS_THINKING:
+        kwargs = dict(kwargs)
+        kwargs["thinking"] = "low"
+        kwargs["max_tokens"] = max(int(kwargs.get("max_tokens") or 0), 1024)
+        return await backend.complete(**kwargs)
     try:
-        return await backend.complete(**kwargs)
+        resp = await backend.complete(**kwargs)
     except TypeError:
-        # FakeBackend/第三方实现可能不接受 thinking 等扩展参数
-        kwargs.pop("thinking", None)
-        return await backend.complete(**kwargs)
+        # FakeBackend/第三方实现可能不接受 thinking/logprobs_top_k 等扩展参数
+        for k in ("thinking", "logprobs_top_k"):
+            kwargs.pop(k, None)
+        resp = await backend.complete(**kwargs)
+    err = getattr(resp, "error", None) or ""
+    if kwargs.get("thinking") is False and any(m in err for m in _ALWAYS_THINKING_MARKERS):
+        _ALWAYS_THINKING.add(key)
+        retry = dict(kwargs)
+        retry["thinking"] = "low"
+        retry["max_tokens"] = max(int(kwargs.get("max_tokens") or 0), 1024)
+        retry.pop("logprobs_top_k", None)  # 1-token LT 方法论与思考模型不兼容,不请求
+        return await backend.complete(**retry)
+    return resp
 
 
 # ---------------------------------------------------------------------------
@@ -378,6 +405,29 @@ async def run_behavior_probe(
                 )
             else:
                 failures.append({"task": task["id"], "error": getattr(resp, "error", "")})
+        rescued = False
+        if answers.count("<empty>") > len(answers) * 0.5:
+            # 始终思考模型(实测 glm-5.3):思考烧光小上限 → content 空。放大上限重采该格,
+            # 保留 rescued 标记——空答案率本身也是端点特征,但不该淹没答案分布。
+            rescued = True
+            answers = []
+            for _ in range(n_samples):
+                resp = await _complete(
+                    backend,
+                    model=model,
+                    system="",
+                    user=rng.choice(task["prompts"]),
+                    temperature=1.0,
+                    top_p=1.0,
+                    max_tokens=1024,
+                    endpoint_id=endpoint_id,
+                    thinking=False,
+                )
+                if getattr(resp, "ok", False):
+                    answers.append(normalize_answer(getattr(resp, "content", "") or ""))
+                    cost += getattr(resp, "cost_usd", None) or 0.0
+                else:
+                    failures.append({"task": task["id"], "error": getattr(resp, "error", ""), "phase": "rescue"})
         half = len(answers) // 2
         split_half = (
             jsd(distribution(answers[:half]), distribution(answers[half:]))
@@ -388,6 +438,7 @@ async def run_behavior_probe(
             "n": len(answers),
             "distribution": distribution(answers),
             "split_half_jsd": split_half,
+            "rescued_high_empty": rescued,
         }
     total_calls = n_cells * n_samples
     return {

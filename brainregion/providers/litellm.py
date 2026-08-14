@@ -43,7 +43,7 @@ def _load_litellm():
     return litellm
 
 
-def _effort_kwargs(model: str, effort: str | None, thinking: bool | None = None) -> dict:
+def _effort_kwargs(model: str, effort: str | None, thinking: bool | str | None = None) -> dict:
     """把 effort + thinking 开关映射成 provider 特定参数。
 
     - **DeepSeek**(v4-flash/pro):思考模式开关 `extra_body={"thinking":{"type":"disabled|enabled"}}`
@@ -52,6 +52,9 @@ def _effort_kwargs(model: str, effort: str | None, thinking: bool | None = None)
     - Claude（4.6+）：effort 在 output_config；配 thinking adaptive 让思考生效（Opus 4.7/4.8 默认关思考）。
     - OpenAI o 系列：reasoning_effort。
     - 其余（gpt-4o/glm 等非推理模型）：不传,litellm drop_params 也不会报错。
+
+    thinking 也接受 str（"low"/"high"/"max"）:glm-5.3 等**始终思考**模型的 type 枚举
+    （实测 2026-08:5.3 拒绝 disabled,提示"请使用 low、high 或 max"）。
     """
     short = model.split("/")[-1]
     if "deepseek" in model:
@@ -88,18 +91,47 @@ def _effort_kwargs(model: str, effort: str | None, thinking: bool | None = None)
         # 思考默认开会烧小 max_tokens 的探针请求(实测指纹探针收到空答案),须显式可关。
         low = short.lower()
         if "glm" in low:
+            if isinstance(thinking, str):
+                return {"extra_body": {"thinking": {"type": thinking}}}
             return {"extra_body": {"thinking": {"type": "enabled" if thinking else "disabled"}}}
         if "qwen" in low:
+            if isinstance(thinking, str):
+                return {"extra_body": {"enable_thinking": True}}
             return {"extra_body": {"enable_thinking": bool(thinking)}}
     return {}
 
 
 def _is_json_format_rejection(exc: Exception) -> bool:
-    """provider 拒绝 response_format=json_object？命中则回退纯文本（靠 extract_json_object 解析）。"""
+    """provider 拒 response_format=json_object？命中则回退纯文本（靠 extract_json_object 解析）。"""
     msg = str(exc).lower()
     if "response_format" in msg:
         return True
     return "json" in msg and "format" in msg
+
+
+def _extract_first_token_logprobs(resp) -> dict | None:
+    """chat_completions 响应**首个输出 token** 的 top-k logprob（logprob LT 探针用）。
+
+    结构 {"sampled": {token, logprob}, "top": [{token, logprob}, ...]}。
+    None = 端点没返回 logprobs（不支持,或参数被 litellm drop_params 静默丢弃）。
+    """
+    try:
+        choice = resp.choices[0]
+        lp = getattr(choice, "logprobs", None)
+        content = getattr(lp, "content", None) if lp is not None else None
+        if not content:
+            return None
+        entry = content[0]
+        tops = [
+            {"token": t.token, "logprob": float(t.logprob)}
+            for t in (getattr(entry, "top_logprobs", None) or [])
+        ]
+        return {
+            "sampled": {"token": entry.token, "logprob": float(entry.logprob)},
+            "top": tops,
+        }
+    except Exception:  # noqa: BLE001 — 结构不合预期一律视为"无 logprobs"
+        return None
 
 
 class LiteLLMBackend:
@@ -180,6 +212,7 @@ class LiteLLMBackend:
         ep_kwargs: dict,
         effort: str | None,
         thinking: bool | None,
+        extra: dict | None = None,
     ) -> tuple[object, str]:
         """litellm.acompletion + json_object 回退：provider 拒 json_object 时去 response_format 重试。"""
         litellm = _load_litellm()
@@ -193,8 +226,15 @@ class LiteLLMBackend:
             max_tokens=max_tokens,
             **sampling,
             **_effort_kwargs(litellm_model, effort, thinking),
-            **{k: v for k, v in ep_kwargs.items() if v is not None},
         )
+        base_kwargs.update({k: v for k, v in ep_kwargs.items() if v is not None})
+        if extra:
+            for k, v in extra.items():
+                # ep_kwargs 可能已带 extra_body(endpoint 配置);探针的 logprobs 兜底合并而非覆盖
+                if k == "extra_body" and isinstance(base_kwargs.get("extra_body"), dict):
+                    base_kwargs["extra_body"] = {**base_kwargs["extra_body"], **v}
+                else:
+                    base_kwargs[k] = v
         try:
             response = await litellm.acompletion(
                 response_format=self.response_format,
@@ -261,7 +301,8 @@ class LiteLLMBackend:
         max_tokens: int,
         effort: str | None,
         endpoint_id: str | None,
-        thinking: bool | None = None,
+        thinking: bool | str | None = None,
+        logprobs_top_k: int | None = None,
     ) -> ModelResponse:
         (
             litellm_model,
@@ -310,9 +351,26 @@ class LiteLLMBackend:
                     ep_kwargs=ep_kwargs,
                     effort=effort,
                     thinking=thinking,
+                    extra=(
+                        {
+                            "logprobs": True,
+                            "top_logprobs": max(1, min(int(logprobs_top_k), 20)),
+                            # 部分 litellm provider 映射会丢顶层 logprobs 只留 top_logprobs,
+                            # vLLM 系(SiliconFlow)会因此 400(实测);extra_body 直写请求体兜底
+                            "extra_body": {
+                                "logprobs": True,
+                                "top_logprobs": max(1, min(int(logprobs_top_k), 20)),
+                            },
+                        }
+                        if logprobs_top_k
+                        else None
+                    ),
                 )
                 content = resp.choices[0].message.content or ""
             usage = resp.usage.model_dump() if getattr(resp, "usage", None) else {}
+            first_lp = (
+                _extract_first_token_logprobs(resp) if (logprobs_top_k and api_mode != "responses") else None
+            )
             hp = getattr(resp, "_hidden_params", None) or {}
             latency_ms = round((time.perf_counter() - started) * 1000, 3)
             cost_usd = hp.get("response_cost")
@@ -345,6 +403,7 @@ class LiteLLMBackend:
                 transport_mode=transport_mode,
                 served_model=str(getattr(resp, "model", "") or "") or None,
                 system_fingerprint=getattr(resp, "system_fingerprint", None) or None,
+                first_token_logprobs=first_lp,
             )
         except Exception as e:  # noqa: BLE001 — 失败隔离，不向上抛
             logger.warning("LiteLLMBackend 调用失败 model=%s: %s: %s", model, type(e).__name__, e)
@@ -389,7 +448,8 @@ class LiteLLMBackend:
         max_tokens: int = 4096,
         effort: str | None = None,
         endpoint_id: str | None = None,
-        thinking: bool | None = None,
+        thinking: bool | str | None = None,
+        logprobs_top_k: int | None = None,
     ) -> ModelResponse:
         """单次调用（system+user 两段）。review/consult/capability 等用。"""
         return await self._acomplete(
@@ -404,6 +464,7 @@ class LiteLLMBackend:
             effort=effort,
             endpoint_id=endpoint_id,
             thinking=thinking,
+            logprobs_top_k=logprobs_top_k,
         )
 
     async def complete_messages(

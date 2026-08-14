@@ -304,6 +304,51 @@ def test_inspect_model_health_view():
     assert mh["verdict_counts"] == {"match": 1, "mismatch": 1}
 
 
+def test_effort_kwargs_glm_str_thinking():
+    from brainregion.providers.litellm import _effort_kwargs
+
+    assert _effort_kwargs("openai/glm-5.3", effort=None, thinking="low") == {
+        "extra_body": {"thinking": {"type": "low"}}
+    }
+    assert _effort_kwargs("openai/glm-5.2", effort=None, thinking=False) == {
+        "extra_body": {"thinking": {"type": "disabled"}}
+    }
+
+
+def test_complete_adaptive_always_thinking():
+    fingerprint._ALWAYS_THINKING.clear()
+    calls = []
+
+    class ATBackend:
+        async def complete(self, **kw):
+            calls.append(kw)
+            if kw.get("thinking") is False:
+                return ModelResponse(
+                    model=kw["model"], error="BadRequestError: 该模型始终思考,不支持关闭思考"
+                )
+            return ModelResponse(model=kw["model"], content="42", served_model="fake")
+
+    async def run():
+        r1 = await fingerprint._complete(
+            ATBackend(), model="always-think-fake", system="", user="x",
+            temperature=1.0, max_tokens=32, thinking=False,
+        )
+        r2 = await fingerprint._complete(
+            ATBackend(), model="always-think-fake", system="", user="x",
+            temperature=1.0, max_tokens=32, thinking=False,
+        )
+        return r1, r2
+
+    r1, r2 = asyncio.run(run())
+    assert r1.content == "42" and r2.content == "42"
+    # 第一次:失败 + 自适应重试(2 次调用);第二次:缓存命中直接 low(1 次调用)
+    assert len(calls) == 3
+    assert calls[0]["thinking"] is False
+    assert calls[1]["thinking"] == "low" and calls[1]["max_tokens"] == 1024
+    assert calls[2]["thinking"] == "low"
+    fingerprint._ALWAYS_THINKING.clear()
+
+
 # ---------------------------------------------------------------------------
 # MCP 工具(离线:monkeypatch 掉 LiteLLMBackend)
 # ---------------------------------------------------------------------------

@@ -102,6 +102,32 @@ thinking 关闭),与基线算 Jensen-Shannon 散度:
 snapshot 降级),相邻档位(air vs 旗舰)的 overall 区分需要更难题库**;跨模型偷换由
 behavior 指纹负责(实测 6/6 mismatch),capability 档的独特价值是"同模型变弱"场景。
 
+### glm-5.3 上新实测(2026-08-14)
+
+glm-5.3 是**始终思考**模型(open paas/v4 端点拒绝 thinking=disabled,也拒绝 type=low;
+thinking 字符串档只被 Anthropic 兼容端点接受)。实测路径:`zhipu/glm-5.3`
+(anthropic 端点)+ thinking 自适应。三个探针发现:
+
+- **behavior**:5.3 自比 JSD 0.11 match;**5.3 vs 5.2 = 0.42 mismatch——新版本被清楚
+  识别为不同分布**(随机数偏好也变了:5.2 是 42 压倒性,5.3 是 47 主导)。
+- **capability**:思考烧光小 token 上限 → 空答案伪 degraded(40pp 假信号)。探针的
+  **截断救援**(空答案用 1024 上限重测 + `many_truncation_rescues` 亮旗)后:5.3 真实
+  0.9667,vs 5.2 的 0.90 为 match(-6.7pp)。这个案例是"工具报 degraded 先查截断旗,
+  别直接下'模型变笨'结论"的活教材。
+- usage:5.3@anthropic 端点 537 vs 5.2@openai 端点 584——跨端点协议不同,不可直接比。
+
+### logprob 档(2x10 次 1-token 请求,LT,arXiv:2512.03816)
+
+对固定短 prompt 只生成 1 个 token,取 top-20 logprob 当分布采样;两侧各 N=10 次,算逐
+token 平均 logprob 的平均绝对距离 S,置换检验(B=1000,固定种子可复现)出 p 值。
+**最灵敏**:论文能检出一次微调、2^-10 级剪枝;每次测试约 50 token。判定 p<=0.01
+mismatch / p<=0.05 suspicious。
+
+支持面(2026-08-14 实测):deepseek ✓;智谱两端点 ✗(静默不返回);SiliconFlow ✗
+(litellm 对该 provider 映射会把 `logprobs` 参数剥掉,vLLM 报 400,extra_body 兜底也拦
+不住)。不支持的端点返回 `unknown`+hint,不算失败。始终思考模型与 1-token 方法论不
+兼容(思考烧光预算),LT 跳过。
+
 ## 判定解读(重要)
 
 **偏差 ≠ 欺诈**。以下都会触发漂移:量化版本、官方 snapshot 静默更新、sampling 参数变化、
@@ -130,6 +156,5 @@ provider 侧 infra 差异(OpenRouter 上 34 对同名模型不同 provider,10 �
 
 ## 后续规划
 
-- logprob 置换检验档(arXiv:2512.03816,更灵敏但需端点支持 logprobs,OpenRouter 上仅
-  ~23% 端点支持)——支持面窄,按需再加
 - 被动漂移监控:把 `served_model`/usage 基线接进 runtime 事件流,正常流量零成本积累
+- LT 支持面随 litellm 版本演进复测(当前 deepseek 可用;siliconflow 被 litellm 剥参)

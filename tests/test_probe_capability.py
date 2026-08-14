@@ -175,6 +175,30 @@ def test_run_broken_backend_zero_and_errors():
     assert out2["overall_rate"] == 0.0
 
 
+def test_truncation_rescue_for_always_thinking():
+    """小上限答空、1024 上限给真答案(实测 glm-5.3 形态):救援后计真实分且亮旗。"""
+    items = capability.build_items(seed=7)
+
+    class TruncatingBackend:
+        def __init__(self, ref):
+            self.ref, self.calls = ref, []
+
+        async def complete(self, **kw):
+            self.calls.append(kw.get("max_tokens"))
+            if kw.get("max_tokens", 0) < 1024:
+                return ModelResponse(model="m", content="", served_model="fake")
+            return await self.ref.complete(**kw)
+
+    out = _run(TruncatingBackend(ScriptedBackend(items, correct=True)))
+    assert out["n_truncation_rescues"] == out["n_items"]
+    assert out["overall_rate"] == 1.0  # 救援后全部真实通过
+    # 对比时亮旗
+    base = _run(ScriptedBackend(items, correct=True))
+    cmp = capability.compare_capability(out, base)
+    assert "many_truncation_rescues" in cmp["flags"]
+    assert cmp["verdict"] == "match"
+
+
 def test_compare_capability_verdicts():
     items = capability.build_items(seed=7)
     perfect = _run(ScriptedBackend(items, correct=True))
