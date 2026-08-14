@@ -110,8 +110,15 @@ def test_deepseek_thinking_kwargs():
     # thinking None(未显式)→ 保持原契约:effort 对 deepseek no-op(§15.6)
     assert _effort_kwargs("openai/deepseek-v4-flash", effort="high", thinking=None) == {}
     assert _effort_kwargs("openai/deepseek-v4-flash", effort=None, thinking=None) == {}
-    # 非 deepseek 不受 thinking 影响
-    assert _effort_kwargs("zhipu/glm-5.2", effort=None, thinking=False) == {}
+    # GLM/Qwen 也受 thinking 控制(2026-08-14 指纹探针实测:思考默认开会烧光小 max_tokens)
+    assert _effort_kwargs("zhipu/glm-5.2", effort=None, thinking=False) == {
+        "extra_body": {"thinking": {"type": "disabled"}}
+    }
+    assert _effort_kwargs("openai/Qwen/Qwen3.5-9B", effort=None, thinking=False) == {
+        "extra_body": {"enable_thinking": False}
+    }
+    # 未知家族仍不受 thinking 影响
+    assert _effort_kwargs("openai/some-model", effort=None, thinking=False) == {}
     # sampling:deepseek 思考关(False)/默认(None) → 正常采样;显式开(True) → 不采样(文档:思考忽略 temp/top_p)
     assert LiteLLMBackend._sampling_for("openai/deepseek-v4-flash", 0.0, 0.95, None, False) == {"temperature": 0.0, "top_p": 0.95}
     assert LiteLLMBackend._sampling_for("openai/deepseek-v4-flash", 0.0, 0.95, None, None) == {"temperature": 0.0, "top_p": 0.95}

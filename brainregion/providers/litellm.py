@@ -83,6 +83,14 @@ def _effort_kwargs(model: str, effort: str | None, thinking: bool | None = None)
         return {"reasoning_effort": effort} if effort else {}
     if re.match(r"o[1-9]", short):
         return {"reasoning_effort": effort} if effort else {}
+    if thinking is not None:
+        # GLM(zhipu paas/v4 与 anthropic 兼容端点同形)与 Qwen3(SiliconFlow/vLLM 系):
+        # 思考默认开会烧小 max_tokens 的探针请求(实测指纹探针收到空答案),须显式可关。
+        low = short.lower()
+        if "glm" in low:
+            return {"extra_body": {"thinking": {"type": "enabled" if thinking else "disabled"}}}
+        if "qwen" in low:
+            return {"extra_body": {"enable_thinking": bool(thinking)}}
     return {}
 
 

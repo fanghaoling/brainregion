@@ -121,6 +121,23 @@ def test_normalize_answer_variants():
     assert fingerprint.normalize_answer("正面!") == "正面"
 
 
+def test_normalize_answer_json_shell():
+    # 实测 GLM/Qwen 对短约束问题爱答 JSON 壳(2026-08-14 真实验证发现)
+    assert fingerprint.normalize_answer('{"answer":42}') == "42"
+    assert fingerprint.normalize_answer('{"answer":"42"}') == "42"
+    assert fingerprint.normalize_answer('{"random_num":37}') == "37"
+    assert fingerprint.normalize_answer("```json\n{\"answer\": 7}\n```") == "7"
+    assert fingerprint.normalize_answer("{\n  \"answer\": \"蓝色\"\n}") == "蓝色"
+    # 截断 JSON(无闭合):regex 抠出值
+    assert fingerprint.normalize_answer('{"number": 66') == "66"
+    # 退化壳归并(空白形态不同但同一现象 → 同一键)
+    assert fingerprint.normalize_answer("{  }") == "<unparsed>"
+    assert fingerprint.normalize_answer("{") == "<unparsed>"
+    assert fingerprint.normalize_answer("{ \t\t\t\t\t") == "<unparsed>"
+    # 多行非 JSON:取首行
+    assert fingerprint.normalize_answer("heads\ntails") == "heads"
+
+
 # ---------------------------------------------------------------------------
 # usage 指纹
 # ---------------------------------------------------------------------------

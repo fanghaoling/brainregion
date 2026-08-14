@@ -47,6 +47,42 @@ thinking 关闭),与基线算 Jensen-Shannon 散度:
 对应"只换部分行为"的量化/降智)、`backend_rotation_or_cache_collapse`(split-half 自一致
 性,同一次采集内部前后两半分布不交 → 后端轮换或缓存塌缩)。
 
+## 真实验证(2026-08-14,4 模型 8 端点次实测)
+
+行为指纹 JSD 矩阵(10 样本/格快速档;对角=自比):
+
+| JSD | glm-5.2 | Qwen3.5-9B | deepseek-v4-flash | haiku-4.5 |
+|-----|---------|-----------|-------------------|-----------|
+| glm-5.2 | **0.133 match** | 1.000 | 1.000 | 1.000 |
+| Qwen3.5-9B | 1.000 | 0.414 mismatch* | 1.000 | 1.000 |
+| deepseek-v4-flash | 1.000 | 1.000 | **0.207 match**(25 样本复测) | 0.764 |
+| haiku-4.5 | 1.000 | 1.000 | 0.764 | **0.082 match** |
+
+**跨模型 6/6 全部 mismatch(0.74–1.00),区分度远超阈值**;自比 match 于 glm/haiku(10 样本
+快速档)与 deepseek(25 样本复测,快速档 0.31 压线是采样噪声,25 样本降到 0.21)。有趣的指纹
+特征:GLM-5.2 答 1-100 随机数 100% 是 42;Haiku 80-90% 是 42;DeepSeek 高熵分散(47/87/97)。
+
+**\*Qwen3.5-9B@SiliconFlow 自比 mismatch 是端点真实不稳定,不是工具误报**:逐条诊断发现该
+端点分钟级出现退化生成——tab 填充烧满 token 上限、空对象 `{  }`、胡言乱语 JSON
+(`{"error": true, "message": "Duty-free policy change..."}`),split-half 轮换旗如实触发
+(同一次采集前后两半分布不交)。与公开研究"同名模型不同 provider 10/34 对漂移超限"同类。
+处置:该端点不适合做指纹基线;若已建基线后出现此模式,优先怀疑 provider 侧变更/多副本轮换。
+
+实测发现与对策(已产品化):
+
+- **GLM/Qwen 对短约束问题爱答 JSON 壳**(`{"answer":42}`),且小 max_tokens 会截断
+  JSON 导致答案碎片化 → normalize_answer 已支持剥 fence/JSON 壳/截断 JSON 正则兜底,
+  退化壳(`{`/`{  }`/tab 填充)归并为 `<unparsed>` 单键,行为探针 max_tokens=32。
+- **GLM/Qwen 思考默认开会烧光小 max_tokens**(空答案)→ `_effort_kwargs` 已补
+  GLM(`thinking.type`)/Qwen(`enable_thinking`)映射,`thinking=False` 全家可用。
+- **usage 计数逐次完全稳定**(584/584、575/575、509/509、713/713),但 glm↔qwen 这类
+  同量级 tokenizer 差异仅 ~1.6%(usage 档内判 match)→ **usage 指纹主战场是注水/隐藏
+  prompt(增量 +几百 token)和跨 tokenizer 家族偷换(haiku 713 vs dsk 509 = +40%),
+  同量级互换靠 behavior 档抓**。
+- deepseek 官方端点会真实返回 `system_fingerprint`,可被动跟踪 snapshot。
+- 快速档(10 样本/格)下高熵模型自比会压线 suspicious(采样噪声),**正式对比请用默认
+  25 样本/格**。
+
 ## 判定解读(重要)
 
 **偏差 ≠ 欺诈**。以下都会触发漂移:量化版本、官方 snapshot 静默更新、sampling 参数变化、

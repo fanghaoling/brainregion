@@ -18,6 +18,7 @@
 """
 from __future__ import annotations
 
+import json
 import math
 import random
 import re
@@ -170,14 +171,55 @@ def jsd(p: dict[str, float], q: dict[str, float]) -> float:
 _ANSWER_STRIP = "\"'`*#·。.,!?！？:;：； \t"
 
 
+def _first_scalar(obj) -> str | None:
+    """递归取 JSON 对象里第一个标量叶子的字符串值(实测 GLM/Qwen 对短约束问题爱答
+    {"answer": 42} 这类 JSON 壳,剥壳后跨模型 JSD 才不被壳的形态噪声污染)。"""
+    if isinstance(obj, bool):
+        return "true" if obj else "false"
+    if isinstance(obj, (int, float, str)):
+        return str(obj)
+    if isinstance(obj, dict):
+        for v in obj.values():
+            r = _first_scalar(v)
+            if r is not None:
+                return r
+    if isinstance(obj, list):
+        for v in obj:
+            r = _first_scalar(v)
+            if r is not None:
+                return r
+    return None
+
+
 def normalize_answer(text: str) -> str:
-    """探针答案归一化:首行 → 去包裹符号 → 纯数字保持数字 → 截断 32 → 小写。"""
+    """探针答案归一化:markdown fence → JSON 壳剥除 → 首行 → 去包裹符号 →
+    纯数字保持数字 → 截断 32 → 小写。"""
     s = (text or "").strip()
     if not s:
         return "<empty>"
-    s = s.splitlines()[0].strip().strip(_ANSWER_STRIP)
+    if s.startswith("```"):  # ```json\n{...}\n``` 剥 fence 行
+        stripped = "\n".join(
+            ln for ln in s.splitlines() if not ln.lstrip().startswith("```")
+        ).strip()
+        s = stripped or s
+    extracted = None
+    for cand in (s, s.splitlines()[0].strip()):
+        if cand[:1] in "{[":
+            try:
+                extracted = _first_scalar(json.loads(cand))
+            except Exception:  # noqa: BLE001 — 截断 JSON:regex 抠第一个 "k":v 的值
+                m = re.search(r':\s*"?([^",:{}\s]+)', cand)
+                extracted = m.group(1) if m else None
+        if extracted is not None:
+            break
+    s = extracted if extracted is not None else s.splitlines()[0]
+    s = s.strip().strip(_ANSWER_STRIP)
     if not s:
         return "<empty>"
+    if re.fullmatch(r"[\{\[\]\}\s]+", s):
+        # 退化壳(实测 Qwen 会输出空对象/纯 tab 填充到上限):同一现象归并成一键,
+        # 避免空白形态差异把分布拆碎
+        return "<unparsed>"
     if re.fullmatch(r"-?\d+(?:\.\d+)?", s):
         s = re.fullmatch(r"-?\d+(?:\.\d+)?", s).group(0)
     return s[:32].lower()
@@ -323,7 +365,7 @@ async def run_behavior_probe(
                 user=rng.choice(task["prompts"]),
                 temperature=1.0,
                 top_p=1.0,
-                max_tokens=16,
+                max_tokens=32,  # 16 会截断 JSON 壳答案(实测 Qwen),32 仍是小请求
                 endpoint_id=endpoint_id,
                 thinking=False,
             )
