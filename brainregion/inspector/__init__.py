@@ -2,17 +2,17 @@
 
 统一入口（吸收 GPT：1 MCP 工具 + 1 CLI 子命令 都走这里）。
 
-- ``view`` 白名单（Literal 校验）：all / activation / memory / run / calibration。未知 → ValueError（review #5，
-  防 **kw 透传未过滤参数）。
+- ``view`` 白名单（Literal 校验）：all / activation / memory / run / calibration / model_health。
+  未知 → ValueError（review #5，防 **kw 透传未过滤参数）。
 - ``view∉{all,activation}`` 时**绝不调 wake_gate**（review #1/#13）—— activation 是唯一参数化、唯一触 wake 的 view。
 - run 无 run_id → 最近 N run 历史表（bounded by history_limit，非全表扫——review #13 + GPT 二-三）。
-- 只含请求的 section（``all`` 含全部 4 个）。
+- 只含请求的 section（``all`` 含全部 5 个）。
 """
 from __future__ import annotations
 
-from . import activation, calibration, memory, run
+from . import activation, calibration, memory, model_health, run
 
-VIEWS = ("all", "activation", "memory", "run", "calibration")
+VIEWS = ("all", "activation", "memory", "run", "calibration", "model_health")
 
 
 def inspect(
@@ -26,6 +26,7 @@ def inspect(
     run_id: str | None = None,
     region: str | None = None,
     judge_id: str | None = None,
+    model_key: str | None = None,
     escalate_confidence: float = 0.5,
     shadow_wake_threshold: float | None = None,
     top_k: int = 3,
@@ -49,4 +50,8 @@ def inspect(
         out["run"] = run.inspect_run(run_id=run_id, history_limit=history_limit)
     if view in ("all", "calibration"):
         out["calibration"] = calibration.inspect_calibration(judge_id=judge_id)
+    if view in ("all", "model_health"):
+        out["model_health"] = model_health.inspect_model_health(
+            model_key=model_key, limit=history_limit
+        )
     return out

@@ -127,6 +127,17 @@ def append_run(
         return int(cur.lastrowid)
 
 
+def list_baselines(active_only: bool = True) -> list[dict]:
+    """现存基线清单(Inspector model_health 用):不含 payload 大 JSON。"""
+    sql = "SELECT id, model_key, kind, created_at, active FROM probe_baselines"
+    if active_only:
+        sql += " WHERE active=1"
+    sql += " ORDER BY id DESC"
+    with _connect() as conn:
+        rows = conn.execute(sql).fetchall()
+    return [dict(r) for r in rows]
+
+
 def recent_runs(
     model_key: str | None = None, kind: str | None = None, limit: int = 20
 ) -> list[dict]:

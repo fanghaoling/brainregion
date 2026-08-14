@@ -6,17 +6,20 @@
 ## 用法
 
 ```
-# 首次:建立基线(先 usage 后 behavior;behavior 约 200 次小请求,几分之一美分)
-model_fingerprint_check(model="zhipu/glm-5.2", mode="baseline", checks=["usage", "behavior"], seed=7)
+# 首次:建立基线(usage 1 次请求;behavior 约 200 次小请求;capability 30 项)
+model_fingerprint_check(model="zhipu_glm/glm-5.2", mode="baseline", checks=["usage", "behavior", "capability"], seed=7)
 
 # 之后任意时刻:对比(怀疑降智/换模型时)
-model_fingerprint_check(model="zhipu/glm-5.2", mode="compare", checks=["usage", "behavior"], seed=7)
+model_fingerprint_check(model="zhipu_glm/glm-5.2", mode="compare", checks=["usage", "behavior", "capability"], seed=7)
+
+# 漂移历史汇总(只读)
+inspect(view="model_health")
 ```
 
 `model` 支持 `endpoint_id/model` 短引用(与 panel 同语义)。基线存
 `.brain-region/probe/probe.db`(SQLite,重建基线会覆盖旧基线但历史保留)。
 
-## 两类探针
+## 三类探针
 
 ### usage 指纹(1 次请求)
 
@@ -83,6 +86,22 @@ thinking 关闭),与基线算 Jensen-Shannon 散度:
 - 快速档(10 样本/格)下高熵模型自比会压线 suspicious(采样噪声),**正式对比请用默认
   25 样本/格**。
 
+### capability 指纹(30 项参数化能力基准)
+
+抓"指纹一致但能力下降"(量化/snapshot 降级/sampling 被改)。5 类目:math 8 / 指令遵循 8 /
+逻辑 6 / 代码输出预测 6 / 长上下文 NIAH 2。**参数化模板 + 本地算出期望答案 → 全确定性
+判分**(无 judge、判分零成本);数值槽随 seed 随机化(防中转缓存探针)。
+
+判定按类目通过率聚合(单项二元噪声大):整体通过率较基线下降 **≥20pp 判 degraded**、
+≥10pp 判 suspicious;单类目下降 ≥20pp 打 `category_drop` 旗。实测注意:GLM 对短约束
+问题爱答 JSON 壳,判分已统一剥壳(壳内答案真错仍判负,不洗白)。
+
+真实验证(2026-08-14,glm-5.2 基线 0.90 / math 1.0 / code 1.0 / niah 1.0):自比 match
+(-6.7pp,温度 0 抖动带内);glm-4.5-air 冒充 glm-5.2 → overall match 但 code_output
+类目 -33.3pp 旗正确触发。**诚实边界:30 项轻量题库抓粗粒度降级(量化版/mini 偷换/
+snapshot 降级),相邻档位(air vs 旗舰)的 overall 区分需要更难题库**;跨模型偷换由
+behavior 指纹负责(实测 6/6 mismatch),capability 档的独特价值是"同模型变弱"场景。
+
 ## 判定解读(重要)
 
 **偏差 ≠ 欺诈**。以下都会触发漂移:量化版本、官方 snapshot 静默更新、sampling 参数变化、
@@ -109,8 +128,8 @@ provider 侧 infra 差异(OpenRouter 上 34 对同名模型不同 provider,10 �
   (github.com/timothee-chauvin/track-llm-apis)
 - 模型识别学术先例:LLMmap(USENIX Security '25)
 
-## 后续规划(phase 3+)
+## 后续规划
 
-- 能力基准探针(数学/代码/指令遵循/NIAH mini-benchmark,抓"指纹一致但能力下降")
-- inspect 增加 model_health view 汇总漂移历史
-- logprob LT 可选档
+- logprob 置换检验档(arXiv:2512.03816,更灵敏但需端点支持 logprobs,OpenRouter 上仅
+  ~23% 端点支持)——支持面窄,按需再加
+- 被动漂移监控:把 `served_model`/usage 基线接进 runtime 事件流,正常流量零成本积累

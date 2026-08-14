@@ -344,14 +344,14 @@ def test_facade_run_view_without_runid_returns_history_not_fullscan(eval_root, m
     assert "history" in res["run"]
 
 
-def test_facade_all_returns_four_sections(eval_root, monkeypatch):
+def test_facade_all_returns_all_sections(eval_root, monkeypatch):
     monkeypatch.setattr(
         "brainregion.inspector.activation.wake_gate",
         lambda **k: {"activated_regions": {}, "wake_metrics": {"metrics_status": "unscored"},
                      "suggested_actions": [], "trace": {}},
     )
     res = inspector.inspect(view="all")
-    assert set(res.keys()) == {"activation", "memory", "run", "calibration"}
+    assert set(res.keys()) == {"activation", "memory", "run", "calibration", "model_health"}
 
 
 # ── 只读硬约束：全 view 跑一遍，record_* / record_experience 不得被调 ──────────

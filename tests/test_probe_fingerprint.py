@@ -291,6 +291,19 @@ def test_storage_runs_append_and_recent():
     assert "details_json" not in runs[0]
 
 
+def test_inspect_model_health_view():
+    from brainregion.inspector import inspect as inspect_facade
+
+    storage.append_run("m1", "usage", "compare", "mismatch", 0.9, {}, 0.001)
+    storage.append_run("m1", "behavior", "compare", "match", 0.1, {}, 0.0)
+    storage.save_baseline("m1", "usage", {"prompt_tokens": 1})
+    out = inspect_facade(view="model_health")
+    mh = out["model_health"]
+    assert any(b["model_key"] == "m1" and b["kind"] == "usage" for b in mh["active_baselines"])
+    assert mh["latest_verdict_by_model"]["m1"]["kind"] == "behavior"
+    assert mh["verdict_counts"] == {"match": 1, "mismatch": 1}
+
+
 # ---------------------------------------------------------------------------
 # MCP 工具(离线:monkeypatch 掉 LiteLLMBackend)
 # ---------------------------------------------------------------------------

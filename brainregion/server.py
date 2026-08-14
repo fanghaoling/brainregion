@@ -87,6 +87,7 @@ from .memory import MemoryProvider, governance, store as memory_store  # noqa: E
 from .git import GitProvider  # noqa: E402
 from .privacy import build_policy  # noqa: E402
 from .providers import LiteLLMBackend  # noqa: E402
+from .probe import capability as _probe_capability  # noqa: E402
 from .probe import fingerprint as _probe_fingerprint  # noqa: E402
 from .probe import storage as _probe_storage  # noqa: E402
 from .workspace import apply_text_patch as _apply_text_patch  # noqa: E402
@@ -2527,6 +2528,7 @@ def inspect(
     run_id: str = "",
     region: str = "",
     judge_id: str = "",
+    model_key: str = "",
     escalate_confidence: float = 0.5,
     shadow_wake_threshold: float | None = None,
     top_k: int = 3,
@@ -2536,11 +2538,12 @@ def inspect(
 ) -> dict:
     """只读调试窗口（v5.x）：把系统内部状态做成立即可见的可观测面。
 
-    view ∈ {all, activation, memory, run, calibration}，只含请求的 section（all=全部 4）。
+    view ∈ {all, activation, memory, run, calibration, model_health}，只含请求的 section（all=全部）。
     - activation：重跑 wake_gate（无模型）看「该醒没醒」（给 gold_regions 才判漏唤醒）。
     - memory：Experience Memory 按 region 盘点 + 年龄。memory_manifest=True 附全量清单（Brain Diff 用；默认 False 精简）。
     - run：读历史 eval run 的已存 summary + per-task 5 态阶段时间线；无 run_id → 最近 N run 历史表。
     - calibration：judge 校准状态 + am-I-blocked。
+    - model_health：模型指纹/能力探针的现存基线 + 最近判定（model_key 可过滤）。
 
     纯只读：不调模型、不写、不重算（wake_gate 已验为 read-only sidecar）。
     """
@@ -2549,7 +2552,8 @@ def inspect(
     return _inspect_facade(
         view=view, goal=goal, problem=problem, context=context, files=files or {},
         gold_regions=gold_regions, run_id=run_id or None, region=region or None,
-        judge_id=judge_id or None, escalate_confidence=escalate_confidence,
+        judge_id=judge_id or None, model_key=model_key or None,
+        escalate_confidence=escalate_confidence,
         shadow_wake_threshold=shadow_wake_threshold, top_k=top_k,
         memory_preview_k=memory_preview_k, memory_manifest=memory_manifest,
         history_limit=history_limit,
@@ -2637,25 +2641,31 @@ async def model_fingerprint_check(
 ) -> dict:
     """模型指纹检查:检测端点是否被偷换模型/降智(主动探针,会真实调用模型产生少量费用)。
 
-    两类探针(checks 可单选或组合):
+    三类探针(checks 可单选或组合):
     - "usage"(默认,1 次请求):固定 canonical prompt 的 tokenizer 计数指纹
       + served_model/system_fingerprint 元数据 + 注水/隐藏 prompt 检查。不同
       tokenizer(o200k/cl100k/GLM/Qwen)对同一文本计数差异通常 >5%。
     - "behavior"(默认 8 格 x25 = 200 次小请求):"随机数/颜色/硬币"类单 token
       问题的答案分布与基线算 Jensen-Shannon 散度(arXiv:2607.10252)。跨模型
       JSD≈0.46,同人自比≈0.14;阈值 match<=0.25 / suspicious<=0.35 / mismatch。
+    - "capability"(30 项,~35 次请求):参数化能力基准(math/指令遵循/逻辑/
+      代码输出/NIAH),本地算期望答案全确定性判分。抓"指纹一致但能力下降"
+      (量化/snapshot 降级),整体通过率下降 >=20pp 判 degraded、>=10pp 判
+      suspicious。
 
     mode="baseline" 建立基线(覆盖该 model 的旧基线);mode="compare" 与基线
     对比,无基线返回 need_baseline。model 支持 "endpoint_id/model" 短引用
     (与 panel 同语义)。判定是信号强度而非欺诈判定:量化、官方 snapshot 静默
-    更新同样会触发漂移。行为探针建议对同一端点用同一 seed 采样以保证可复现。
+    更新同样会触发漂移。行为/能力探针建议对同一端点用同一 seed 采样以保证可复现。
     """
     if mode not in ("baseline", "compare"):
         raise ValueError('mode must be "baseline" or "compare"')
     selected = list(checks) if checks else ["usage"]
-    unknown = [c for c in selected if c not in ("usage", "behavior")]
+    unknown = [c for c in selected if c not in ("usage", "behavior", "capability")]
     if unknown or not selected:
-        raise ValueError(f'checks only supports "usage"/"behavior" (non-empty), got {checks!r}')
+        raise ValueError(
+            f'checks only supports "usage"/"behavior"/"capability" (non-empty), got {checks!r}'
+        )
     all_defaults = _defaults_mod.get_all()
     defaults = {key: value["value"] for key, value in all_defaults.items()}
     registry = _resolve_endpoints(defaults.get("endpoints") or {})
@@ -2676,6 +2686,16 @@ async def model_fingerprint_check(
             )
             baseline_payload = cur
             compare_fn = _probe_fingerprint.compare_usage
+            cost = cur.get("cost_usd")
+        elif check == "capability":
+            cur = await _probe_capability.run_capability_probe(
+                backend, model=resolved_model, endpoint_id=resolved_ep, seed=seed
+            )
+            baseline_payload = {
+                k: cur.get(k)
+                for k in ("ok", "categories", "overall_rate", "items", "seed", "n_items", "served_model")
+            }
+            compare_fn = _probe_capability.compare_capability
             cost = cur.get("cost_usd")
         else:
             cur = await _probe_fingerprint.run_behavior_probe(
@@ -2699,7 +2719,7 @@ async def model_fingerprint_check(
             _probe_storage.save_baseline(key, check, baseline_payload)
             outcome = {"verdict": "baseline_saved"}
             outcome.update(
-                {k: v for k, v in baseline_payload.items() if k in ("prompt_tokens", "served_model", "samples_per_cell", "cost_usd")}
+                {k: v for k, v in baseline_payload.items() if k in ("prompt_tokens", "served_model", "samples_per_cell", "overall_rate", "cost_usd")}
             )
             score = None
         else:
@@ -2712,7 +2732,11 @@ async def model_fingerprint_check(
                 score = None
             else:
                 outcome = compare_fn(cur, base)
-                score = outcome.get("mean_jsd", outcome.get("prompt_tokens", {}).get("delta_ratio"))
+                score = outcome.get("mean_jsd")
+                if score is None and isinstance(outcome.get("overall"), dict):
+                    score = outcome["overall"].get("drop_pp")
+                if score is None and isinstance(outcome.get("prompt_tokens"), dict):
+                    score = outcome["prompt_tokens"].get("delta_ratio")
         _probe_storage.append_run(
             key,
             check,
