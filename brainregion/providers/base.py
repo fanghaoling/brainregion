@@ -25,6 +25,9 @@ class ModelResponse:
         cost_source: 成本来源（provider/config/builtin/missing_price）。
         error: 失败原因（None=成功）。backend 内部已隔离，不向上抛。
         transport_mode: 内容无关的传输格式路径（如 responses_text_fallback）。
+        served_model: provider 响应里回显的 model 字段（=实际服务模型；None=未回显）。
+            与请求的 model 不一致是端点偷换模型的直接信号（可被中转伪造，仅作辅助）。
+        system_fingerprint: OpenAI 风格的系统指纹（snapshot 变更会变；其他 provider 多为 None）。
     """
 
     model: str
@@ -34,6 +37,8 @@ class ModelResponse:
     cost_source: str | None = None
     error: str | None = None
     transport_mode: str = ""
+    served_model: str | None = None
+    system_fingerprint: str | None = None
 
     @property
     def ok(self) -> bool:

@@ -335,6 +335,8 @@ class LiteLLMBackend:
                 cost_usd=usage_payload["cost_usd"],
                 cost_source=usage_payload["cost_source"],
                 transport_mode=transport_mode,
+                served_model=str(getattr(resp, "model", "") or "") or None,
+                system_fingerprint=getattr(resp, "system_fingerprint", None) or None,
             )
         except Exception as e:  # noqa: BLE001 — 失败隔离，不向上抛
             logger.warning("LiteLLMBackend 调用失败 model=%s: %s: %s", model, type(e).__name__, e)

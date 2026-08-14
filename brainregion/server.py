@@ -87,6 +87,8 @@ from .memory import MemoryProvider, governance, store as memory_store  # noqa: E
 from .git import GitProvider  # noqa: E402
 from .privacy import build_policy  # noqa: E402
 from .providers import LiteLLMBackend  # noqa: E402
+from .probe import fingerprint as _probe_fingerprint  # noqa: E402
+from .probe import storage as _probe_storage  # noqa: E402
 from .workspace import apply_text_patch as _apply_text_patch  # noqa: E402
 from .workspace import inspect_file as _inspect_file  # noqa: E402
 from .workspace import list_allowed_roots as _list_allowed_roots  # noqa: E402
@@ -2621,6 +2623,108 @@ def list_model_routes(panel: list[str] | None = None) -> dict:
     defaults = {key: value["value"] for key, value in all_defaults.items()}
     panel_source = "explicit" if panel is not None else all_defaults.get("panel", {}).get("source", "unknown")
     return _describe_model_routes(panel, defaults, panel_source=panel_source)
+
+
+@mcp.tool()
+async def model_fingerprint_check(
+    model: str,
+    endpoint_id: str | None = None,
+    mode: str = "compare",
+    checks: list[str] | None = None,
+    cells: int = 8,
+    samples_per_cell: int = 25,
+    seed: int | None = None,
+) -> dict:
+    """模型指纹检查:检测端点是否被偷换模型/降智(主动探针,会真实调用模型产生少量费用)。
+
+    两类探针(checks 可单选或组合):
+    - "usage"(默认,1 次请求):固定 canonical prompt 的 tokenizer 计数指纹
+      + served_model/system_fingerprint 元数据 + 注水/隐藏 prompt 检查。不同
+      tokenizer(o200k/cl100k/GLM/Qwen)对同一文本计数差异通常 >5%。
+    - "behavior"(默认 8 格 x25 = 200 次小请求):"随机数/颜色/硬币"类单 token
+      问题的答案分布与基线算 Jensen-Shannon 散度(arXiv:2607.10252)。跨模型
+      JSD≈0.46,同人自比≈0.14;阈值 match<=0.25 / suspicious<=0.35 / mismatch。
+
+    mode="baseline" 建立基线(覆盖该 model 的旧基线);mode="compare" 与基线
+    对比,无基线返回 need_baseline。model 支持 "endpoint_id/model" 短引用
+    (与 panel 同语义)。判定是信号强度而非欺诈判定:量化、官方 snapshot 静默
+    更新同样会触发漂移。行为探针建议对同一端点用同一 seed 采样以保证可复现。
+    """
+    if mode not in ("baseline", "compare"):
+        raise ValueError('mode must be "baseline" or "compare"')
+    selected = list(checks) if checks else ["usage"]
+    unknown = [c for c in selected if c not in ("usage", "behavior")]
+    if unknown or not selected:
+        raise ValueError(f'checks only supports "usage"/"behavior" (non-empty), got {checks!r}')
+    all_defaults = _defaults_mod.get_all()
+    defaults = {key: value["value"] for key, value in all_defaults.items()}
+    registry = _resolve_endpoints(defaults.get("endpoints") or {})
+    entry = _normalize_one(model, set(registry), defaults.get("endpoints"))
+    resolved_model = entry["model"]
+    resolved_ep = entry["endpoint_id"] if endpoint_id is None else endpoint_id
+    if resolved_ep and resolved_ep not in registry:
+        raise ValueError(f"endpoint_id={resolved_ep!r} not in configured endpoints")
+    backend = LiteLLMBackend(
+        timeout=float(defaults.get("timeout", 90)), endpoint_registry=registry
+    )
+    key = _probe_fingerprint.model_key(resolved_model, resolved_ep)
+    result: dict = {"ok": True, "model_key": key, "mode": mode, "checks": {}}
+    for check in selected:
+        if check == "usage":
+            cur = await _probe_fingerprint.run_usage_probe(
+                backend, model=resolved_model, endpoint_id=resolved_ep
+            )
+            baseline_payload = cur
+            compare_fn = _probe_fingerprint.compare_usage
+            cost = cur.get("cost_usd")
+        else:
+            cur = await _probe_fingerprint.run_behavior_probe(
+                backend,
+                model=resolved_model,
+                endpoint_id=resolved_ep,
+                cells=cells,
+                samples_per_cell=samples_per_cell,
+                seed=seed,
+            )
+            baseline_payload = {
+                k: cur.get(k) for k in ("ok", "cells", "samples_per_cell", "served_model", "system_fingerprint")
+            }
+            compare_fn = _probe_fingerprint.compare_behavior
+            cost = cur.get("cost_usd")
+        if mode == "baseline":
+            if not cur.get("ok"):
+                result["ok"] = False
+                result["checks"][check] = {"verdict": "error", "error": cur.get("error")}
+                continue
+            _probe_storage.save_baseline(key, check, baseline_payload)
+            outcome = {"verdict": "baseline_saved"}
+            outcome.update(
+                {k: v for k, v in baseline_payload.items() if k in ("prompt_tokens", "served_model", "samples_per_cell", "cost_usd")}
+            )
+            score = None
+        else:
+            base = _probe_storage.load_active_baseline(key, check)
+            if base is None:
+                outcome = {
+                    "verdict": "need_baseline",
+                    "hint": f'先跑 mode="baseline" 建立 {check} 基线',
+                }
+                score = None
+            else:
+                outcome = compare_fn(cur, base)
+                score = outcome.get("mean_jsd", outcome.get("prompt_tokens", {}).get("delta_ratio"))
+        _probe_storage.append_run(
+            key,
+            check,
+            mode,
+            outcome.get("verdict"),
+            score,
+            {"model_key": key, "checks": selected},
+            cost,
+        )
+        result["checks"][check] = outcome
+    result["history"] = _probe_storage.recent_runs(model_key=key, limit=5)
+    return result
 
 
 @mcp.tool()
