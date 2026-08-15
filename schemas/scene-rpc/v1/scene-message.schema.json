@@ -176,9 +176,16 @@
             "algorithm": { "const": "hmac-sha256" },
             "nonce": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
             "expiresUnixMs": { "$ref": "#/$defs/deadline" },
-            "principalId": { "$ref": "#/$defs/id" }
+            "principalId": { "$ref": "#/$defs/id" },
+            "grantedCapabilities": {
+              "type": "array",
+              "uniqueItems": true,
+              "items": {
+                "enum": ["scene.read", "scene.write", "scene.spawn", "scene.undo", "logs.read"]
+              }
+            }
           },
-          "required": ["protocolVersion", "algorithm", "nonce", "expiresUnixMs", "principalId"],
+          "required": ["protocolVersion", "algorithm", "nonce", "expiresUnixMs", "principalId", "grantedCapabilities"],
           "additionalProperties": false
         }
       },

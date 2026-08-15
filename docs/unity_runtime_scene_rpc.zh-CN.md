@@ -1,6 +1,6 @@
 # Unity Player 运行时开放编辑与 Scene RPC v1
 
-状态：Unity Runtime 核心与 Rust Runtime Peer 会话纵切已实现，尚未接入实际 VR 项目或启用网络传输。
+状态：Unity Runtime 核心、Rust Runtime Peer 会话和 opt-in Windows 命名管道客户端已实现，尚未接入实际 VR 项目或完成 IL2CPP Player 联调。
 
 ## 结论
 
@@ -37,6 +37,8 @@ unity/Packages/com.brainregion.runtime-bridge/
 - `scene/preview -> scene/apply`：预览 token 绑定 revision 和 mutation ID；
 - 单调 `sceneRevision`、幂等 mutation receipt、失败回滚和运行时 Undo；
 - `SceneRpcDispatcher`：认证主体、连接 epoch、逐方法 capability、1 MiB 帧上限、有界队列、deadline、每帧数量/时间预算；
+- `WindowsScenePipeTransport`：Player 主动连接当前用户命名管道，严格解析 challenge，生成跨语言一致的 HMAC proof，把服务器签名绑定的 grant 传给 Dispatcher，并在断线后以新 epoch 重连；
+- `BoundedJsonLineReader` / `BoundedSceneWriterQueue`：严格 UTF-8、1 MiB 单帧限制和有界非阻塞响应队列；队列过载会断开连接而不是卡住 Unity 主线程；
 - `RuntimeLogBuffer`：线程安全、容量受限的 Player 日志轮询。
 - 构建校验器：拒绝场景对象 ID 缺失/重复和无效 Prefab Catalog；菜单可为已加载场景分配缺失 ID。
 
@@ -56,7 +58,9 @@ cargo run --locked -p brainregiond -- scene-schema
 
 Unity Player 是主动连接方。当前 Rust 会话层已接受经过认证的双向字节流，并在 Windows 上提供显式启用的当前用户命名管道；命名管道先发送一次性 `runtime/challenge`，Player 用高熵预共享密钥计算 HMAC-SHA256，再把 proof 放入 `runtime/register`。完整字段顺序与配置见 [Rust Agent Core 架构决策](agent_core_architecture.zh-CN.md#windows-runtime-命名管道)。注册包含新的进程实例 ID、会话 ID、build ID、Unity/platform 信息、revision 和 capabilities。进程重启必须产生新 session；同一认证主体重连时 daemon 会递增 connection epoch，让旧 pending 请求失败并重新取 snapshot。
 
-Agent Core 控制面已经提供 `scene/peers/list` 和 `scene/peer/call`。前者查看当前连接快照；后者只允许 v1 方法，并同时要求 Player 支持与配对策略授予对应 capability。该控制面目前用于 mock 纵切，尚未意味着真实 VR Player 已可连接。
+Agent Core 控制面已经提供 `scene/peers/list` 和 `scene/peer/call`。前者查看当前连接快照；后者只允许 v1 方法，并同时要求 Player 支持与配对策略授予对应 capability。Windows Player 端现已具备连接实现，但尚未把 package 导入真实 VR 项目，也尚未完成 Windows IL2CPP 构建与 daemon 的端到端 smoke。
+
+Windows 传输默认关闭。Player 侧可在运行时调用 `SetPairingSecret`，或读取 `BRAINREGIOND_SCENE_PAIRING_SECRET`；管道名默认读取 `BRAINREGIOND_SCENE_PIPE_NAME`。密钥不会被 Unity 序列化，但环境变量和托管字符串无法保证内存零残留，因此正式产品应由启动器或配对流程注入并轮换。`connectOnEnable` 默认 false，只有项目显式启用才连接。
 
 第一批方法：
 
@@ -105,9 +109,9 @@ Runtime entity
 
 ## 后续接入顺序
 
-1. 给可移植 Unity package 增加 Windows 命名管道客户端、challenge/HMAC proof 和有界 writer queue；Rust 服务端、当前用户 DACL、配对和真实管道 mock 已完成。
+1. Windows 命名管道客户端、challenge/HMAC proof、有界 reader/writer queue 和重连已完成；Unity 6000.3 EditMode 测试已验证 Rust/C# golden proof、过期/越权 challenge、帧边界和队列背压。
 2. 扩展 mock Player，完成 hierarchy、preview/apply、stale revision、写入超时后幂等查明结果测试；当前已覆盖 register、调用关联、能力拒绝、迟到响应、断线重连和错误密钥拒绝。
-3. 再把 package 作为本地 UPM dependency 接入 VR 项目，先做 Windows IL2CPP Development build smoke；确认后再做 Android ARM64/Quest。
+3. 在独立最小 Player 中完成真实 Windows 命名管道端到端 smoke，再经你确认后把 package 作为本地 UPM dependency 接入 VR 项目，做 Windows IL2CPP Development build；确认后再做 Android ARM64/Quest。
 4. 补 Catalog 生成、属性 binding codegen 和实际 IL2CPP stripping smoke。
 5. 增加 `WorldDocument` 存档、Addressables provider 和 Behavior Graph；文本脚本解释器最后接入。
 

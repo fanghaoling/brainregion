@@ -68,10 +68,15 @@ pub struct PairingChallenge {
     pub nonce: String,
     pub expires_unix_ms: u64,
     pub principal_id: String,
+    pub granted_capabilities: Vec<SceneCapability>,
 }
 
 impl PairingChallengeNotification {
-    fn issue(principal_id: &str, timeout: Duration) -> Result<Self> {
+    fn issue(
+        principal_id: &str,
+        granted_capabilities: &[SceneCapability],
+        timeout: Duration,
+    ) -> Result<Self> {
         let mut nonce = [0_u8; NONCE_BYTES];
         getrandom::fill(&mut nonce).map_err(|error| {
             BrainregiondError::Protocol(format!("could not generate pairing nonce: {error}"))
@@ -84,6 +89,9 @@ impl PairingChallengeNotification {
                     "pairing challenge expiry exceeds the JSON safe-integer range".to_owned(),
                 )
             })? as u64;
+        let mut granted_capabilities = granted_capabilities.to_vec();
+        granted_capabilities.sort_by_key(|capability| capability_name(*capability));
+        granted_capabilities.dedup();
         Ok(Self {
             jsonrpc: "2.0".to_owned(),
             method: "runtime/challenge".to_owned(),
@@ -93,6 +101,7 @@ impl PairingChallengeNotification {
                 nonce: URL_SAFE_NO_PAD.encode(nonce),
                 expires_unix_ms,
                 principal_id: principal_id.to_owned(),
+                granted_capabilities,
             },
         })
     }
@@ -108,8 +117,11 @@ pub async fn authenticate_scene_peer<S>(
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let challenge =
-        PairingChallengeNotification::issue(&policy.principal_id, policy.authentication_timeout)?;
+    let challenge = PairingChallengeNotification::issue(
+        &policy.principal_id,
+        &policy.granted_capabilities,
+        policy.authentication_timeout,
+    )?;
     let (read_half, mut write_half) = tokio::io::split(stream);
     let mut reader = BufReader::new(read_half);
     write_json_line(&mut write_half, &serde_json::to_value(&challenge)?).await?;
@@ -189,6 +201,15 @@ fn canonical_pairing_payload(
         challenge.expires_unix_ms.to_string().as_bytes(),
     );
     append_field(&mut payload, challenge.principal_id.as_bytes());
+    let mut granted_capabilities = challenge.granted_capabilities.clone();
+    granted_capabilities.sort_by_key(|capability| capability_name(*capability));
+    append_field(
+        &mut payload,
+        granted_capabilities.len().to_string().as_bytes(),
+    );
+    for capability in granted_capabilities {
+        append_field(&mut payload, capability_name(capability).as_bytes());
+    }
     append_field(&mut payload, registration.protocol_version.as_bytes());
     append_field(&mut payload, registration.instance_id.as_bytes());
     append_field(&mut payload, registration.session_id.as_bytes());
@@ -289,6 +310,7 @@ mod tests {
             nonce: "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA".to_owned(),
             expires_unix_ms: 1_800_000_000_000,
             principal_id: "unity-local".to_owned(),
+            granted_capabilities: vec![SceneCapability::SceneRead],
         }
     }
 
@@ -300,7 +322,7 @@ mod tests {
         let proof = build_pairing_proof(secret, &challenge, &registration).unwrap();
         assert_eq!(
             proof,
-            "hmac-sha256.S4MPoLHckkQeWS8FToy1MyvK0ZMpFxzqrkd32zFpnSA"
+            "hmac-sha256.P35gOtwqOOnRuK8qiB0LyozZcDr18lfzgxTs6AC8nj8"
         );
         registration.pairing_proof = Some(proof);
         verify_pairing_proof(secret, &challenge, &registration).unwrap();
@@ -318,12 +340,17 @@ mod tests {
 
     #[test]
     fn challenge_shape_does_not_contain_secret_material() {
-        let challenge =
-            PairingChallengeNotification::issue("unity-local", Duration::from_secs(10)).unwrap();
+        let challenge = PairingChallengeNotification::issue(
+            "unity-local",
+            &[SceneCapability::SceneRead],
+            Duration::from_secs(10),
+        )
+        .unwrap();
         let value: Value = serde_json::to_value(challenge).unwrap();
         assert_eq!(value["method"], "runtime/challenge");
         assert_eq!(value["params"]["algorithm"], "hmac-sha256");
         assert_eq!(value["params"]["nonce"].as_str().unwrap().len(), 43);
+        assert_eq!(value["params"]["grantedCapabilities"][0], "scene.read");
     }
 
     #[tokio::test]

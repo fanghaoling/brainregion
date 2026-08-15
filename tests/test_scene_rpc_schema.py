@@ -78,6 +78,18 @@ def test_scene_rpc_pairing_challenge_and_proof_are_closed_contracts() -> None:
     challenge["params"]["nonce"] = "short"
     assert list(validator.iter_errors(challenge))
 
+    challenge = _load(SCHEMA_ROOT / "examples" / "runtime-challenge.json")
+    del challenge["params"]["grantedCapabilities"]
+    assert list(validator.iter_errors(challenge))
+
+    challenge = _load(SCHEMA_ROOT / "examples" / "runtime-challenge.json")
+    challenge["params"]["grantedCapabilities"] = ["scene.read", "scene.read"]
+    assert list(validator.iter_errors(challenge))
+
+    challenge = _load(SCHEMA_ROOT / "examples" / "runtime-challenge.json")
+    challenge["params"]["grantedCapabilities"] = ["shell.execute"]
+    assert list(validator.iter_errors(challenge))
+
     registration = _load(SCHEMA_ROOT / "examples" / "runtime-register.json")
     registration["params"]["pairingProof"] = "static-replayable-token"
     assert list(validator.iter_errors(registration))

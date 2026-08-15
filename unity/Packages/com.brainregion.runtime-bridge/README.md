@@ -14,12 +14,22 @@ The first slice deliberately exposes a small, reversible surface:
 - undo the most recent Scene RPC transaction;
 - enqueue JSON-RPC work from a transport and execute it under a main-thread budget.
 
-No network listener is enabled by this package. A transport must call
-`SceneRpcDispatcher.TryEnqueue(AuthenticatedPeerContext, ...)`. The transport
-must authenticate and pair the connection before constructing that immutable
-context; passing no context is rejected. Keeping transport separate lets a
-Windows build use a user-scoped named pipe while an Android headset uses an
-outbound WSS connection without changing scene semantics.
+No network listener is enabled by this package. The opt-in
+`WindowsScenePipeTransport` is a Player-side client for brainregiond's
+current-user named pipe; it is disabled until `Connect()` is called or
+`connectOnEnable` is explicitly selected. Android/WSS is not implemented.
+Custom transports must call
+`SceneRpcDispatcher.TryEnqueue(AuthenticatedPeerContext, ...)` after pairing;
+passing no context is rejected.
+
+The Windows transport obtains its pipe name from
+`BRAINREGIOND_SCENE_PIPE_NAME` (or the serialized non-secret fallback) and its
+32..4096 UTF-8 byte secret from `BRAINREGIOND_SCENE_PAIRING_SECRET` or
+`SetPairingSecret`. Never serialize the secret into a scene or prefab. It
+strictly parses the one-time challenge, creates an HMAC-SHA256 registration,
+and uses only the server-granted capabilities bound into that proof. Pipe I/O
+runs off the Unity main thread; responses enter a bounded writer queue and
+overload closes the connection instead of blocking a frame.
 
 `connectionEpoch` must increase when one principal reconnects. A request queued
 for an older epoch is rejected before it can touch Unity state. The dispatcher
@@ -55,7 +65,8 @@ Arbitrary reflection, method invocation, component injection, and C# evaluation
 are intentionally absent. Project components opt in by deriving from
 `RpcPropertyAdapterBehaviour` and implementing typed validation/read/write.
 
-Before a transport is enabled, the integration still needs Player tests for
-scene unload/reload, dynamic project-owned object registration, and prefab
-`Awake`/`OnEnable` staging. Those lifecycle paths are not an authenticated
-network surface yet.
+The package includes EditMode tests for the Rust/C# pairing golden vector,
+expired and over-granted challenges, JSONL frame bounds, and writer backpressure.
+Before write capabilities are enabled in a product, the integration still needs
+Player tests for scene unload/reload, dynamic project-owned object registration,
+prefab `Awake`/`OnEnable` staging, and a real Windows IL2CPP pipe smoke.

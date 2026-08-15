@@ -1,6 +1,6 @@
 {
   "name": "com.brainregion.runtime-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "displayName": "BrainRegion Runtime Bridge",
   "description": "A deny-by-default Scene RPC core for packaged Unity applications.",
   "unity": "6000.0",

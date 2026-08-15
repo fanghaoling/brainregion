@@ -17,7 +17,7 @@ brainregiond（Rust）
 ├─ 会话、事件、审批、审计                 后续
 ├─ PTY / ConPTY、DAP、LSP                 后续
 ├─ Unity Runtime Peer 会话内核             当前纵切
-├─ 命名管道 / WSS 与配对                  后续
+├─ Windows 命名管道 + HMAC 配对            已实现（WSS 后续）
 └─ MCP Client / Python 子进程监管          已实现
         │  MCP 2025-11-25 stdio
         ▼
@@ -156,7 +156,7 @@ cargo run --locked -p brainregiond -- probe `
 
 每个 pipe instance 使用保护型 DACL `O:<current-user-sid>D:P(A;;GA;;;<current-user-sid>)`，句柄不可继承，设置 `PIPE_REJECT_REMOTE_CLIENTS`；首实例使用 `FILE_FLAG_FIRST_PIPE_INSTANCE`，避免 daemon 启动时被同名管道抢占。DACL 是本机 OS 边界，challenge 认证是应用边界，两者都通过后才注册 peer。
 
-daemon 先发送 `runtime/challenge`，其中包含 32 字节随机 nonce、过期时间、主体和算法。Player 在时限内把 `pairingProof` 设为 `hmac-sha256.<base64url-no-padding>`。HMAC 输入不包含 proof 自身；每个普通字段编码为 `UTF8字节长度 + ':' + UTF8字节 + '\n'`，顺序为：
+daemon 先发送 `runtime/challenge`，其中包含 32 字节随机 nonce、过期时间、主体、算法和该连接实际获得的 capability。Player 只能据此构造 `AuthenticatedPeerContext`，不能使用自己声明或本地猜测的权限。Player 在时限内把 `pairingProof` 设为 `hmac-sha256.<base64url-no-padding>`。HMAC 输入不包含 proof 自身；每个普通字段编码为 `UTF8字节长度 + ':' + UTF8字节 + '\n'`，顺序为：
 
 ```text
 challenge.protocolVersion
@@ -164,6 +164,8 @@ challenge.algorithm
 challenge.nonce
 challenge.expiresUnixMs（十进制）
 challenge.principalId
+challenge.grantedCapabilities 数量（十进制）
+challenge.grantedCapabilities（按协议字符串升序，逐项编码）
 registration.protocolVersion
 registration.instanceId
 registration.sessionId
@@ -179,14 +181,14 @@ registration.capabilities 数量（十进制）
 registration.capabilities（按协议字符串升序，逐项编码）
 ```
 
-HMAC 使用 SHA-256。nonce 每连接重新生成，因此旧 registration/proof 无法跨连接重放。当前阶段使用预共享高熵密钥；后续 VR 配对 UI 应负责安全分发/轮换密钥，不能把短 PIN 直接当 HMAC key。
+HMAC 使用 SHA-256。nonce 每连接重新生成，grant 也包含在 proof 中，因此旧 registration/proof 无法跨连接重放，客户端也不能扩大服务器授予的权限。当前阶段使用预共享高熵密钥；后续 VR 配对 UI 应负责安全分发/轮换密钥，不能把短 PIN 直接当 HMAC key。
 
 ## 安全边界
 
 - 当前可执行入口只提供本机 stdio 控制面；Runtime 传输只有显式启用的本机 Windows 命名管道，不监听 TCP/HTTP/WSS 端口。
 - 不把模型密钥、SSH 凭据或 OAuth token 传给 VR 端。
 - `mcp/tools/call` 仍受 Python BrainRegion 的 workspace root、SHA 写入保护和命令白名单约束。
-- WSS、命名管道和 Scene RPC 上线前必须增加设备身份、capability token、审批、重放保护和审计日志。
+- 当前命名管道已有当前用户 DACL、challenge/HMAC、连接级 capability 与重放保护；写权限正式面向用户开放前仍需增加审批与持久审计。未来 WSS 还必须补设备身份、证书固定和 capability token。
 - Windows 产品化需给 Python worker 增加 Job Object 的 kill-on-close，避免 daemon 崩溃留下孤儿进程。
 - `brainregiond` 首期作为当前用户登录会话中的无窗口进程运行，不注册为 Session 0 系统服务。
 
@@ -199,7 +201,7 @@ HMAC 使用 SHA-256。nonce 每连接重新生成，因此旧 registration/proof
 
 ## 后续里程碑
 
-1. 给 Unity Runtime package 增加命名管道客户端和 HMAC proof 生成，并在独立示例 Player 中联调；当前 Rust 真实管道与 mock 客户端纵切已完成。
+1. Unity Runtime package 已增加 opt-in Windows 命名管道客户端、HMAC proof、有界 JSONL 读写队列、重连和 connection epoch，并通过 Unity 6000.3 EditMode 互操作测试；下一步在独立 Windows IL2CPP Player 中与真实 daemon 联调。
 2. 用完整 mock Player 覆盖 hierarchy、preview/apply、revision 冲突与断线后幂等重放。
 3. 增加有界事件日志、审批状态和指数退避重启。
 4. 增加 ConPTY 会话和 DAP client。
