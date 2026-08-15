@@ -105,6 +105,8 @@ Python 进程句柄由 `brainregiond` 自己的 MCP transport 持有，不依赖
 
 Runtime Scene RPC 已实现与具体传输无关的 peer registry 和双向 JSONL 会话。Windows 上还可显式启用当前用户命名管道；它先完成 challenge/HMAC 配对，再构造 `ScenePeerAuth` 交给会话层，不会直接相信 Player 自报的 `pairingProof`。同一主体的新连接会获得更大的 `connectionEpoch` 并立即替换旧连接，旧 pending 请求失败。请求具有 1 MiB 帧限制、128 个有界排队/等待上限、deadline 和 response correlation；迟到响应只会被丢弃，不触发自动重试。`scene/changed` 用于推进 daemon 观察到的 revision 和事件流。
 
+该路径已用独立 Unity `6000.0.59f2` Windows x64 IL2CPP Development Player 做真实进程级验证：Player 完成 challenge/HMAC 注册后，Rust 调用 `runtime/info` 和 `scene/hierarchy`，随后关闭首个 peer，并确认同一 Player 进程用更大的 connection epoch 自动重连。真实 VR 项目仍保持未修改；其 Unity `6000.3.20f1` Player 联调需要先安装完全匹配的 Windows IL2CPP 模块。
+
 `scene/peer/call` 只接受 Scene RPC v1 白名单方法，并同时检查 Player 宣告支持与已认证策略授予的 capability。含 `spawn` 的 preview 还必须具有独立的 `scene.spawn`。超时返回 outcome unknown、`retryable=false`；写操作调用方必须凭 `clientMutationId` 查询或重放完全相同的幂等请求，不能生成新 mutation ID 自动重试。
 
 v1 依次执行普通请求，同时最多有界缓存 32 个后续请求。`daemon/shutdown` 和操作系统终止信号可以抢占正在等待的 tool call；被抢占调用同样返回 outcome unknown 且不可自动重试。stdin 由独立的有界转发线程读取，因此父进程保持输入管道打开时也不会阻塞 daemon 完成关闭。若 MCP transport 已断开，`daemon/info` 报告 `degraded`，缓存的 `mcp/tools/list` 不再作为成功结果返回。
@@ -117,6 +119,7 @@ cargo +1.88.0 check --workspace --all-targets --locked
 cargo test --workspace --locked
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --locked -p brainregiond --test real_python_mcp -- --ignored --test-threads=1
+cargo test --locked -p brainregiond --test unity_player_windows -- --ignored --test-threads=1
 cargo run --locked -p brainregiond -- probe
 cargo run --locked -p brainregiond -- serve
 cargo run --locked -p brainregiond -- schema

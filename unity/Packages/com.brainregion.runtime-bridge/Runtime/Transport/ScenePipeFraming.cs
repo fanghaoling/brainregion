@@ -13,6 +13,7 @@ namespace BrainRegion.RuntimeBridge
         private readonly Stream stream;
         private readonly int maximumBytes;
         private readonly byte[] readBuffer;
+        private readonly MemoryStream pendingLine = new MemoryStream();
         private int readOffset;
         private int readCount;
 
@@ -62,6 +63,79 @@ namespace BrainRegion.RuntimeBridge
                     readOffset = 0;
                     readCount = received;
                 }
+            }
+        }
+
+        public string ReadLine()
+        {
+            using (var line = new MemoryStream())
+            {
+                while (true)
+                {
+                    int newline = FindNewline();
+                    if (newline >= 0)
+                    {
+                        int length = newline - readOffset;
+                        if (length > 0) line.Write(readBuffer, readOffset, length);
+                        readOffset = newline + 1;
+                        readCount -= length + 1;
+                        return DecodeLine(line);
+                    }
+
+                    if (readCount > 0)
+                    {
+                        line.Write(readBuffer, readOffset, readCount);
+                        readOffset = 0;
+                        readCount = 0;
+                        EnsureBounded(line.Length);
+                    }
+
+                    int received = stream.Read(readBuffer, 0, readBuffer.Length);
+                    if (received == 0)
+                    {
+                        if (line.Length == 0) return null;
+                        return DecodeLine(line);
+                    }
+                    readOffset = 0;
+                    readCount = received;
+                }
+            }
+        }
+
+        public bool TryReadLine(int availableBytes, out string line)
+        {
+            if (availableBytes < 0) throw new ArgumentOutOfRangeException(nameof(availableBytes));
+            line = null;
+            while (true)
+            {
+                int newline = FindNewline();
+                if (newline >= 0)
+                {
+                    int length = newline - readOffset;
+                    if (length > 0) pendingLine.Write(readBuffer, readOffset, length);
+                    readOffset = newline + 1;
+                    readCount -= length + 1;
+                    line = DecodeLine(pendingLine);
+                    pendingLine.SetLength(0);
+                    return true;
+                }
+
+                if (readCount > 0)
+                {
+                    pendingLine.Write(readBuffer, readOffset, readCount);
+                    readOffset = 0;
+                    readCount = 0;
+                    EnsureBounded(pendingLine.Length);
+                }
+
+                if (availableBytes == 0) return false;
+                int requested = Math.Min(readBuffer.Length, availableBytes);
+                int received = stream.Read(readBuffer, 0, requested);
+                if (received == 0)
+                    throw new EndOfStreamException("Scene pipe reached EOF");
+                availableBytes -= received;
+                readOffset = 0;
+                readCount = received;
             }
         }
 
@@ -140,6 +214,32 @@ namespace BrainRegion.RuntimeBridge
                 Frame frame = frames.Dequeue();
                 queuedBytes -= frame.Bytes;
                 return frame.Json;
+            }
+        }
+
+        public string Dequeue(CancellationToken cancellationToken)
+        {
+            available.Wait(cancellationToken);
+            lock (gate)
+            {
+                if (disposed) throw new ObjectDisposedException(nameof(BoundedSceneWriterQueue));
+                Frame frame = frames.Dequeue();
+                queuedBytes -= frame.Bytes;
+                return frame.Json;
+            }
+        }
+
+        public bool TryDequeue(out string json)
+        {
+            json = null;
+            if (!available.Wait(0)) return false;
+            lock (gate)
+            {
+                if (disposed) return false;
+                Frame frame = frames.Dequeue();
+                queuedBytes -= frame.Bytes;
+                json = frame.Json;
+                return true;
             }
         }
 

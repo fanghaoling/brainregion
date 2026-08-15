@@ -93,6 +93,41 @@ namespace BrainRegion.RuntimeBridge.Tests
         }
 
         [Test]
+        public void SynchronousJsonLineReaderHandlesCrLfAndRejectsOversizedFrames()
+        {
+            byte[] input = Encoding.UTF8.GetBytes("test\r\nnext\n");
+            using (var stream = new MemoryStream(input))
+            {
+                var reader = new BoundedJsonLineReader(stream, 4, 128);
+                Assert.That(reader.ReadLine(), Is.EqualTo("test"));
+                Assert.That(reader.ReadLine(), Is.EqualTo("next"));
+                Assert.That(reader.ReadLine(), Is.Null);
+            }
+
+            using (var stream = new MemoryStream(Encoding.UTF8.GetBytes("12345\n")))
+            {
+                var reader = new BoundedJsonLineReader(stream, 4, 128);
+                Assert.Throws<InvalidDataException>(() => reader.ReadLine());
+            }
+        }
+
+        [Test]
+        public void PollingJsonLineReaderRetainsPartialAndBufferedFrames()
+        {
+            byte[] input = Encoding.UTF8.GetBytes("one\ntwo\npartial");
+            using (var stream = new MemoryStream(input))
+            {
+                var reader = new BoundedJsonLineReader(stream, 16, 128);
+                Assert.That(reader.TryReadLine(3, out _), Is.False);
+                Assert.That(reader.TryReadLine(5, out string first), Is.True);
+                Assert.That(first, Is.EqualTo("one"));
+                Assert.That(reader.TryReadLine(0, out string second), Is.True);
+                Assert.That(second, Is.EqualTo("two"));
+                Assert.That(reader.TryReadLine(7, out _), Is.False);
+            }
+        }
+
+        [Test]
         public async Task WriterQueueBoundsIncludeLineTerminator()
         {
             using (var queue = new BoundedSceneWriterQueue(1, 4))
@@ -102,6 +137,30 @@ namespace BrainRegion.RuntimeBridge.Tests
                 Assert.That(
                     await queue.DequeueAsync(CancellationToken.None),
                     Is.EqualTo("abc"));
+            }
+        }
+
+        [Test]
+        public void SynchronousWriterQueueBoundsIncludeLineTerminator()
+        {
+            using (var queue = new BoundedSceneWriterQueue(1, 4))
+            {
+                Assert.That(queue.TryEnqueue("abc", 3), Is.True);
+                Assert.That(queue.TryEnqueue("x", 3), Is.False);
+                Assert.That(queue.Dequeue(CancellationToken.None), Is.EqualTo("abc"));
+            }
+        }
+
+        [Test]
+        public void WriterQueueSupportsNonBlockingPoll()
+        {
+            using (var queue = new BoundedSceneWriterQueue(1, 4))
+            {
+                Assert.That(queue.TryDequeue(out _), Is.False);
+                Assert.That(queue.TryEnqueue("abc", 3), Is.True);
+                Assert.That(queue.TryDequeue(out string frame), Is.True);
+                Assert.That(frame, Is.EqualTo("abc"));
+                Assert.That(queue.TryDequeue(out _), Is.False);
             }
         }
 

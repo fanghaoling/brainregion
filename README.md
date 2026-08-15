@@ -1021,7 +1021,7 @@ cargo run --locked -p brainregiond -- schema
 cargo run --locked -p brainregiond -- scene-schema
 ```
 
-`probe` verifies the real MCP handshake, tool discovery, and application-level `ping`. `serve` exposes the versioned JSONL/JSON-RPC control protocol on stdin/stdout, including authenticated Runtime peer listing and Scene RPC proxy methods. `schema` and `scene-schema` print the embedded Agent control and Unity Player Runtime Scene RPC contracts. On Windows, an optional current-user-only named pipe can be enabled with `BRAINREGIOND_SCENE_PIPE_NAME` and a high-entropy `BRAINREGIOND_SCENE_PAIRING_SECRET`; the included Unity Runtime package now provides an opt-in Player client that uses a fresh challenge and HMAC-SHA256 before registration. It is disabled by default, has not been imported into the real VR project, and WSS remains unimplemented. The current architecture, settings, proof format, and security boundaries are documented in the [Chinese-language architecture decision](docs/agent_core_architecture.zh-CN.md), with packaged-game editing covered by the [Chinese-language Runtime Scene RPC decision](docs/unity_runtime_scene_rpc.zh-CN.md).
+`probe` verifies the real MCP handshake, tool discovery, and application-level `ping`. `serve` exposes the versioned JSONL/JSON-RPC control protocol on stdin/stdout, including authenticated Runtime peer listing and Scene RPC proxy methods. `schema` and `scene-schema` print the embedded Agent control and Unity Player Runtime Scene RPC contracts. On Windows, an optional current-user-only named pipe can be enabled with `BRAINREGIOND_SCENE_PIPE_NAME` and a high-entropy `BRAINREGIOND_SCENE_PAIRING_SECRET`; the included Unity Runtime package now provides an opt-in Player client that uses a fresh challenge and HMAC-SHA256 before registration. A standalone Windows x64 IL2CPP Player now passes registration, read-call, and automatic-reconnect smoke coverage. The transport is disabled by default, has not been imported into the real VR project, and WSS remains unimplemented. The current architecture, settings, proof format, and security boundaries are documented in the [Chinese-language architecture decision](docs/agent_core_architecture.zh-CN.md), with packaged-game editing covered by the [Chinese-language Runtime Scene RPC decision](docs/unity_runtime_scene_rpc.zh-CN.md).
 
 ## CLI
 
@@ -1223,6 +1223,8 @@ schemas/
   scene-rpc/v1/          # Unity Player runtime scene protocol and golden fixtures
 unity/Packages/
   com.brainregion.runtime-bridge/  # portable Unity Runtime UPM package
+unity/SmokeProjects/
+  WindowsScenePipePlayer/          # standalone Windows IL2CPP process smoke
 tests/                   # pytest coverage
 docs/                    # focused docs
 ```

@@ -1,7 +1,9 @@
 #if UNITY_STANDALONE_WIN || UNITY_EDITOR_WIN
 using System;
+using System.ComponentModel;
 using System.IO;
 using System.IO.Pipes;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -25,6 +27,7 @@ namespace BrainRegion.RuntimeBridge
         private const string PipeNameEnvironmentVariable = "BRAINREGIOND_SCENE_PIPE_NAME";
         private const string PairingSecretEnvironmentVariable =
             "BRAINREGIOND_SCENE_PAIRING_SECRET";
+        private const int MaximumIoFramesPerDirectionPerPoll = 32;
 
         private static long processConnectionEpoch;
 
@@ -125,9 +128,11 @@ namespace BrainRegion.RuntimeBridge
                 settings.ConnectionEpoch = connectionEpoch;
                 attemptCancellation = new CancellationTokenSource();
                 CancellationToken cancellationToken = attemptCancellation.Token;
-                connectionTask = Task.Run(
-                    () => RunAttemptAsync(settings, cancellationToken),
-                    CancellationToken.None);
+                connectionTask = Task.Factory.StartNew(
+                    () => RunAttempt(settings, cancellationToken),
+                    CancellationToken.None,
+                    TaskCreationOptions.LongRunning,
+                    TaskScheduler.Default);
             }
         }
 
@@ -251,7 +256,7 @@ namespace BrainRegion.RuntimeBridge
             return true;
         }
 
-        private async Task RunAttemptAsync(
+        private void RunAttempt(
             AttemptSettings settings,
             CancellationToken cancellationToken)
         {
@@ -263,7 +268,7 @@ namespace BrainRegion.RuntimeBridge
                     ".",
                     settings.PipeName,
                     PipeDirection.InOut,
-                    PipeOptions.Asynchronous);
+                    PipeOptions.None);
                 lock (stateGate)
                 {
                     if (cancellationToken.IsCancellationRequested) return;
@@ -273,8 +278,8 @@ namespace BrainRegion.RuntimeBridge
                 cancellationToken.ThrowIfCancellationRequested();
 
                 var reader = new BoundedJsonLineReader(pipe, MaximumFrameBytes);
-                string challengeJson = await reader.ReadLineAsync(cancellationToken)
-                    .ConfigureAwait(false);
+                string challengeJson = reader.ReadLine();
+                cancellationToken.ThrowIfCancellationRequested();
                 if (challengeJson == null)
                     throw new EndOfStreamException("Scene pipe closed before pairing challenge");
                 if (!ScenePairingProof.TryParseChallenge(
@@ -289,8 +294,8 @@ namespace BrainRegion.RuntimeBridge
                         out string registrationJson,
                         out string registrationError))
                     throw new InvalidDataException($"Runtime registration rejected: {registrationError}");
-                await WriteFrameAsync(pipe, registrationJson, cancellationToken)
-                    .ConfigureAwait(false);
+                WriteFrame(pipe, registrationJson);
+                cancellationToken.ThrowIfCancellationRequested();
                 ClearBytes(settings.PairingSecret);
                 settings.PairingSecret = null;
 
@@ -311,14 +316,28 @@ namespace BrainRegion.RuntimeBridge
                 Volatile.Write(ref connected, 1);
                 Volatile.Write(ref lastError, null);
 
-                Task writer = connection.RunWriterAsync();
-                try
+                while (!connection.Token.IsCancellationRequested)
                 {
-                    while (!cancellationToken.IsCancellationRequested)
+                    int outboundProcessed = 0;
+                    while (outboundProcessed < MaximumIoFramesPerDirectionPerPoll &&
+                           connection.TryDequeue(out string outbound))
                     {
-                        string request = await reader.ReadLineAsync(connection.Token)
-                            .ConfigureAwait(false);
-                        if (request == null) throw new EndOfStreamException("Scene pipe reached EOF");
+                        WriteFrame(pipe, outbound);
+                        outboundProcessed++;
+                    }
+
+                    int inboundProcessed = 0;
+                    while (inboundProcessed < MaximumIoFramesPerDirectionPerPoll)
+                    {
+                        if (!reader.TryReadLine(0, out string request))
+                        {
+                            uint availableBytes = GetAvailableBytes(pipe);
+                            if (availableBytes == 0 || !reader.TryReadLine(
+                                    checked((int)Math.Min(availableBytes, int.MaxValue)),
+                                    out request))
+                                break;
+                        }
+                        connection.Token.ThrowIfCancellationRequested();
                         bool accepted = dispatcher.TryEnqueue(
                             peer,
                             request,
@@ -326,15 +345,12 @@ namespace BrainRegion.RuntimeBridge
                             out string immediateResponse);
                         if (!accepted && immediateResponse != null)
                             QueueOutbound(connection, immediateResponse);
+                        inboundProcessed++;
                     }
-                }
-                finally
-                {
-                    connection.Abort();
-                    try { await writer.ConfigureAwait(false); }
-                    catch (Exception exception) when (
-                        exception is OperationCanceledException || exception is IOException ||
-                        exception is ObjectDisposedException) { }
+
+                    if (outboundProcessed == 0 && inboundProcessed == 0 &&
+                        connection.Token.WaitHandle.WaitOne(2))
+                        connection.Token.ThrowIfCancellationRequested();
                 }
             }
             catch (Exception exception) when (
@@ -421,10 +437,7 @@ namespace BrainRegion.RuntimeBridge
             }
         }
 
-        private static async Task WriteFrameAsync(
-            Stream stream,
-            string json,
-            CancellationToken cancellationToken)
+        private static void WriteFrame(Stream stream, string json)
         {
             if (json == null || json.IndexOf('\n') >= 0 || json.IndexOf('\r') >= 0)
                 throw new InvalidDataException("Scene pipe frame must be one JSON line");
@@ -434,10 +447,35 @@ namespace BrainRegion.RuntimeBridge
             byte[] framed = new byte[encoded.Length + 1];
             Buffer.BlockCopy(encoded, 0, framed, 0, encoded.Length);
             framed[framed.Length - 1] = (byte)'\n';
-            await stream.WriteAsync(framed, 0, framed.Length, cancellationToken)
-                .ConfigureAwait(false);
-            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            stream.Write(framed, 0, framed.Length);
+            stream.Flush();
         }
+
+        private static uint GetAvailableBytes(NamedPipeClientStream pipe)
+        {
+            if (PeekNamedPipe(
+                    pipe.SafePipeHandle,
+                    IntPtr.Zero,
+                    0,
+                    IntPtr.Zero,
+                    out uint availableBytes,
+                    IntPtr.Zero))
+                return availableBytes;
+            int error = Marshal.GetLastWin32Error();
+            throw new IOException(
+                $"Could not inspect Runtime scene pipe: {new Win32Exception(error).Message}",
+                error);
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        private static extern bool PeekNamedPipe(
+            Microsoft.Win32.SafeHandles.SafePipeHandle pipe,
+            IntPtr buffer,
+            uint bufferSize,
+            IntPtr bytesRead,
+            out uint totalBytesAvailable,
+            IntPtr bytesLeftThisMessage);
 
         private static bool IsPipeName(string value)
         {
@@ -497,20 +535,10 @@ namespace BrainRegion.RuntimeBridge
                     writerQueue.TryEnqueue(json, MaximumFrameBytes);
             }
 
-            public async Task RunWriterAsync()
+            public bool TryDequeue(out string json)
             {
-                try
-                {
-                    while (!Token.IsCancellationRequested)
-                    {
-                        string frame = await writerQueue.DequeueAsync(Token).ConfigureAwait(false);
-                        await WriteFrameAsync(pipe, frame, Token).ConfigureAwait(false);
-                    }
-                }
-                finally
-                {
-                    Abort();
-                }
+                json = null;
+                return Volatile.Read(ref accepting) != 0 && writerQueue.TryDequeue(out json);
             }
 
             public void Abort()

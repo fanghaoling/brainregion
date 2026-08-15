@@ -287,7 +287,7 @@ cargo run --locked -p brainregiond -- schema
 cargo run --locked -p brainregiond -- scene-schema
 ```
 
-`probe` 验证真实 MCP 握手、工具发现和应用级 `ping`；`serve` 在 stdin/stdout 上提供版本化 JSONL/JSON-RPC 控制协议，并可列出已认证 Player、代理 Scene RPC；`schema` 和 `scene-schema` 分别输出 Agent 控制协议与 Unity Player Runtime Scene RPC 契约。Windows 可通过 `BRAINREGIOND_SCENE_PIPE_NAME` 和高熵 `BRAINREGIOND_SCENE_PAIRING_SECRET` 显式启用仅当前用户可访问的命名管道；随仓库提供的 Unity Runtime package 已包含 opt-in Player 客户端，注册前必须完成一次性 challenge/HMAC-SHA256 配对。该传输默认关闭，尚未导入真实 VR 项目，WSS 也尚未实现。架构、配置、proof 格式和安全边界见 [Rust Agent Core 架构决策](docs/agent_core_architecture.zh-CN.md)；打包后开放编辑的范围与路线见 [Unity Player 运行时 Scene RPC](docs/unity_runtime_scene_rpc.zh-CN.md)。
+`probe` 验证真实 MCP 握手、工具发现和应用级 `ping`；`serve` 在 stdin/stdout 上提供版本化 JSONL/JSON-RPC 控制协议，并可列出已认证 Player、代理 Scene RPC；`schema` 和 `scene-schema` 分别输出 Agent 控制协议与 Unity Player Runtime Scene RPC 契约。Windows 可通过 `BRAINREGIOND_SCENE_PIPE_NAME` 和高熵 `BRAINREGIOND_SCENE_PAIRING_SECRET` 显式启用仅当前用户可访问的命名管道；随仓库提供的 Unity Runtime package 已包含 opt-in Player 客户端，注册前必须完成一次性 challenge/HMAC-SHA256 配对。独立 Windows x64 IL2CPP Player 已通过注册、读取调用和自动重连 smoke；该传输默认关闭，尚未导入真实 VR 项目，WSS 也尚未实现。架构、配置、proof 格式和安全边界见 [Rust Agent Core 架构决策](docs/agent_core_architecture.zh-CN.md)；打包后开放编辑的范围与路线见 [Unity Player 运行时 Scene RPC](docs/unity_runtime_scene_rpc.zh-CN.md)。
 
 ## CLI
 
@@ -549,6 +549,8 @@ schemas/
   scene-rpc/v1/          # Unity Player 运行时场景协议与 golden fixtures
 unity/Packages/
   com.brainregion.runtime-bridge/  # 可移植 Unity Runtime UPM package
+unity/SmokeProjects/
+  WindowsScenePipePlayer/          # 独立 Windows IL2CPP 进程级 smoke
 tests/                   # pytest 覆盖
 docs/                    # 聚焦文档
 ```
