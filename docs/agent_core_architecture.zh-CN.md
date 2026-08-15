@@ -16,8 +16,9 @@
 brainregiond（Rust）
 ├─ 会话、事件、审批、审计                 后续
 ├─ PTY / ConPTY、DAP、LSP                 后续
-├─ Unity / Unreal Scene RPC               后续
-└─ MCP Client / Python 子进程监管          当前纵切
+├─ Unity Runtime Peer 会话内核             当前纵切
+├─ 命名管道 / WSS 与配对                  后续
+└─ MCP Client / Python 子进程监管          已实现
         │  MCP 2025-11-25 stdio
         ▼
 brainregion.server（Python FastMCP）
@@ -94,11 +95,17 @@ Python 进程句柄由 `brainregiond` 自己的 MCP transport 持有，不依赖
 | `daemon/health` | 实时调用 BrainRegion 应用级 `ping` |
 | `mcp/tools/list` | 返回连接建立时缓存的工具清单 |
 | `mcp/tools/call` | 调用现有 Python MCP tool；工具级错误保持为 MCP 结果 |
+| `scene/peers/list` | 返回已认证且当前仍连接的 Unity Player 快照 |
+| `scene/peer/call` | 按主体、白名单方法和 capability 转发 Runtime Scene RPC 请求 |
 | `daemon/shutdown` | 关闭 MCP transport，限时等待并回收 Python 子进程 |
 
 完整消息契约见 [`schemas/agent-core/v1/control-message.schema.json`](../schemas/agent-core/v1/control-message.schema.json)。它是控制协议的单一事实来源，并在构建时嵌入 `brainregiond` 二进制；分发后的 daemon 不依赖源码仓库中的 schema 路径。修改契约必须同步更新运行时契约测试并重新构建二进制。
 
 `mcp/tools/call` 超时后，daemon 会向上游发送 MCP cancellation，再向客户端返回超时错误。Cancellation 是尽力而为的协议通知：Python tool 可能已经产生部分副作用，其最终结果仍是 unknown。客户端必须重新读取相关状态或请求人工确认，不得自动重试该调用。
+
+Runtime Scene RPC 已实现与具体传输无关的 peer registry 和双向 JSONL 会话。具体命名管道或 WSS 层必须先完成认证，再构造 `ScenePeerAuth` 交给会话层；会话层不会自行相信 Player 发来的 `pairingProof`。同一主体的新连接会获得更大的 `connectionEpoch` 并立即替换旧连接，旧 pending 请求失败。请求具有 1 MiB 帧限制、128 个有界排队/等待上限、deadline 和 response correlation；迟到响应只会被丢弃，不触发自动重试。`scene/changed` 用于推进 daemon 观察到的 revision 和事件流。
+
+`scene/peer/call` 只接受 Scene RPC v1 白名单方法，并同时检查 Player 宣告支持与已认证策略授予的 capability。含 `spawn` 的 preview 还必须具有独立的 `scene.spawn`。超时返回 outcome unknown、`retryable=false`；写操作调用方必须凭 `clientMutationId` 查询或重放完全相同的幂等请求，不能生成新 mutation ID 自动重试。
 
 v1 依次执行普通请求，同时最多有界缓存 32 个后续请求。`daemon/shutdown` 和操作系统终止信号可以抢占正在等待的 tool call；被抢占调用同样返回 outcome unknown 且不可自动重试。stdin 由独立的有界转发线程读取，因此父进程保持输入管道打开时也不会阻塞 daemon 完成关闭。若 MCP transport 已断开，`daemon/info` 报告 `degraded`，缓存的 `mcp/tools/list` 不再作为成功结果返回。
 
@@ -139,7 +146,7 @@ cargo run --locked -p brainregiond -- probe `
 
 ## 安全边界
 
-- v1 只提供本机 stdio，不监听网络端口。
+- 当前可执行入口只提供本机 stdio 控制面，不监听 Runtime 网络端口；peer 会话目前只由测试内存流验证。
 - 不把模型密钥、SSH 凭据或 OAuth token 传给 VR 端。
 - `mcp/tools/call` 仍受 Python BrainRegion 的 workspace root、SHA 写入保护和命令白名单约束。
 - WSS、命名管道和 Scene RPC 上线前必须增加设备身份、capability token、审批、重放保护和审计日志。
@@ -155,9 +162,9 @@ cargo run --locked -p brainregiond -- probe `
 
 ## 后续里程碑
 
-1. 增加有界事件日志、请求取消、审批状态和指数退避重启。
-2. 增加 Windows 命名管道及当前用户 DACL；随后再增加带配对的 WSS。
-3. 增加 ConPTY 会话和 DAP client。
-4. 实现 Unity Player Runtime Scene RPC：日志、层级查询、稳定对象 ID、属性预览/提交、Undo。
+1. 给 Runtime peer 增加 Windows 当前用户命名管道、DACL、配对和连接/主体总量限制；随后增加出站 WSS。
+2. 用完整 mock Player 覆盖 hierarchy、preview/apply、revision 冲突与断线后幂等重放。
+3. 增加有界事件日志、审批状态和指数退避重启。
+4. 增加 ConPTY 会话和 DAP client。
 5. 增加源码 patch、编译状态、程序集 reload 后重连和验证闭环。
 6. 最后支持独立头显；运行态只允许白名单场景操作和预构建资源，不依赖任意 IL2CPP 代码热注入。

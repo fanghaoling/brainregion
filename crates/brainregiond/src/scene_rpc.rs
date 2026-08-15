@@ -81,6 +81,38 @@ pub struct RuntimeRegistration {
     pub pairing_proof: Option<String>,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SceneChangedNotification {
+    pub jsonrpc: String,
+    pub method: String,
+    pub params: SceneChangedParams,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SceneChangedParams {
+    pub scene_revision: u64,
+    pub client_mutation_id: Option<String>,
+    pub summary: String,
+}
+
+impl SceneChangedNotification {
+    pub fn validate(&self) -> Result<(), String> {
+        if self.jsonrpc != "2.0" || self.method != "scene/changed" {
+            return Err("invalid scene/changed notification envelope".to_owned());
+        }
+        validate_revision(self.params.scene_revision)?;
+        if let Some(mutation_id) = &self.params.client_mutation_id {
+            validate_identifier("clientMutationId", mutation_id, 128)?;
+        }
+        if self.params.summary.len() > 4096 {
+            return Err("scene change summary must not exceed 4096 bytes".to_owned());
+        }
+        Ok(())
+    }
+}
+
 impl RuntimeRegistrationNotification {
     pub fn validate(&self) -> Result<(), String> {
         if self.jsonrpc != "2.0" || self.method != "runtime/register" {
@@ -558,5 +590,13 @@ mod tests {
                 .capabilities
                 .contains(&SceneCapability::SceneRead)
         );
+    }
+
+    #[test]
+    fn scene_changed_fixture_is_strict_and_supported() {
+        let fixture = include_str!("../../../schemas/scene-rpc/v1/examples/scene-changed.json");
+        let changed: SceneChangedNotification = serde_json::from_str(fixture).unwrap();
+        changed.validate().unwrap();
+        assert_eq!(changed.params.scene_revision, 1);
     }
 }

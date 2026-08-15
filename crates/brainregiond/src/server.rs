@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::future::Future;
 use std::io;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use serde_json::{Map, Value, json};
 use tokio::io::{AsyncBufRead, AsyncWrite, AsyncWriteExt, BufReader, DuplexStream};
@@ -11,21 +11,31 @@ use crate::protocol::{
     MAX_CONTROL_FRAME_BYTES, MAX_CONTROL_OUTPUT_BYTES, Request, RpcFault, failure, notification,
     parse_request, read_bounded_line_async, success,
 };
+use crate::scene_peer::{SceneMethod, ScenePeerRegistry};
 use crate::supervisor::{BrainregionPing, McpBackend, McpSupervisor};
 use crate::{CONTROL_PROTOCOL_VERSION, DAEMON_NAME, DAEMON_VERSION};
 
 const MAX_PENDING_REQUESTS: usize = 32;
+const DEFAULT_SCENE_REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+const MAX_SCENE_REQUEST_TIMEOUT_MS: u64 = 300_000;
 
 struct ControlServer<B> {
     backend: B,
+    scene_peers: ScenePeerRegistry,
     started_at: Instant,
     request_count: u64,
 }
 
 impl<B: McpBackend> ControlServer<B> {
+    #[cfg(test)]
     fn new(backend: B) -> Self {
+        Self::with_scene_peers(backend, ScenePeerRegistry::default())
+    }
+
+    fn with_scene_peers(backend: B, scene_peers: ScenePeerRegistry) -> Self {
         Self {
             backend,
+            scene_peers,
             started_at: Instant::now(),
             request_count: 0,
         }
@@ -52,7 +62,11 @@ impl<B: McpBackend> ControlServer<B> {
 
         if matches!(
             request.method.as_str(),
-            "daemon/info" | "daemon/health" | "mcp/tools/list" | "daemon/shutdown"
+            "daemon/info"
+                | "daemon/health"
+                | "mcp/tools/list"
+                | "scene/peers/list"
+                | "daemon/shutdown"
         ) && !request.params.as_object().is_some_and(Map::is_empty)
         {
             return (
@@ -101,7 +115,46 @@ impl<B: McpBackend> ControlServer<B> {
                 },
                 Err(fault) => (failure(id, fault), false),
             },
+            "scene/peers/list" => (
+                success(id, json!({"peers": self.scene_peers.snapshots().await})),
+                false,
+            ),
+            "scene/peer/call" => match parse_scene_call_params(request.params) {
+                Ok((principal_id, method, params, timeout)) => {
+                    let Some(peer) = self.scene_peers.get(&principal_id).await else {
+                        return (
+                            failure(
+                                id,
+                                RpcFault {
+                                    code: -32011,
+                                    message: format!(
+                                        "Runtime Scene RPC peer {principal_id:?} is not connected"
+                                    ),
+                                    data: Some(json!({"retryable": true})),
+                                },
+                            ),
+                            false,
+                        );
+                    };
+                    match peer.request(method, params, timeout).await {
+                        Ok(value) => (
+                            success(
+                                id,
+                                json!({
+                                    "principalId": principal_id,
+                                    "method": method.as_str(),
+                                    "result": value,
+                                }),
+                            ),
+                            false,
+                        ),
+                        Err(error) => (failure(id, scene_peer_fault(error)), false),
+                    }
+                }
+                Err(fault) => (failure(id, fault), false),
+            },
             "daemon/shutdown" => {
+                self.scene_peers.close_all().await;
                 let response = match self.backend.shutdown().await {
                     Ok(()) => success(id, json!({"accepted": true})),
                     Err(error) => failure(id, RpcFault::internal(error.to_string())),
@@ -266,6 +319,7 @@ impl<B: McpBackend> ControlServer<B> {
         } else {
             self.backend.shutdown().await
         };
+        self.scene_peers.close_all().await;
         combine_run_and_cleanup(run_result, cleanup_result)
     }
 }
@@ -369,6 +423,94 @@ fn parse_tool_call_params(
     Ok((name, arguments))
 }
 
+fn parse_scene_call_params(
+    params: Value,
+) -> std::result::Result<(String, SceneMethod, Value, Duration), RpcFault> {
+    let object = params
+        .as_object()
+        .ok_or_else(|| RpcFault::invalid_params("scene/peer/call params must be an object"))?;
+    if let Some(field) = object.keys().find(|field| {
+        !matches!(
+            field.as_str(),
+            "principalId" | "method" | "params" | "timeoutMs"
+        )
+    }) {
+        return Err(RpcFault::invalid_params(format!(
+            "unexpected scene/peer/call field {field:?}"
+        )));
+    }
+
+    let principal_id = object
+        .get("principalId")
+        .and_then(Value::as_str)
+        .filter(|principal_id| is_scene_identifier(principal_id, 128))
+        .ok_or_else(|| RpcFault::invalid_params("scene/peer/call requires a valid principalId"))?
+        .to_owned();
+    let method_name = object
+        .get("method")
+        .and_then(Value::as_str)
+        .ok_or_else(|| RpcFault::invalid_params("scene/peer/call requires method"))?;
+    let method = SceneMethod::from_wire_name(method_name).ok_or_else(|| {
+        RpcFault::invalid_params(format!(
+            "scene/peer/call method {method_name:?} is not part of Scene RPC v1"
+        ))
+    })?;
+    let scene_params = object
+        .get("params")
+        .cloned()
+        .ok_or_else(|| RpcFault::invalid_params("scene/peer/call requires nested params"))?;
+    if !scene_params.is_object() {
+        return Err(RpcFault::invalid_params(
+            "scene/peer/call nested params must be an object",
+        ));
+    }
+    let timeout = match object.get("timeoutMs") {
+        None => DEFAULT_SCENE_REQUEST_TIMEOUT,
+        Some(value) => {
+            let milliseconds = value.as_u64().filter(|milliseconds| {
+                *milliseconds > 0 && *milliseconds <= MAX_SCENE_REQUEST_TIMEOUT_MS
+            });
+            Duration::from_millis(milliseconds.ok_or_else(|| {
+                RpcFault::invalid_params(format!(
+                    "scene/peer/call timeoutMs must be within 1..{MAX_SCENE_REQUEST_TIMEOUT_MS}"
+                ))
+            })?)
+        }
+    };
+    Ok((principal_id, method, scene_params, timeout))
+}
+
+fn is_scene_identifier(value: &str, maximum: usize) -> bool {
+    !value.is_empty()
+        && value.len() <= maximum
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || b"._:/-".contains(&byte))
+}
+
+fn scene_peer_fault(error: BrainregiondError) -> RpcFault {
+    match error {
+        BrainregiondError::Upstream(error) => RpcFault {
+            code: error.get("code").and_then(Value::as_i64).unwrap_or(-32000),
+            message: error
+                .get("message")
+                .and_then(Value::as_str)
+                .unwrap_or("Runtime Scene RPC returned an error")
+                .to_owned(),
+            data: error.get("data").cloned(),
+        },
+        error @ BrainregiondError::Timeout { .. } => RpcFault {
+            code: -32030,
+            message: format!("{error}; Runtime Scene RPC outcome may be unknown"),
+            data: Some(json!({
+                "outcome": "unknown",
+                "retryable": false,
+            })),
+        },
+        error => RpcFault::internal(error.to_string()),
+    }
+}
+
 async fn write_message<W: AsyncWrite + Unpin>(writer: &mut W, value: &Value) -> Result<()> {
     let mut encoded = serde_json::to_vec(value)?;
     if encoded.len() > MAX_CONTROL_OUTPUT_BYTES {
@@ -401,10 +543,29 @@ fn combine_run_and_cleanup(run: Result<()>, cleanup: Result<()>) -> Result<()> {
 }
 
 pub async fn serve_stdio(supervisor: McpSupervisor) -> Result<()> {
-    serve_stdio_until(supervisor, termination_signal()).await
+    serve_stdio_with_scene_peers(supervisor, ScenePeerRegistry::default()).await
 }
 
-pub async fn serve_stdio_until<S>(mut supervisor: McpSupervisor, shutdown_signal: S) -> Result<()>
+pub async fn serve_stdio_with_scene_peers(
+    supervisor: McpSupervisor,
+    scene_peers: ScenePeerRegistry,
+) -> Result<()> {
+    serve_stdio_until_with_scene_peers(supervisor, scene_peers, termination_signal()).await
+}
+
+pub async fn serve_stdio_until<S>(supervisor: McpSupervisor, shutdown_signal: S) -> Result<()>
+where
+    S: Future<Output = io::Result<()>>,
+{
+    serve_stdio_until_with_scene_peers(supervisor, ScenePeerRegistry::default(), shutdown_signal)
+        .await
+}
+
+pub async fn serve_stdio_until_with_scene_peers<S>(
+    mut supervisor: McpSupervisor,
+    scene_peers: ScenePeerRegistry,
+    shutdown_signal: S,
+) -> Result<()>
 where
     S: Future<Output = io::Result<()>>,
 {
@@ -416,7 +577,7 @@ where
         }
     };
     let stdout = tokio::io::stdout();
-    let result = ControlServer::new(supervisor)
+    let result = ControlServer::with_scene_peers(supervisor, scene_peers)
         .serve_until(stdin, stdout, shutdown_signal)
         .await;
     forwarder.abort();
@@ -502,9 +663,11 @@ mod tests {
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::task::{Context, Poll};
 
-    use tokio::io::AsyncWrite;
+    use tokio::io::{AsyncWrite, AsyncWriteExt};
 
     use super::*;
+    use crate::scene_peer::{ScenePeerAuth, ScenePeerState, accept_scene_peer};
+    use crate::scene_rpc::SceneCapability;
     use crate::supervisor::{McpMetadata, McpState};
 
     struct FakeBackend {
@@ -667,6 +830,134 @@ mod tests {
         assert_eq!(messages[2]["result"]["name"], "ping");
         assert_eq!(messages[3]["result"]["accepted"], true);
         assert!(stopped.load(Ordering::SeqCst));
+    }
+
+    #[tokio::test]
+    async fn lists_and_proxies_an_authenticated_runtime_scene_peer() {
+        let scene_peers = ScenePeerRegistry::default();
+        let auth = ScenePeerAuth::new("server-player", [SceneCapability::SceneRead]).unwrap();
+        let (daemon_stream, player_stream) = tokio::io::duplex(64 * 1024);
+        let player = tokio::spawn(async move {
+            let (read_half, mut write_half) = tokio::io::split(player_stream);
+            let mut reader = BufReader::new(read_half);
+            let mut registration: Value = serde_json::from_str(include_str!(
+                "../../../schemas/scene-rpc/v1/examples/runtime-register.json"
+            ))
+            .unwrap();
+            registration["params"]["instanceId"] = json!("server-instance");
+            registration["params"]["sessionId"] = json!("server-session");
+            write_message(&mut write_half, &registration).await.unwrap();
+
+            let request_line =
+                read_bounded_line_async(&mut reader, crate::scene_rpc::MAX_SCENE_FRAME_BYTES)
+                    .await
+                    .unwrap()
+                    .unwrap();
+            let request: Value = serde_json::from_str(&request_line).unwrap();
+            assert_eq!(request["method"], "runtime/info");
+            write_message(
+                &mut write_half,
+                &json!({
+                    "jsonrpc": "2.0",
+                    "id": request["id"],
+                    "result": {"status": "ready", "sceneRevision": 0}
+                }),
+            )
+            .await
+            .unwrap();
+
+            assert!(
+                read_bounded_line_async(&mut reader, crate::scene_rpc::MAX_SCENE_FRAME_BYTES,)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        });
+        let peer = accept_scene_peer(
+            scene_peers.clone(),
+            auth,
+            daemon_stream,
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+
+        let stopped = Arc::new(AtomicBool::new(false));
+        let backend = FakeBackend::new(stopped.clone());
+        let (control_client, control_server) = tokio::io::duplex(64 * 1024);
+        let (server_read, server_write) = tokio::io::split(control_server);
+        let server = tokio::spawn(async move {
+            ControlServer::with_scene_peers(backend, scene_peers)
+                .serve(BufReader::new(server_read), server_write)
+                .await
+        });
+        let (client_read, mut client_write) = tokio::io::split(control_client);
+        let mut client_reader = BufReader::new(client_read);
+
+        let ready = read_bounded_line_async(&mut client_reader, MAX_CONTROL_OUTPUT_BYTES)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            serde_json::from_str::<Value>(&ready).unwrap()["method"],
+            "daemon/ready"
+        );
+
+        write_message(
+            &mut client_write,
+            &json!({"jsonrpc": "2.0", "id": 1, "method": "scene/peers/list"}),
+        )
+        .await
+        .unwrap();
+        let list = read_bounded_line_async(&mut client_reader, MAX_CONTROL_OUTPUT_BYTES)
+            .await
+            .unwrap()
+            .unwrap();
+        let list: Value = serde_json::from_str(&list).unwrap();
+        assert_eq!(list["result"]["peers"][0]["principalId"], "server-player");
+
+        write_message(
+            &mut client_write,
+            &json!({
+                "jsonrpc": "2.0",
+                "id": 2,
+                "method": "scene/peer/call",
+                "params": {
+                    "principalId": "server-player",
+                    "method": "runtime/info",
+                    "params": {},
+                    "timeoutMs": 1000
+                }
+            }),
+        )
+        .await
+        .unwrap();
+        let call = read_bounded_line_async(&mut client_reader, MAX_CONTROL_OUTPUT_BYTES)
+            .await
+            .unwrap()
+            .unwrap();
+        let call: Value = serde_json::from_str(&call).unwrap();
+        assert_eq!(call["result"]["method"], "runtime/info", "{call:#?}");
+        assert_eq!(call["result"]["result"]["status"], "ready");
+
+        write_message(
+            &mut client_write,
+            &json!({"jsonrpc": "2.0", "id": 3, "method": "daemon/shutdown"}),
+        )
+        .await
+        .unwrap();
+        let shutdown = read_bounded_line_async(&mut client_reader, MAX_CONTROL_OUTPUT_BYTES)
+            .await
+            .unwrap()
+            .unwrap();
+        let shutdown: Value = serde_json::from_str(&shutdown).unwrap();
+        assert_eq!(shutdown["result"]["accepted"], true);
+        client_write.shutdown().await.unwrap();
+
+        server.await.unwrap().unwrap();
+        assert_eq!(peer.state(), ScenePeerState::Disconnected);
+        assert!(stopped.load(Ordering::SeqCst));
+        player.await.unwrap();
     }
 
     #[tokio::test]

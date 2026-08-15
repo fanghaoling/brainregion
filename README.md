@@ -1021,7 +1021,7 @@ cargo run --locked -p brainregiond -- schema
 cargo run --locked -p brainregiond -- scene-schema
 ```
 
-`probe` verifies the real MCP handshake, tool discovery, and application-level `ping`. `serve` exposes the versioned JSONL/JSON-RPC control protocol on stdin/stdout. `schema` and `scene-schema` print the embedded Agent control and Unity Player Runtime Scene RPC contracts. The current architecture and security boundaries are documented in the [Chinese-language architecture decision](docs/agent_core_architecture.zh-CN.md), with packaged-game editing covered by the [Chinese-language Runtime Scene RPC decision](docs/unity_runtime_scene_rpc.zh-CN.md).
+`probe` verifies the real MCP handshake, tool discovery, and application-level `ping`. `serve` exposes the versioned JSONL/JSON-RPC control protocol on stdin/stdout, including authenticated Runtime peer listing and Scene RPC proxy methods when a transport supplies connected peers. `schema` and `scene-schema` print the embedded Agent control and Unity Player Runtime Scene RPC contracts. The transport-neutral peer session is implemented, while named-pipe/WSS listeners and pairing remain deliberately disabled. The current architecture and security boundaries are documented in the [Chinese-language architecture decision](docs/agent_core_architecture.zh-CN.md), with packaged-game editing covered by the [Chinese-language Runtime Scene RPC decision](docs/unity_runtime_scene_rpc.zh-CN.md).
 
 ## CLI
 

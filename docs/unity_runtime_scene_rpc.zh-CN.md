@@ -1,6 +1,6 @@
 # Unity Player 运行时开放编辑与 Scene RPC v1
 
-状态：第二阶段核心纵切已实现，尚未接入实际 VR 项目或启用网络传输。
+状态：Unity Runtime 核心与 Rust Runtime Peer 会话纵切已实现，尚未接入实际 VR 项目或启用网络传输。
 
 ## 结论
 
@@ -46,7 +46,7 @@ unity/Packages/com.brainregion.runtime-bridge/
 schemas/scene-rpc/v1/
 ```
 
-Rust 侧已经嵌入同一 schema，并提供严格 DTO 与验证：
+Rust 侧已经嵌入同一 schema，并提供严格 DTO、Runtime peer registry、请求关联、deadline、capability 检查、断线和重连 epoch：
 
 ```powershell
 cargo run --locked -p brainregiond -- scene-schema
@@ -54,7 +54,9 @@ cargo run --locked -p brainregiond -- scene-schema
 
 ## Runtime Scene RPC v1
 
-Unity Player 是主动连接方；正式传输将在后续实现。连接成功后先发送 `runtime/register`，其中包含新的进程实例 ID、会话 ID、build ID、Unity/platform 信息、revision 和 capabilities。进程重启必须产生新 session；重连后 daemon 必须让旧 pending 请求失败并重新取 snapshot。
+Unity Player 是主动连接方；正式传输将在后续实现。当前 Rust 会话层可接受任意已经过外层认证的双向字节流，但不会自行监听端口或信任注册消息中的 pairing proof。连接成功后先发送 `runtime/register`，其中包含新的进程实例 ID、会话 ID、build ID、Unity/platform 信息、revision 和 capabilities。进程重启必须产生新 session；同一认证主体重连时 daemon 会递增 connection epoch，让旧 pending 请求失败并重新取 snapshot。
+
+Agent Core 控制面已经提供 `scene/peers/list` 和 `scene/peer/call`。前者查看当前连接快照；后者只允许 v1 方法，并同时要求 Player 支持与配对策略授予对应 capability。该控制面目前用于 mock 纵切，尚未意味着真实 VR Player 已可连接。
 
 第一批方法：
 
@@ -103,8 +105,8 @@ Runtime entity
 
 ## 后续接入顺序
 
-1. 在 `brainregiond` 实现 Runtime peer registry 与双向会话：Windows PCVR 优先当前用户命名管道，Android/Quest 使用 Player 主动发起的 WSS + 配对。
-2. 用 mock Player 完成 register、hierarchy、preview/apply、stale revision、断线重连测试。
+1. 在 `brainregiond` 的现有 Runtime peer 会话层外增加 Windows 当前用户命名管道、DACL 和配对；Android/Quest 后续使用 Player 主动发起的 WSS。
+2. 扩展 mock Player，完成 hierarchy、preview/apply、stale revision、写入超时后幂等查明结果测试；当前已覆盖 register、调用关联、能力拒绝、迟到响应和断线重连。
 3. 再把 package 作为本地 UPM dependency 接入 VR 项目，先做 Windows IL2CPP Development build smoke；确认后再做 Android ARM64/Quest。
 4. 补 Catalog 生成、属性 binding codegen 和实际 IL2CPP stripping smoke。
 5. 增加 `WorldDocument` 存档、Addressables provider 和 Behavior Graph；文本脚本解释器最后接入。

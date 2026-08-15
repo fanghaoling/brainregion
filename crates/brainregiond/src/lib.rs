@@ -8,6 +8,7 @@ mod child_transport;
 pub mod config;
 pub mod error;
 pub mod protocol;
+pub mod scene_peer;
 pub mod scene_rpc;
 pub mod server;
 pub mod supervisor;

@@ -9,11 +9,15 @@
     { "$ref": "#/$defs/daemonShutdownRequest" },
     { "$ref": "#/$defs/mcpToolsListRequest" },
     { "$ref": "#/$defs/mcpToolsCallRequest" },
+    { "$ref": "#/$defs/scenePeersListRequest" },
+    { "$ref": "#/$defs/scenePeerCallRequest" },
     { "$ref": "#/$defs/daemonInfoResponse" },
     { "$ref": "#/$defs/daemonHealthResponse" },
     { "$ref": "#/$defs/daemonShutdownResponse" },
     { "$ref": "#/$defs/mcpToolsListResponse" },
     { "$ref": "#/$defs/mcpToolsCallResponse" },
+    { "$ref": "#/$defs/scenePeersListResponse" },
+    { "$ref": "#/$defs/scenePeerCallResponse" },
     { "$ref": "#/$defs/errorResponse" },
     { "$ref": "#/$defs/readyNotification" }
   ],
@@ -95,6 +99,40 @@
       },
       "additionalProperties": false
     },
+    "scenePeersListRequest": {
+      "title": "scene/peers/list request",
+      "type": "object",
+      "required": ["jsonrpc", "id", "method"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "scene/peers/list" },
+        "params": { "$ref": "#/$defs/emptyParams" }
+      },
+      "additionalProperties": false
+    },
+    "scenePeerCallRequest": {
+      "title": "scene/peer/call request",
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "scene/peer/call" },
+        "params": {
+          "type": "object",
+          "required": ["principalId", "method", "params"],
+          "properties": {
+            "principalId": { "$ref": "#/$defs/sceneIdentifier" },
+            "method": { "$ref": "#/$defs/sceneMethod" },
+            "params": { "type": "object" },
+            "timeoutMs": { "type": "integer", "minimum": 1, "maximum": 300000 }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "daemonInfoResponse": {
       "title": "daemon/info success response",
       "type": "object",
@@ -164,6 +202,47 @@
         "jsonrpc": { "const": "2.0" },
         "id": { "$ref": "#/$defs/id" },
         "result": { "$ref": "#/$defs/mcpCallToolResult" }
+      },
+      "additionalProperties": false
+    },
+    "scenePeersListResponse": {
+      "title": "scene/peers/list success response",
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "result": {
+          "type": "object",
+          "required": ["peers"],
+          "properties": {
+            "peers": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/scenePeerSnapshot" }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "scenePeerCallResponse": {
+      "title": "scene/peer/call success response",
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "result": {
+          "type": "object",
+          "required": ["principalId", "method", "result"],
+          "properties": {
+            "principalId": { "$ref": "#/$defs/sceneIdentifier" },
+            "method": { "$ref": "#/$defs/sceneMethod" },
+            "result": { "type": "object" }
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     },
@@ -270,6 +349,67 @@
     },
     "status": {
       "enum": ["starting", "ready", "degraded", "stopped"]
+    },
+    "sceneIdentifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:/-]+$"
+    },
+    "sceneMethod": {
+      "enum": [
+        "runtime/info",
+        "scene/hierarchy",
+        "object/inspect",
+        "prefab/list",
+        "scene/preview",
+        "scene/apply",
+        "history/undo",
+        "logs/poll"
+      ]
+    },
+    "sceneCapability": {
+      "enum": ["scene.read", "scene.write", "scene.spawn", "scene.undo", "logs.read"]
+    },
+    "scenePeerSnapshot": {
+      "type": "object",
+      "required": [
+        "principalId",
+        "connectionEpoch",
+        "instanceId",
+        "sessionId",
+        "buildId",
+        "sceneId",
+        "sceneRevision",
+        "runtimeStatus",
+        "runtimeError",
+        "supportedCapabilities",
+        "grantedCapabilities",
+        "connectionState"
+      ],
+      "properties": {
+        "principalId": { "$ref": "#/$defs/sceneIdentifier" },
+        "connectionEpoch": { "type": "integer", "minimum": 1 },
+        "instanceId": { "$ref": "#/$defs/sceneIdentifier" },
+        "sessionId": { "$ref": "#/$defs/sceneIdentifier" },
+        "buildId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "sceneId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "sceneRevision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "runtimeStatus": { "enum": ["ready", "degraded"] },
+        "runtimeError": { "type": ["string", "null"], "maxLength": 4096 },
+        "supportedCapabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/sceneCapability" }
+        },
+        "grantedCapabilities": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "$ref": "#/$defs/sceneCapability" }
+        },
+        "connectionState": { "const": "connected" }
+      },
+      "additionalProperties": false
     },
     "mcpMetadata": {
       "type": "object",

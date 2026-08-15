@@ -287,7 +287,7 @@ cargo run --locked -p brainregiond -- schema
 cargo run --locked -p brainregiond -- scene-schema
 ```
 
-`probe` 验证真实 MCP 握手、工具发现和应用级 `ping`；`serve` 在 stdin/stdout 上提供版本化 JSONL/JSON-RPC 控制协议；`schema` 和 `scene-schema` 分别输出 Agent 控制协议与 Unity Player Runtime Scene RPC 契约。架构、安全边界见 [Rust Agent Core 架构决策](docs/agent_core_architecture.zh-CN.md)；打包后开放编辑的范围与路线见 [Unity Player 运行时 Scene RPC](docs/unity_runtime_scene_rpc.zh-CN.md)。
+`probe` 验证真实 MCP 握手、工具发现和应用级 `ping`；`serve` 在 stdin/stdout 上提供版本化 JSONL/JSON-RPC 控制协议，并可在具体传输注入已认证 Runtime peer 后列出 Player、代理 Scene RPC；`schema` 和 `scene-schema` 分别输出 Agent 控制协议与 Unity Player Runtime Scene RPC 契约。与传输无关的 peer 会话层已经实现，命名管道/WSS 监听和配对仍保持关闭。架构、安全边界见 [Rust Agent Core 架构决策](docs/agent_core_architecture.zh-CN.md)；打包后开放编辑的范围与路线见 [Unity Player 运行时 Scene RPC](docs/unity_runtime_scene_rpc.zh-CN.md)。
 
 ## CLI
 
