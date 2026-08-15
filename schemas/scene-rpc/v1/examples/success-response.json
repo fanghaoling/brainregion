@@ -1,0 +1,13 @@
+{
+  "jsonrpc": "2.0",
+  "id": "apply-01",
+  "result": {
+    "sceneRevision": 1,
+    "clientMutationId": "mutation-01",
+    "undoId": "undo-01",
+    "tempIdMap": {
+      "tmp:lamp": "runtime-object-01"
+    },
+    "idempotentReplay": false
+  }
+}

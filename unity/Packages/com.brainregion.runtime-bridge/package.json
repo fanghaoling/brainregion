@@ -1,0 +1,18 @@
+{
+  "name": "com.brainregion.runtime-bridge",
+  "version": "0.1.0",
+  "displayName": "BrainRegion Runtime Bridge",
+  "description": "A deny-by-default Scene RPC core for packaged Unity applications.",
+  "unity": "6000.0",
+  "license": "Apache-2.0",
+  "licensesUrl": "https://www.apache.org/licenses/LICENSE-2.0",
+  "dependencies": {
+    "com.unity.nuget.newtonsoft-json": "3.2.1"
+  },
+  "keywords": [
+    "runtime",
+    "scene",
+    "rpc",
+    "vr"
+  ]
+}

@@ -1,0 +1,25 @@
+{
+  "jsonrpc": "2.0",
+  "method": "runtime/register",
+  "params": {
+    "protocolVersion": "brainregion.scene.v1",
+    "instanceId": "player-01",
+    "sessionId": "session-01",
+    "buildId": "windows-il2cpp-dev-001",
+    "unityVersion": "6000.3.20f1",
+    "platform": "WindowsPlayer",
+    "product": "VR Project",
+    "sceneId": "Sandbox",
+    "sceneRevision": 0,
+    "status": "ready",
+    "error": null,
+    "capabilities": [
+      "scene.read",
+      "scene.write",
+      "scene.spawn",
+      "scene.undo",
+      "logs.read"
+    ],
+    "pairingProof": null
+  }
+}

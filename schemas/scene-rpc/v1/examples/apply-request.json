@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": "apply-01",
+  "method": "scene/apply",
+  "deadlineUnixMs": 4102444800000,
+  "params": {
+    "previewToken": "preview-token-01",
+    "expectedRevision": 0,
+    "clientMutationId": "mutation-01"
+  }
+}
