@@ -1,0 +1,343 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brainregion.dev/schemas/agent-core/v1/control-message.schema.json",
+  "title": "BrainRegion Agent Core Control Message v1",
+  "description": "Method-specific JSON-RPC 2.0 messages exchanged with the local brainregiond JSONL control transport.",
+  "oneOf": [
+    { "$ref": "#/$defs/daemonInfoRequest" },
+    { "$ref": "#/$defs/daemonHealthRequest" },
+    { "$ref": "#/$defs/daemonShutdownRequest" },
+    { "$ref": "#/$defs/mcpToolsListRequest" },
+    { "$ref": "#/$defs/mcpToolsCallRequest" },
+    { "$ref": "#/$defs/daemonInfoResponse" },
+    { "$ref": "#/$defs/daemonHealthResponse" },
+    { "$ref": "#/$defs/daemonShutdownResponse" },
+    { "$ref": "#/$defs/mcpToolsListResponse" },
+    { "$ref": "#/$defs/mcpToolsCallResponse" },
+    { "$ref": "#/$defs/errorResponse" },
+    { "$ref": "#/$defs/readyNotification" }
+  ],
+  "$defs": {
+    "id": {
+      "description": "JSON-RPC request identifier. Fractional numbers are not accepted.",
+      "type": ["string", "integer", "null"]
+    },
+    "emptyParams": {
+      "type": "object",
+      "maxProperties": 0,
+      "additionalProperties": false
+    },
+    "daemonInfoRequest": {
+      "title": "daemon/info request",
+      "type": "object",
+      "required": ["jsonrpc", "id", "method"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "daemon/info" },
+        "params": { "$ref": "#/$defs/emptyParams" }
+      },
+      "additionalProperties": false
+    },
+    "daemonHealthRequest": {
+      "title": "daemon/health request",
+      "type": "object",
+      "required": ["jsonrpc", "id", "method"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "daemon/health" },
+        "params": { "$ref": "#/$defs/emptyParams" }
+      },
+      "additionalProperties": false
+    },
+    "daemonShutdownRequest": {
+      "title": "daemon/shutdown request",
+      "type": "object",
+      "required": ["jsonrpc", "id", "method"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "daemon/shutdown" },
+        "params": { "$ref": "#/$defs/emptyParams" }
+      },
+      "additionalProperties": false
+    },
+    "mcpToolsListRequest": {
+      "title": "mcp/tools/list request",
+      "type": "object",
+      "required": ["jsonrpc", "id", "method"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "mcp/tools/list" },
+        "params": { "$ref": "#/$defs/emptyParams" }
+      },
+      "additionalProperties": false
+    },
+    "mcpToolsCallRequest": {
+      "title": "mcp/tools/call request",
+      "type": "object",
+      "required": ["jsonrpc", "id", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "mcp/tools/call" },
+        "params": {
+          "type": "object",
+          "required": ["name"],
+          "properties": {
+            "name": { "type": "string", "minLength": 1 },
+            "arguments": { "type": ["object", "null"] }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "daemonInfoResponse": {
+      "title": "daemon/info success response",
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "result": { "$ref": "#/$defs/daemonInfoResult" }
+      },
+      "additionalProperties": false
+    },
+    "daemonHealthResponse": {
+      "title": "daemon/health success response",
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "result": { "$ref": "#/$defs/daemonHealthResult" }
+      },
+      "additionalProperties": false
+    },
+    "daemonShutdownResponse": {
+      "title": "daemon/shutdown success response",
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "result": {
+          "type": "object",
+          "required": ["accepted"],
+          "properties": {
+            "accepted": { "const": true }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "mcpToolsListResponse": {
+      "title": "mcp/tools/list success response",
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "result": {
+          "type": "object",
+          "required": ["tools"],
+          "properties": {
+            "tools": {
+              "type": "array",
+              "items": { "$ref": "#/$defs/mcpTool" }
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "mcpToolsCallResponse": {
+      "title": "mcp/tools/call success response",
+      "type": "object",
+      "required": ["jsonrpc", "id", "result"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "result": { "$ref": "#/$defs/mcpCallToolResult" }
+      },
+      "additionalProperties": false
+    },
+    "errorResponse": {
+      "title": "JSON-RPC error response",
+      "type": "object",
+      "required": ["jsonrpc", "id", "error"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "error": {
+          "type": "object",
+          "required": ["code", "message"],
+          "properties": {
+            "code": { "type": "integer" },
+            "message": { "type": "string" },
+            "data": true
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "readyNotification": {
+      "title": "daemon/ready notification",
+      "type": "object",
+      "required": ["jsonrpc", "method", "params"],
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "daemon/ready" },
+        "params": {
+          "type": "object",
+          "required": ["protocolVersion", "daemon", "status", "mcp"],
+          "properties": {
+            "protocolVersion": { "const": "brainregion.control.v1" },
+            "daemon": { "$ref": "#/$defs/daemonIdentity" },
+            "status": { "const": "ready" },
+            "mcp": { "$ref": "#/$defs/mcpMetadata" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "daemonInfoResult": {
+      "type": "object",
+      "required": ["protocolVersion", "daemon", "status", "mcp"],
+      "properties": {
+        "protocolVersion": { "const": "brainregion.control.v1" },
+        "daemon": {
+          "type": "object",
+          "required": ["name", "version", "uptimeMs", "requestCount"],
+          "properties": {
+            "name": { "const": "brainregiond" },
+            "version": { "type": "string", "minLength": 1 },
+            "uptimeMs": { "type": "integer", "minimum": 0 },
+            "requestCount": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "status": { "$ref": "#/$defs/status" },
+        "mcp": { "$ref": "#/$defs/mcpMetadata" }
+      },
+      "additionalProperties": false
+    },
+    "daemonHealthResult": {
+      "type": "object",
+      "required": ["ok", "status", "daemon", "mcp"],
+      "properties": {
+        "ok": { "const": true },
+        "status": { "$ref": "#/$defs/status" },
+        "daemon": {
+          "type": "object",
+          "required": ["name", "version", "uptimeMs"],
+          "properties": {
+            "name": { "const": "brainregiond" },
+            "version": { "type": "string", "minLength": 1 },
+            "uptimeMs": { "type": "integer", "minimum": 0 }
+          },
+          "additionalProperties": false
+        },
+        "mcp": {
+          "type": "object",
+          "required": ["protocolVersion", "serverInfo", "toolCount", "brainregion"],
+          "properties": {
+            "protocolVersion": { "type": "string", "minLength": 1 },
+            "serverInfo": { "type": "object" },
+            "toolCount": { "type": "integer", "minimum": 0 },
+            "brainregion": { "$ref": "#/$defs/brainregionPing" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "daemonIdentity": {
+      "type": "object",
+      "required": ["name", "version"],
+      "properties": {
+        "name": { "const": "brainregiond" },
+        "version": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "status": {
+      "enum": ["starting", "ready", "degraded", "stopped"]
+    },
+    "mcpMetadata": {
+      "type": "object",
+      "required": ["protocolVersion", "serverInfo", "capabilities", "toolCount", "brainregion"],
+      "properties": {
+        "protocolVersion": { "type": "string", "minLength": 1 },
+        "serverInfo": { "type": "object" },
+        "capabilities": { "type": "object" },
+        "toolCount": { "type": "integer", "minimum": 0 },
+        "brainregion": { "$ref": "#/$defs/brainregionPing" }
+      },
+      "additionalProperties": false
+    },
+    "brainregionPing": {
+      "type": "object",
+      "required": ["ok", "name", "legacy_name", "version"],
+      "properties": {
+        "ok": { "const": true },
+        "name": { "const": "brainregion" },
+        "legacy_name": { "type": ["string", "null"] },
+        "version": { "type": "string", "minLength": 1 }
+      },
+      "additionalProperties": false
+    },
+    "mcpTool": {
+      "description": "MCP Tool forwarded from the Python worker. Known envelope fields are closed; nested MCP schemas and metadata remain extensible.",
+      "type": "object",
+      "required": ["name", "inputSchema"],
+      "properties": {
+        "name": { "type": "string", "minLength": 1 },
+        "title": { "type": "string" },
+        "description": { "type": "string" },
+        "inputSchema": { "type": "object" },
+        "outputSchema": { "type": "object" },
+        "annotations": { "type": "object" },
+        "execution": { "type": "object" },
+        "icons": {
+          "type": "array",
+          "items": { "type": "object" }
+        },
+        "_meta": { "type": "object" }
+      },
+      "additionalProperties": false
+    },
+    "mcpCallToolResult": {
+      "description": "MCP CallToolResult forwarded from the Python worker.",
+      "type": "object",
+      "required": ["content"],
+      "properties": {
+        "resultType": { "const": "complete" },
+        "content": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["type"],
+            "properties": {
+              "type": {
+                "enum": ["text", "image", "audio", "resource", "resource_link"]
+              }
+            },
+            "additionalProperties": true
+          }
+        },
+        "structuredContent": true,
+        "isError": { "type": "boolean" },
+        "_meta": { "type": "object" }
+      },
+      "additionalProperties": false
+    }
+  }
+}

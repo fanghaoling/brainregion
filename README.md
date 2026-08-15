@@ -1010,6 +1010,19 @@ Register the stdio server in Codex, Claude Code, or another MCP client:
 `UNITY_PROJECT_ROOT` is a historical project-root environment variable name. Point it at the project you want reviewed.
 Keep API keys in `.env` or process environment variables. Do not commit `.env` or local `brain_region_config.json`.
 
+## Experimental Rust Headless Core
+
+`brainregiond` is the headless control plane for future desktop and VR clients. It uses the official Rust MCP SDK to launch and supervise the existing Python MCP worker; it does not rewrite the Python review, memory, or model logic.
+
+```bash
+cargo run --locked -p brainregiond -- probe
+cargo run --locked -p brainregiond -- serve
+cargo run --locked -p brainregiond -- schema
+cargo run --locked -p brainregiond -- scene-schema
+```
+
+`probe` verifies the real MCP handshake, tool discovery, and application-level `ping`. `serve` exposes the versioned JSONL/JSON-RPC control protocol on stdin/stdout. `schema` and `scene-schema` print the embedded Agent control and Unity Player Runtime Scene RPC contracts. The current architecture and security boundaries are documented in the [Chinese-language architecture decision](docs/agent_core_architecture.zh-CN.md), with packaged-game editing covered by the [Chinese-language Runtime Scene RPC decision](docs/unity_runtime_scene_rpc.zh-CN.md).
+
 ## CLI
 
 The `brain-region` CLI uses the same pipeline as the MCP server. The legacy `design-review` command is still available
@@ -1203,6 +1216,13 @@ brainregion/
   knowledge/             # retrieval providers
   privacy/               # privacy policies
   output/                # renderers
+crates/
+  brainregiond/          # Rust headless control plane and MCP worker supervisor
+schemas/
+  agent-core/v1/         # versioned desktop/VR control protocol
+  scene-rpc/v1/          # Unity Player runtime scene protocol and golden fixtures
+unity/Packages/
+  com.brainregion.runtime-bridge/  # portable Unity Runtime UPM package
 tests/                   # pytest coverage
 docs/                    # focused docs
 ```

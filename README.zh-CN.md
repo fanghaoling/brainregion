@@ -276,6 +276,19 @@ uv run --extra dev ruff check .
 `UNITY_PROJECT_ROOT` 是为了兼容保留的项目根目录变量名，把它指向要审查的项目根目录即可。
 API key 建议放在 `.env` 或进程环境变量里。不要提交 `.env` 或本地 `brain_region_config.json`。
 
+## Rust 常驻核心（实验）
+
+`brainregiond` 是面向桌面端和后续 VR 客户端的无窗口控制面。它通过官方 Rust MCP SDK 启动并监管现有 Python MCP worker；当前不会重写 Python 中的 review、memory 或模型逻辑。
+
+```bash
+cargo run --locked -p brainregiond -- probe
+cargo run --locked -p brainregiond -- serve
+cargo run --locked -p brainregiond -- schema
+cargo run --locked -p brainregiond -- scene-schema
+```
+
+`probe` 验证真实 MCP 握手、工具发现和应用级 `ping`；`serve` 在 stdin/stdout 上提供版本化 JSONL/JSON-RPC 控制协议；`schema` 和 `scene-schema` 分别输出 Agent 控制协议与 Unity Player Runtime Scene RPC 契约。架构、安全边界见 [Rust Agent Core 架构决策](docs/agent_core_architecture.zh-CN.md)；打包后开放编辑的范围与路线见 [Unity Player 运行时 Scene RPC](docs/unity_runtime_scene_rpc.zh-CN.md)。
+
 ## CLI
 
 `brain-region` CLI 和 MCP server 使用同一套 pipeline。重命名期间旧的 `design-review` 命令仍作为 alias 保留。
@@ -529,6 +542,13 @@ brainregion/
   knowledge/             # 检索实现
   privacy/               # 隐私策略
   output/                # 输出渲染
+crates/
+  brainregiond/          # Rust 无窗口控制面与 MCP worker 监管
+schemas/
+  agent-core/v1/         # 版本化桌面端 / VR 控制协议
+  scene-rpc/v1/          # Unity Player 运行时场景协议与 golden fixtures
+unity/Packages/
+  com.brainregion.runtime-bridge/  # 可移植 Unity Runtime UPM package
 tests/                   # pytest 覆盖
 docs/                    # 聚焦文档
 ```
