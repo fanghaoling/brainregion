@@ -68,3 +68,16 @@ def test_scene_rpc_rejects_cross_runtime_contract_drift() -> None:
     preview = _load(SCHEMA_ROOT / "examples" / "preview-request.json")
     preview["deadlineUnixMs"] = 9_007_199_254_740_992
     assert list(validator.iter_errors(preview))
+
+
+def test_scene_rpc_pairing_challenge_and_proof_are_closed_contracts() -> None:
+    schema = _load(SCHEMA_ROOT / "scene-message.schema.json")
+    validator = Draft202012Validator(schema)
+
+    challenge = _load(SCHEMA_ROOT / "examples" / "runtime-challenge.json")
+    challenge["params"]["nonce"] = "short"
+    assert list(validator.iter_errors(challenge))
+
+    registration = _load(SCHEMA_ROOT / "examples" / "runtime-register.json")
+    registration["params"]["pairingProof"] = "static-replayable-token"
+    assert list(validator.iter_errors(registration))

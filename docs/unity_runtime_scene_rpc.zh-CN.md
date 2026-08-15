@@ -54,7 +54,7 @@ cargo run --locked -p brainregiond -- scene-schema
 
 ## Runtime Scene RPC v1
 
-Unity Player 是主动连接方；正式传输将在后续实现。当前 Rust 会话层可接受任意已经过外层认证的双向字节流，但不会自行监听端口或信任注册消息中的 pairing proof。连接成功后先发送 `runtime/register`，其中包含新的进程实例 ID、会话 ID、build ID、Unity/platform 信息、revision 和 capabilities。进程重启必须产生新 session；同一认证主体重连时 daemon 会递增 connection epoch，让旧 pending 请求失败并重新取 snapshot。
+Unity Player 是主动连接方。当前 Rust 会话层已接受经过认证的双向字节流，并在 Windows 上提供显式启用的当前用户命名管道；命名管道先发送一次性 `runtime/challenge`，Player 用高熵预共享密钥计算 HMAC-SHA256，再把 proof 放入 `runtime/register`。完整字段顺序与配置见 [Rust Agent Core 架构决策](agent_core_architecture.zh-CN.md#windows-runtime-命名管道)。注册包含新的进程实例 ID、会话 ID、build ID、Unity/platform 信息、revision 和 capabilities。进程重启必须产生新 session；同一认证主体重连时 daemon 会递增 connection epoch，让旧 pending 请求失败并重新取 snapshot。
 
 Agent Core 控制面已经提供 `scene/peers/list` 和 `scene/peer/call`。前者查看当前连接快照；后者只允许 v1 方法，并同时要求 Player 支持与配对策略授予对应 capability。该控制面目前用于 mock 纵切，尚未意味着真实 VR Player 已可连接。
 
@@ -105,8 +105,8 @@ Runtime entity
 
 ## 后续接入顺序
 
-1. 在 `brainregiond` 的现有 Runtime peer 会话层外增加 Windows 当前用户命名管道、DACL 和配对；Android/Quest 后续使用 Player 主动发起的 WSS。
-2. 扩展 mock Player，完成 hierarchy、preview/apply、stale revision、写入超时后幂等查明结果测试；当前已覆盖 register、调用关联、能力拒绝、迟到响应和断线重连。
+1. 给可移植 Unity package 增加 Windows 命名管道客户端、challenge/HMAC proof 和有界 writer queue；Rust 服务端、当前用户 DACL、配对和真实管道 mock 已完成。
+2. 扩展 mock Player，完成 hierarchy、preview/apply、stale revision、写入超时后幂等查明结果测试；当前已覆盖 register、调用关联、能力拒绝、迟到响应、断线重连和错误密钥拒绝。
 3. 再把 package 作为本地 UPM dependency 接入 VR 项目，先做 Windows IL2CPP Development build smoke；确认后再做 Android ARM64/Quest。
 4. 补 Catalog 生成、属性 binding codegen 和实际 IL2CPP stripping smoke。
 5. 增加 `WorldDocument` 存档、Addressables provider 和 Behavior Graph；文本脚本解释器最后接入。

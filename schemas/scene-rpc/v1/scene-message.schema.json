@@ -4,6 +4,7 @@
   "title": "BrainRegion Runtime Scene RPC v1",
   "description": "JSON-RPC messages exchanged between a packaged Unity Player and brainregiond.",
   "oneOf": [
+    { "$ref": "#/$defs/runtimeChallenge" },
     { "$ref": "#/$defs/runtimeRegister" },
     { "$ref": "#/$defs/runtimeInfoRequest" },
     { "$ref": "#/$defs/hierarchyRequest" },
@@ -163,6 +164,27 @@
         { "$ref": "#/$defs/setPropertiesOperation" }
       ]
     },
+    "runtimeChallenge": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "method": { "const": "runtime/challenge" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "protocolVersion": { "const": "brainregion.scene.pairing.v1" },
+            "algorithm": { "const": "hmac-sha256" },
+            "nonce": { "type": "string", "pattern": "^[A-Za-z0-9_-]{43}$" },
+            "expiresUnixMs": { "$ref": "#/$defs/deadline" },
+            "principalId": { "$ref": "#/$defs/id" }
+          },
+          "required": ["protocolVersion", "algorithm", "nonce", "expiresUnixMs", "principalId"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "method", "params"],
+      "additionalProperties": false
+    },
     "runtimeRegister": {
       "type": "object",
       "properties": {
@@ -190,7 +212,7 @@
                 "enum": ["scene.read", "scene.write", "scene.spawn", "scene.undo", "logs.read"]
               }
             },
-            "pairingProof": { "type": ["string", "null"], "maxLength": 2048 }
+            "pairingProof": { "type": ["string", "null"], "pattern": "^hmac-sha256\\.[A-Za-z0-9_-]{43}$" }
           },
           "required": ["protocolVersion", "instanceId", "sessionId", "buildId", "unityVersion", "platform", "product", "sceneId", "sceneRevision", "status", "error", "capabilities"],
           "additionalProperties": false

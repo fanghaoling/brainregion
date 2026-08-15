@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "method": "runtime/challenge",
+  "params": {
+    "protocolVersion": "brainregion.scene.pairing.v1",
+    "algorithm": "hmac-sha256",
+    "nonce": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+    "expiresUnixMs": 1800000000000,
+    "principalId": "unity-local"
+  }
+}

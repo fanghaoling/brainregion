@@ -1,14 +1,21 @@
 use std::env;
 use std::ffi::OsString;
+use std::fmt;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use crate::error::{BrainregiondError, Result};
+use crate::scene_rpc::SceneCapability;
 
 pub const DEFAULT_MCP_PROTOCOL_VERSION: &str = "2025-11-25";
 pub const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(20);
 pub const DEFAULT_HEALTH_TIMEOUT: Duration = Duration::from_secs(3);
 pub const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+pub const DEFAULT_SCENE_PIPE_AUTH_TIMEOUT: Duration = Duration::from_secs(10);
+pub const DEFAULT_SCENE_PIPE_MAX_CONNECTIONS: usize = 4;
+
+const MIN_PAIRING_SECRET_BYTES: usize = 32;
+const MAX_PAIRING_SECRET_BYTES: usize = 4096;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum RunMode {
@@ -27,6 +34,41 @@ pub struct McpProcessConfig {
     pub cwd: Option<PathBuf>,
 }
 
+#[derive(Clone, Eq, PartialEq)]
+pub struct PairingSecret(Vec<u8>);
+
+impl PairingSecret {
+    pub fn new(secret: impl AsRef<[u8]>) -> Result<Self> {
+        let secret = secret.as_ref();
+        if !(MIN_PAIRING_SECRET_BYTES..=MAX_PAIRING_SECRET_BYTES).contains(&secret.len()) {
+            return Err(BrainregiondError::Config(format!(
+                "scene pairing secret must contain {MIN_PAIRING_SECRET_BYTES}..{MAX_PAIRING_SECRET_BYTES} bytes"
+            )));
+        }
+        Ok(Self(secret.to_vec()))
+    }
+
+    pub(crate) fn expose(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+impl fmt::Debug for PairingSecret {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("PairingSecret([REDACTED])")
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ScenePipeConfig {
+    pub name: String,
+    pub principal_id: String,
+    pub pairing_secret: PairingSecret,
+    pub granted_capabilities: Vec<SceneCapability>,
+    pub max_connections: usize,
+    pub authentication_timeout: Duration,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct DaemonConfig {
     pub mode: RunMode,
@@ -35,6 +77,7 @@ pub struct DaemonConfig {
     pub health_timeout: Duration,
     pub request_timeout: Duration,
     pub mcp_protocol_version: String,
+    pub scene_pipe: Option<ScenePipeConfig>,
 }
 
 impl DaemonConfig {
@@ -89,6 +132,7 @@ impl DaemonConfig {
                 )));
             }
         };
+        let scene_pipe = scene_pipe_from_environment()?;
 
         Ok(Self {
             mode: RunMode::Serve,
@@ -97,6 +141,7 @@ impl DaemonConfig {
             health_timeout,
             request_timeout,
             mcp_protocol_version,
+            scene_pipe,
         })
     }
 
@@ -226,6 +271,138 @@ fn timeout_from_env(name: &str, default: Duration) -> Result<Duration> {
     }
 }
 
+fn scene_pipe_from_environment() -> Result<Option<ScenePipeConfig>> {
+    let name = match env::var("BRAINREGIOND_SCENE_PIPE_NAME") {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => return Ok(None),
+        Err(error) => {
+            return Err(BrainregiondError::Config(format!(
+                "BRAINREGIOND_SCENE_PIPE_NAME is not valid Unicode: {error}"
+            )));
+        }
+    };
+    validate_pipe_name(&name)?;
+
+    let secret = required_environment_value("BRAINREGIOND_SCENE_PAIRING_SECRET")?;
+    let principal_id = match env::var("BRAINREGIOND_SCENE_PRINCIPAL_ID") {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => "unity-local".to_owned(),
+        Err(error) => {
+            return Err(BrainregiondError::Config(format!(
+                "BRAINREGIOND_SCENE_PRINCIPAL_ID is not valid Unicode: {error}"
+            )));
+        }
+    };
+    validate_scene_identifier("scene principal id", &principal_id, 128)?;
+
+    let granted_capabilities = match env::var("BRAINREGIOND_SCENE_CAPABILITIES_JSON") {
+        Ok(value) => parse_scene_capabilities(&value)?,
+        Err(env::VarError::NotPresent) => vec![SceneCapability::SceneRead],
+        Err(error) => {
+            return Err(BrainregiondError::Config(format!(
+                "BRAINREGIOND_SCENE_CAPABILITIES_JSON is not valid Unicode: {error}"
+            )));
+        }
+    };
+    let max_connections = usize_from_env(
+        "BRAINREGIOND_SCENE_MAX_CONNECTIONS",
+        DEFAULT_SCENE_PIPE_MAX_CONNECTIONS,
+        1,
+        32,
+    )?;
+    let authentication_timeout = timeout_from_env(
+        "BRAINREGIOND_SCENE_AUTH_TIMEOUT_MS",
+        DEFAULT_SCENE_PIPE_AUTH_TIMEOUT,
+    )?;
+
+    Ok(Some(ScenePipeConfig {
+        name,
+        principal_id,
+        pairing_secret: PairingSecret::new(secret.as_bytes())?,
+        granted_capabilities,
+        max_connections,
+        authentication_timeout,
+    }))
+}
+
+fn required_environment_value(name: &str) -> Result<String> {
+    match env::var(name) {
+        Ok(value) if !value.is_empty() => Ok(value),
+        Ok(_) | Err(env::VarError::NotPresent) => Err(BrainregiondError::Config(format!(
+            "{name} is required when BRAINREGIOND_SCENE_PIPE_NAME is set"
+        ))),
+        Err(error) => Err(BrainregiondError::Config(format!(
+            "{name} is not valid Unicode: {error}"
+        ))),
+    }
+}
+
+fn parse_scene_capabilities(value: &str) -> Result<Vec<SceneCapability>> {
+    let mut capabilities: Vec<SceneCapability> = serde_json::from_str(value).map_err(|error| {
+        BrainregiondError::Config(format!(
+            "BRAINREGIOND_SCENE_CAPABILITIES_JSON must be a JSON capability array: {error}"
+        ))
+    })?;
+    capabilities.sort_by_key(|capability| match capability {
+        SceneCapability::SceneRead => 0,
+        SceneCapability::SceneWrite => 1,
+        SceneCapability::SceneSpawn => 2,
+        SceneCapability::SceneUndo => 3,
+        SceneCapability::LogsRead => 4,
+    });
+    capabilities.dedup();
+    Ok(capabilities)
+}
+
+fn usize_from_env(name: &str, default: usize, minimum: usize, maximum: usize) -> Result<usize> {
+    let raw = match env::var(name) {
+        Ok(value) => value,
+        Err(env::VarError::NotPresent) => return Ok(default),
+        Err(error) => {
+            return Err(BrainregiondError::Config(format!(
+                "{name} is not valid Unicode: {error}"
+            )));
+        }
+    };
+    let value = raw.parse::<usize>().map_err(|_| {
+        BrainregiondError::Config(format!("{name} must be an integer, got {raw:?}"))
+    })?;
+    if !(minimum..=maximum).contains(&value) {
+        return Err(BrainregiondError::Config(format!(
+            "{name} must be within {minimum}..{maximum}"
+        )));
+    }
+    Ok(value)
+}
+
+fn validate_pipe_name(name: &str) -> Result<()> {
+    if name.is_empty()
+        || name.len() > 128
+        || name
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || b"._-".contains(&byte)))
+    {
+        return Err(BrainregiondError::Config(
+            "scene pipe name must contain 1..128 ASCII letters, digits, '.', '_' or '-'".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_scene_identifier(name: &str, value: &str, maximum: usize) -> Result<()> {
+    if value.is_empty()
+        || value.len() > maximum
+        || value
+            .bytes()
+            .any(|byte| !(byte.is_ascii_alphanumeric() || b"._:/-".contains(&byte)))
+    {
+        return Err(BrainregiondError::Config(format!(
+            "{name} must contain 1..{maximum} supported ASCII characters"
+        )));
+    }
+    Ok(())
+}
+
 fn discover_mcp_process(current_dir: &Path) -> McpProcessConfig {
     for directory in current_dir.ancestors() {
         let windows_python = directory.join(".venv").join("Scripts").join("python.exe");
@@ -275,7 +452,8 @@ Options:\n\
   -V, --version               Show the daemon version\n\
 \n\
 Equivalent environment variables use the BRAINREGIOND_ prefix; MCP arguments are\n\
-provided as a JSON string array in BRAINREGIOND_MCP_ARGS_JSON."
+provided as a JSON string array in BRAINREGIOND_MCP_ARGS_JSON. The Windows Runtime\n\
+pipe stays disabled unless BRAINREGIOND_SCENE_PIPE_NAME and its pairing secret are set."
 }
 
 #[cfg(test)]
@@ -294,6 +472,7 @@ mod tests {
             health_timeout: DEFAULT_HEALTH_TIMEOUT,
             request_timeout: DEFAULT_REQUEST_TIMEOUT,
             mcp_protocol_version: DEFAULT_MCP_PROTOCOL_VERSION.to_owned(),
+            scene_pipe: None,
         }
     }
 
@@ -330,5 +509,24 @@ mod tests {
             .apply_args(["--request-timeout-ms", "0"])
             .unwrap_err();
         assert!(error.to_string().contains("greater than zero"));
+    }
+
+    #[test]
+    fn redacts_and_validates_pairing_secrets() {
+        let secret = PairingSecret::new("x".repeat(32)).unwrap();
+        assert_eq!(format!("{secret:?}"), "PairingSecret([REDACTED])");
+        assert!(PairingSecret::new("too-short").is_err());
+    }
+
+    #[test]
+    fn parses_capabilities_and_rejects_unsafe_pipe_names() {
+        let capabilities =
+            parse_scene_capabilities(r#"["logs.read","scene.read","scene.read"]"#).unwrap();
+        assert_eq!(
+            capabilities,
+            vec![SceneCapability::SceneRead, SceneCapability::LogsRead]
+        );
+        assert!(validate_pipe_name("brainregion.scene.local").is_ok());
+        assert!(validate_pipe_name(r"..\\remote\pipe").is_err());
     }
 }

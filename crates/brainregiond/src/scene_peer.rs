@@ -518,6 +518,20 @@ where
     })?;
 
     let registration: RuntimeRegistrationNotification = serde_json::from_str(&registration_line)?;
+    accept_registered_scene_peer(registry, auth, reader, write_half, registration).await
+}
+
+pub(crate) async fn accept_registered_scene_peer<R, W>(
+    registry: ScenePeerRegistry,
+    auth: ScenePeerAuth,
+    reader: BufReader<R>,
+    writer: W,
+    registration: RuntimeRegistrationNotification,
+) -> Result<ScenePeerHandle>
+where
+    R: AsyncRead + Unpin + Send + 'static,
+    W: AsyncWrite + Unpin + Send + 'static,
+{
     registration
         .validate()
         .map_err(BrainregiondError::Protocol)?;
@@ -533,15 +547,7 @@ where
     let (handle, commands, lifecycle) = registry.attach(auth, registration.params).await?;
     let task_handle = handle.clone();
     tokio::spawn(async move {
-        run_peer_session(
-            registry,
-            task_handle,
-            reader,
-            write_half,
-            commands,
-            lifecycle,
-        )
-        .await;
+        run_peer_session(registry, task_handle, reader, writer, commands, lifecycle).await;
     });
     Ok(handle)
 }

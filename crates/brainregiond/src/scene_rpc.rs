@@ -140,13 +140,17 @@ impl RuntimeRegistrationNotification {
         {
             return Err("runtime error must not exceed 4096 bytes".to_owned());
         }
-        if self
-            .params
-            .pairing_proof
-            .as_ref()
-            .is_some_and(|proof| proof.len() > 2048)
-        {
-            return Err("pairingProof must not exceed 2048 bytes".to_owned());
+        if let Some(proof) = &self.params.pairing_proof {
+            let encoded = proof
+                .strip_prefix("hmac-sha256.")
+                .ok_or_else(|| "pairingProof must use the hmac-sha256 proof format".to_owned())?;
+            if encoded.len() != 43
+                || encoded
+                    .bytes()
+                    .any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+            {
+                return Err("pairingProof must contain a 32-byte base64url HMAC".to_owned());
+            }
         }
         if self.params.capabilities.is_empty() {
             return Err("runtime must advertise at least one capability".to_owned());

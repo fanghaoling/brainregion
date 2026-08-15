@@ -2,7 +2,9 @@ use std::env;
 use std::process::ExitCode;
 
 use brainregiond::config::{DaemonConfig, RunMode, usage};
-use brainregiond::server::{probe, serve_stdio_until, termination_signal};
+use brainregiond::scene_peer::ScenePeerRegistry;
+use brainregiond::scene_pipe::ScenePipeListener;
+use brainregiond::server::{probe, serve_stdio_until_with_scene_peers, termination_signal};
 use brainregiond::supervisor::McpSupervisor;
 use brainregiond::{CONTROL_SCHEMA_JSON, DAEMON_NAME, DAEMON_VERSION, Result, SCENE_SCHEMA_JSON};
 
@@ -73,7 +75,45 @@ async fn run() -> Result<()> {
                 println!("{rendered}");
             }
         }
-        RunMode::Serve => serve_stdio_until(supervisor, termination).await?,
+        RunMode::Serve => {
+            let scene_peers = ScenePeerRegistry::default();
+            let scene_pipe = match config.scene_pipe.clone() {
+                Some(pipe_config) => {
+                    match ScenePipeListener::start(pipe_config, scene_peers.clone()) {
+                        Ok(listener) => {
+                            eprintln!(
+                                "{DAEMON_NAME}: Runtime scene pipe listening at {}",
+                                listener.pipe_path()
+                            );
+                            Some(listener)
+                        }
+                        Err(error) => {
+                            let cleanup = supervisor.shutdown().await;
+                            return combine_probe_and_cleanup(Err(error), cleanup);
+                        }
+                    }
+                }
+                None => None,
+            };
+
+            let serve_result = if let Some(listener) = &scene_pipe {
+                let listener_failure = listener.failure_signal();
+                let shutdown = async move {
+                    tokio::select! {
+                        result = &mut termination => result,
+                        result = listener_failure => result,
+                    }
+                };
+                serve_stdio_until_with_scene_peers(supervisor, scene_peers, shutdown).await
+            } else {
+                serve_stdio_until_with_scene_peers(supervisor, scene_peers, termination).await
+            };
+            let pipe_cleanup = match scene_pipe {
+                Some(listener) => listener.shutdown().await,
+                None => Ok(()),
+            };
+            combine_probe_and_cleanup(serve_result, pipe_cleanup)?;
+        }
         RunMode::Schema | RunMode::SceneSchema | RunMode::Help | RunMode::Version => unreachable!(),
     }
     Ok(())
