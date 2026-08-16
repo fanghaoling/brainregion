@@ -128,6 +128,10 @@ impl SceneMethod {
             Self::LogsPoll => SceneCapability::LogsRead,
         }
     }
+
+    fn may_mutate_scene(self) -> bool {
+        matches!(self, Self::Apply | Self::Undo)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
@@ -413,8 +417,9 @@ impl ScenePeerHandle {
         let reply = match tokio::time::timeout(timeout, receiver).await {
             Ok(Ok(reply)) => reply,
             Ok(Err(_)) => {
-                return Err(BrainregiondError::Protocol(
-                    "Runtime Scene RPC session ended before responding".to_owned(),
+                return Err(scene_request_disconnected_error(
+                    method,
+                    "Runtime Scene RPC session ended before responding",
                 ));
             }
             Err(_) => {
@@ -429,7 +434,9 @@ impl ScenePeerHandle {
             PeerReply::Success(result) => Ok(result),
             PeerReply::UpstreamError(error) => Err(BrainregiondError::Upstream(error)),
             PeerReply::Rejected(message) => Err(scene_rpc_error(-32003, message, true)),
-            PeerReply::Disconnected(message) => Err(scene_rpc_error(-32011, message, true)),
+            PeerReply::Disconnected(message) => {
+                Err(scene_request_disconnected_error(method, message))
+            }
             PeerReply::TimedOut => Err(BrainregiondError::Timeout {
                 operation: method.as_str().to_owned(),
                 timeout,
@@ -853,6 +860,22 @@ fn scene_rpc_error(code: i64, message: impl Into<String>, retryable: bool) -> Br
         "code": code,
         "message": message.into(),
         "data": {"retryable": retryable},
+    }))
+}
+
+fn scene_request_disconnected_error(
+    method: SceneMethod,
+    message: impl Into<String>,
+) -> BrainregiondError {
+    let outcome_unknown = method.may_mutate_scene();
+    let mut data = json!({"retryable": !outcome_unknown});
+    if outcome_unknown {
+        data["outcome"] = json!("unknown");
+    }
+    BrainregiondError::Upstream(json!({
+        "code": -32011,
+        "message": message.into(),
+        "data": data,
     }))
 }
 

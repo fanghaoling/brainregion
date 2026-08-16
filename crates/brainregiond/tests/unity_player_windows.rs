@@ -128,6 +128,17 @@ fn assert_upstream_error(error: BrainregiondError, code: i64, reason: &str) -> V
     payload
 }
 
+fn assert_disconnected_unknown_outcome(error: BrainregiondError) {
+    match error {
+        BrainregiondError::Upstream(payload) => {
+            assert_eq!(payload["code"], -32011);
+            assert_eq!(payload["data"]["outcome"], "unknown");
+            assert_eq!(payload["data"]["retryable"], false);
+        }
+        error => panic!("expected disconnected/unknown apply outcome, got {error}"),
+    }
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a locally built Windows IL2CPP smoke Player"]
 async fn packaged_il2cpp_player_executes_transaction_and_reconnects() {
@@ -332,6 +343,135 @@ async fn packaged_il2cpp_player_executes_transaction_and_reconnects() {
         .await
         .unwrap_err();
     assert_upstream_error(replay_after_undo, -32016, "mutation_was_undone");
+
+    // A later property failure must reverse the earlier counter write, keep the
+    // revision unchanged, and permanently consume that mutation ID.
+    let rollback_mutation_id = "smoke-rollback-01";
+    let rollback_preview = second
+        .request(
+            SceneMethod::Preview,
+            json!({
+                "expectedRevision": 2,
+                "clientMutationId": rollback_mutation_id,
+                "commands": [{
+                    "kind": "set_properties",
+                    "objectId": SMOKE_OBJECT_ID,
+                    "componentId": SMOKE_COMPONENT_ID,
+                    "changes": [
+                        {"propertyId": "counter", "value": 13},
+                        {"propertyId": "inject_write_failure", "value": true},
+                    ],
+                }],
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    let rollback_apply_params = json!({
+        "previewToken": rollback_preview["previewToken"],
+        "expectedRevision": 2,
+        "clientMutationId": rollback_mutation_id,
+    });
+    let rolled_back = second
+        .request(
+            SceneMethod::Apply,
+            rollback_apply_params.clone(),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+    let rolled_back_payload = assert_upstream_error(rolled_back, -32013, "property_write_failed");
+    assert_eq!(rolled_back_payload["data"]["mutationStatus"], "rolledback");
+    assert_eq!(rolled_back_payload["data"]["lastKnownRevision"], 2);
+    assert_eq!(inspect_counter(&second).await, 1);
+
+    let rolled_back_replay = second
+        .request(SceneMethod::Apply, rollback_apply_params, REQUEST_TIMEOUT)
+        .await
+        .unwrap_err();
+    assert_upstream_error(
+        rolled_back_replay,
+        -32013,
+        "mutation_previously_rolled_back",
+    );
+
+    // The final test-only property disconnects the pipe during the last write.
+    // The client cannot know whether apply committed, so it must not invent a new
+    // mutation ID and retry. Reconnect and replay the exact request to query the
+    // session receipt instead.
+    let unknown_mutation_id = "smoke-response-lost-01";
+    let unknown_preview = second
+        .request(
+            SceneMethod::Preview,
+            json!({
+                "expectedRevision": 2,
+                "clientMutationId": unknown_mutation_id,
+                "commands": [{
+                    "kind": "set_properties",
+                    "objectId": SMOKE_OBJECT_ID,
+                    "componentId": SMOKE_COMPONENT_ID,
+                    "changes": [
+                        {"propertyId": "counter", "value": 23},
+                        {"propertyId": "disconnect_after_write", "value": true},
+                    ],
+                }],
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    let unknown_apply_params = json!({
+        "previewToken": unknown_preview["previewToken"],
+        "expectedRevision": 2,
+        "clientMutationId": unknown_mutation_id,
+    });
+    let second_epoch = second.connection_epoch();
+    let unknown_outcome = second
+        .request(
+            SceneMethod::Apply,
+            unknown_apply_params.clone(),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+    assert_disconnected_unknown_outcome(unknown_outcome);
+    drop(second);
+
+    let third = wait_for_peer(
+        &registry,
+        second_epoch,
+        PLAYER_RECONNECT_TIMEOUT,
+        &mut player,
+        &player_log,
+    )
+    .await;
+    assert_eq!(third.snapshot().scene_revision, 3);
+    assert_eq!(inspect_counter(&third).await, 23);
+
+    let confirmed = third
+        .request(SceneMethod::Apply, unknown_apply_params, REQUEST_TIMEOUT)
+        .await
+        .unwrap();
+    assert_eq!(confirmed["sceneRevision"], 3);
+    assert_eq!(confirmed["clientMutationId"], unknown_mutation_id);
+    assert_eq!(confirmed["idempotentReplay"], true);
+    let unknown_undo_id = confirmed["undoId"]
+        .as_str()
+        .expect("confirmed apply must retain its undo id");
+    let unknown_undone = third
+        .request(
+            SceneMethod::Undo,
+            json!({"expectedRevision": 3, "undoId": unknown_undo_id}),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(unknown_undone["sceneRevision"], 4);
+    assert_eq!(
+        unknown_undone["undoneClientMutationId"],
+        unknown_mutation_id
+    );
+    assert_eq!(inspect_counter(&third).await, 1);
 
     registry.close_all().await;
     listener.shutdown().await.unwrap();

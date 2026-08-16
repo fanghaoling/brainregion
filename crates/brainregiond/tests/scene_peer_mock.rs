@@ -264,6 +264,47 @@ async fn capability_checks_and_disconnects_fail_closed() {
 }
 
 #[tokio::test]
+async fn mutating_request_disconnect_is_an_unknown_non_retryable_outcome() {
+    let registry = ScenePeerRegistry::default();
+    let auth = ScenePeerAuth::new("write-player", [SceneCapability::SceneWrite]).unwrap();
+    let (daemon_stream, player_stream) = tokio::io::duplex(32 * 1024);
+
+    let player = tokio::spawn(async move {
+        let (read_half, mut write_half) = tokio::io::split(player_stream);
+        let mut reader = BufReader::new(read_half);
+        write_frame(&mut write_half, &registration("write-session", 0)).await;
+        let request = read_frame(&mut reader).await.unwrap();
+        assert_eq!(request["method"], "scene/apply");
+        // The Player may have committed before the stream disappeared.
+    });
+
+    let handle = accept_scene_peer(registry, auth, daemon_stream, TEST_TIMEOUT)
+        .await
+        .unwrap();
+    let error = handle
+        .request(
+            SceneMethod::Apply,
+            json!({
+                "previewToken": "preview-1",
+                "expectedRevision": 0,
+                "clientMutationId": "mutation-1",
+            }),
+            TEST_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+    match error {
+        BrainregiondError::Upstream(fault) => {
+            assert_eq!(fault["code"], -32011);
+            assert_eq!(fault["data"]["outcome"], "unknown");
+            assert_eq!(fault["data"]["retryable"], false);
+        }
+        other => panic!("expected structured unknown outcome, got {other}"),
+    }
+    player.await.unwrap();
+}
+
+#[tokio::test]
 async fn rejects_policy_grants_that_runtime_did_not_advertise() {
     let registry = ScenePeerRegistry::default();
     let auth = ScenePeerAuth::new("limited-player", [SceneCapability::LogsRead]).unwrap();

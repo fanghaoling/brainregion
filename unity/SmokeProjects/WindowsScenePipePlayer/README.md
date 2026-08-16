@@ -31,11 +31,16 @@ cargo test --locked -p brainregiond --test unity_player_windows `
 ```
 
 The generated scene contains one stable, explicitly writable object with an
-AOT-safe integer property adapter. The Rust test creates a fresh current-user
-pipe and random pairing secret, launches the packaged Player, verifies property
-bounds, preview isolation, apply, stale-revision rejection, exact idempotent
-replay after reconnect, and Undo. It also verifies that an undone mutation cannot
-replay as success, and kills only the child Player it launched.
+AOT-safe integer property adapter. Two additional test-only properties inject a
+late adapter write failure or close the pipe during the last write. The Rust test
+creates a fresh current-user pipe and random pairing secret, launches the
+packaged Player, and verifies property bounds, preview isolation, apply,
+stale-revision rejection, exact idempotent replay after reconnect, and Undo. It
+also proves that a failed multi-property write is rolled back without advancing
+the revision, and that a committed apply whose response was lost is reported as
+an unknown non-retryable outcome and can be confirmed by replaying only the exact
+same mutation request after reconnect. The test kills only the child Player it
+launched.
 
 The fixture currently pins `6000.0.59f2`, the installed editor with Windows
 IL2CPP support on the verification machine. The package itself is also compiled

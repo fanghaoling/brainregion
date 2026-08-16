@@ -1,6 +1,6 @@
 # Unity Player 运行时开放编辑与 Scene RPC v1
 
-状态：Unity Runtime 核心、Rust Runtime Peer 会话和 opt-in Windows 命名管道客户端已实现；独立 Windows IL2CPP Player 的注册、读取、写事务、Undo 与断线重连闭环已通过，尚未接入实际 VR 项目。
+状态：Unity Runtime 核心、Rust Runtime Peer 会话和 opt-in Windows 命名管道客户端已实现；独立 Windows IL2CPP Player 的注册、读取、写事务、失败回滚、响应丢失查明、Undo 与断线重连闭环已通过，尚未接入实际 VR 项目。
 
 ## 结论
 
@@ -113,9 +113,9 @@ Runtime entity
 
 1. Windows 命名管道客户端、challenge/HMAC proof、有界 reader/writer queue 和重连已完成；Unity 6000.3 EditMode 测试已验证 Rust/C# golden proof、过期/越权 challenge、帧边界和队列背压。
 2. 独立最小 Windows x64 IL2CPP Player 已完成真实读写 smoke：高熵随机密钥配对、`runtime/info`、`scene/hierarchy`、属性范围拒绝、preview 零副作用、apply、stale revision 拒绝、同主体重连后的精确幂等 replay、Undo，以及 Undo 后拒绝旧成功回放均通过。
-3. 增加注入 adapter 写异常/回滚失败和“响应前断线或超时”的 Player 测试，验证 outcome unknown 的查明流程；再经你确认后把 package 作为本地 UPM dependency 接入 VR 项目，做 Unity 6000.3 Windows IL2CPP Development build。
-4. 补 Catalog 生成、属性 binding codegen 和更高 stripping level smoke；确认后再做 Android ARM64/Quest。
-5. 增加 `WorldDocument` 存档、Addressables provider 和 Behavior Graph；文本脚本解释器最后接入。
+3. 故障闭环已完成：同一事务先写 counter、再注入 adapter 写失败，实际 Player 会恢复 counter、保持 revision 不变并永久拒绝复用该 mutation ID；另一个事务在最后一次写入时主动断开管道，daemon 返回 `outcome=unknown, retryable=false`，Player 以新 epoch 重连后保留已提交 revision，并只用原 `clientMutationId + previewToken + expectedRevision` 精确回放得到幂等 receipt，没有二次修改。
+4. 下一步补 Catalog 生成、属性 binding codegen 和更高 stripping level smoke；确认后再把 package 作为本地 UPM dependency 接入 VR 项目，做 Unity 6000.3 Windows IL2CPP Development build。
+5. Windows 闭环稳定后做 Android ARM64/Quest，再增加 `WorldDocument` 存档、Addressables provider 和 Behavior Graph；文本脚本解释器最后接入。
 
 独立 smoke 项目位于 `unity/SmokeProjects/WindowsScenePipePlayer/`。它只用于集成验证，不是 VR 项目模板；构建输出位于 `target/`，不会提交到仓库。构建和测试命令见该目录的 `README.md`。
 
