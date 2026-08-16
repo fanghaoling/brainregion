@@ -164,6 +164,99 @@ namespace BrainRegion.RuntimeBridge.Tests
             }
         }
 
+        [Test]
+        public async Task WorldDocumentStorageRunsOffThreadAndEnforcesDigestCas()
+        {
+            string root = Path.Combine(
+                Path.GetTempPath(),
+                "brainregion-world-storage-" + System.Guid.NewGuid().ToString("N"));
+            try
+            {
+                int callerThread = Thread.CurrentThread.ManagedThreadId;
+                var document = new JObject
+                {
+                    ["savedRevision"] = 7,
+                    ["savedUnixMs"] = 1786848000000L,
+                    ["metadata"] = new JObject { ["label"] = "worker" },
+                };
+                int workerThread = 0;
+                JObject first = null;
+                RpcFailure writeFailure = null;
+                bool written = await Task.Run(() =>
+                {
+                    workerThread = Thread.CurrentThread.ManagedThreadId;
+                    return WorldDocumentStorage.TryWrite(
+                        root,
+                        "default",
+                        null,
+                        document,
+                        out first,
+                        out writeFailure);
+                });
+
+                Assert.That(written, Is.True, writeFailure?.Message);
+                Assert.That(workerThread, Is.Not.EqualTo(callerThread));
+                Assert.That((string)first["digest"], Does.StartWith("sha256:"));
+                Assert.That(WorldDocumentStorage.TryRead(
+                    root,
+                    "default",
+                    out JObject envelope,
+                    out RpcFailure readFailure), Is.True, readFailure?.Message);
+                Assert.That(JToken.DeepEquals(envelope["document"], document), Is.True);
+                Assert.That(WorldDocumentStorage.TryList(
+                    root,
+                    out JObject listed,
+                    out RpcFailure listFailure), Is.True, listFailure?.Message);
+                Assert.That((string)listed["slots"][0]["slot"], Is.EqualTo("default"));
+
+                var changed = (JObject)document.DeepClone();
+                changed["savedRevision"] = 8;
+                Assert.That(WorldDocumentStorage.TryWrite(
+                    root,
+                    "default",
+                    "sha256:ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff",
+                    changed,
+                    out _,
+                    out RpcFailure conflict), Is.False);
+                Assert.That((string)conflict.Data["reason"], Is.EqualTo("slot_digest_conflict"));
+
+                File.WriteAllText(
+                    Path.Combine(root, "default.brworld.json"),
+                    "{\"digest\":\"sha256:broken\"}",
+                    new UTF8Encoding(false));
+                Assert.That(WorldDocumentStorage.TryRead(
+                    root,
+                    "default",
+                    out _,
+                    out RpcFailure corrupt), Is.False);
+                Assert.That(corrupt, Is.Not.Null);
+                Assert.That(WorldDocumentStorage.TryList(
+                    root,
+                    out JObject corruptList,
+                    out RpcFailure corruptListFailure), Is.True, corruptListFailure?.Message);
+                Assert.That(corruptList["slots"], Is.Empty);
+                Assert.That(
+                    (string)corruptList["corruptSlots"][0]["slot"],
+                    Is.EqualTo("default"));
+
+                using (var gate = new SemaphoreSlim(1, 1))
+                {
+                    RuntimeSceneController.WorldPersistenceWork expired =
+                        RuntimeSceneController.WorldPersistenceWork.CreateList(root, gate);
+                    expired.DeadlineUnixMs = System.DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() - 1;
+                    RuntimeSceneController.WorldPersistenceWorkerResult expiredResult = expired.Execute();
+                    Assert.That(expiredResult.Result, Is.Null);
+                    Assert.That(
+                        (string)expiredResult.Failure.Data["reason"],
+                        Is.EqualTo("deadline_elapsed"));
+                }
+            }
+            finally
+            {
+                if (Directory.Exists(root)) Directory.Delete(root, true);
+            }
+        }
+
         private static string BuildChallenge(string grant)
         {
             return new JObject

@@ -116,7 +116,9 @@ Runtime entity
 
 `loadPreview` 会先校验 product、build、scene、Catalog schema、基础对象身份、Prefab 白名单、父子图和所有持久化属性，返回与主体、连接 epoch、revision、mutation ID 和文档摘要绑定的短时 token，且不修改场景。`load` 在主线程再次校验后恢复基础对象、删除多余的 Catalog 实例并按原 object ID 重建缺失实例；失败会逆序回滚，回滚不完整时进入 degraded 状态并推进 dirty revision。成功加载形成外部历史屏障，旧 preview 和 Undo 不再覆盖新世界。
 
-当前 JSON 序列化和最多 1 MiB 的文件读写是用户显式触发、配额受限的同步主线程操作。Windows smoke 已验证正确性，但在真实 VR 中启用前仍应把文件读取、摘要和序列化移到后台，只把最终验证与世界应用留在 Unity 主线程；Android/Quest 的持久化路径、原子替换语义和掉电恢复也必须单独实机验证。
+经 `SceneRpcDispatcher` 调用时，目录扫描、严格 JSON 读取、编码、SHA-256 和最多 1 MiB 的原子文件写入现已进入有界的后台持久化队列，并按 Player 实例串行执行以避免同 slot 竞态；controller 为兼容保留的直接方法仍是同步调用，不应放进延迟敏感帧。Unity 主线程仍负责捕获白名单逻辑状态、兼容性/adapter 校验、加载计划和最终世界事务；这些步骤不会在后台访问 Unity 对象。Dispatcher 停用期间仍可能完成的 save 会返回 `operation_outcome_unknown` 且禁止自动换 mutation ID 重试，后台结果回到主线程后仍会登记原 receipt。
+
+真实 VR 项目大量使用 Entities 1.4.8、SubScene、IJobEntity 和 ECB。它不需要把 BrainRegion 整体 ECS 化；应使用独立 companion provider，把角色/毛发/布料等逻辑 owner 投影给 RPC，并复用现有后台 Fetch → owner 线程 PumpCommits → ECB 模式。粒子、约束和原始 `Entity` 不进入 RPC/存档。完整决策见 [Unity Runtime Bridge 的 ECS 混合接入决策](unity_runtime_ecs_bridge.zh-CN.md)。Android/Quest 的持久化路径、线程、原子替换语义和掉电恢复仍必须单独实机验证。
 
 ## “实时改脚本”的可行定义
 
@@ -136,7 +138,7 @@ Runtime entity
 4. Catalog 自动生成、属性 binding codegen 和 High managed stripping smoke 已完成：EditMode 验证生成源码确定性、无反射成员访问、GUID prefabId 与 tag 排序，并拒绝 active Catalog root；实际 Player 验证生成整数属性的 write/Undo，以及 Catalog prefab 的 staging/spawn/Undo。probe 证明 Prefab 的 `Awake` 和 `OnEnable` 读取到正式 object ID。
 5. 运行时生命周期闭环已完成：打包 Player 实测 active 动态对象自动注册和销毁清理；显式开启 `includeLoadedScenes` 后，additive scene root 会加入和退出 registry；每次应用侧生命周期变化形成一次外部 mutation barrier，没有残留死引用。
 6. `WorldDocument v1` 已完成：实际 Player 验证原子 save、slot list、preview 零副作用、摘要 CAS、精确幂等 replay、属性恢复，以及按原 ID 重建已删除的 Catalog Prefab。
-7. 下一阶段建议先把持久化序列化/I/O 移出 Unity 主线程，并补齐异常中断恢复测试；再经你确认把 package 作为本地 UPM dependency 接入 VR 项目。随后做 Android ARM64/Quest、Addressables provider 和 Behavior Graph；文本脚本解释器最后接入。
+7. 持久化目录、JSON、摘要和文件 I/O 已移出 Unity 主线程，损坏文件隔离、摘要 CAS 和排队截止时间已有测试；下一步补齐 Dispatcher 停用/重启与后台队列压力测试，并实现可选的 Entities owner snapshot provider。经你确认后再把 package 作为本地 UPM dependency 接入 VR 项目。随后做 Android ARM64/Quest、Addressables provider 和 Behavior Graph；文本脚本解释器最后接入。
 
 独立 smoke 项目位于 `unity/SmokeProjects/WindowsScenePipePlayer/`。它只用于集成验证，不是 VR 项目模板；构建输出位于 `target/`，不会提交到仓库。构建和测试命令见该目录的 `README.md`。
 

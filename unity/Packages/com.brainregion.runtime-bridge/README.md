@@ -120,11 +120,22 @@ connection epoch, revision, mutation ID, and document digest. Load can recreate
 missing catalog instances with their saved object IDs and rolls back on failure.
 Successful load creates an Undo/history barrier.
 
-Serialization, hashing, and bounded file I/O are currently synchronous explicit
-main-thread operations. Before enabling persistence in a latency-sensitive VR
-product, move those phases to background work and leave only final validation
-and scene application on the Unity thread. Android/Quest storage and crash-
-recovery behavior have not yet been smoke-tested.
+When requests enter through `SceneRpcDispatcher`, directory enumeration, strict
+JSON parsing, serialization, hashing, and bounded file I/O run in a serialized
+background worker. The controller's direct compatibility methods remain
+synchronous and should not be called from a latency-sensitive frame. Unity state capture,
+compatibility/adapter validation, load planning, and the final scene transaction
+remain on the main thread. Up to eight deferred persistence requests are bounded
+at the dispatcher while one storage operation executes at a time. A save that
+may continue while the dispatcher stops reports `operation_outcome_unknown`;
+its exact receipt is still recorded when the worker returns. Android/Quest
+storage, threading, and crash-recovery behavior have not yet been smoke-tested.
+
+Do not add an Entities dependency to this base package merely because a product
+uses ECS. A companion provider should copy bounded logical owner snapshots at a
+known ECS system boundary and submit mutations through a bounded queue plus ECB.
+Raw Entity handles, particles, constraints, and per-frame simulation state must
+not be exposed as Scene RPC objects or persisted.
 
 The package includes EditMode tests for the Rust/C# pairing golden vector,
 expired and over-granted challenges, JSONL frame bounds, writer backpressure,

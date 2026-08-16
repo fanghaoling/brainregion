@@ -1,10 +1,7 @@
 using System;
 using System.Collections.Generic;
-using System.IO;
 using System.Linq;
-using System.Security.Cryptography;
-using System.Text;
-using Newtonsoft.Json;
+using System.Threading;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 using UnityEngine.SceneManagement;
@@ -14,11 +11,8 @@ namespace BrainRegion.RuntimeBridge
     public sealed partial class RuntimeSceneController
     {
         private const string WorldFormatVersion = "brainregion.world.v1";
-        private const int MaxWorldSlots = 32;
         private const int MaxWorldEntities = 256;
         private const int MaxWorldProperties = 2048;
-        private const int MaxWorldFileBytes = 1024 * 1024;
-        private const long MaxWorldStorageBytes = 16L * 1024L * 1024L;
         private const int MaxWorldLoadPreviews = 16;
         private const int MaxWorldReceipts = 128;
 
@@ -28,64 +22,20 @@ namespace BrainRegion.RuntimeBridge
             new Dictionary<string, WorldSaveReceipt>(StringComparer.Ordinal);
         private readonly Dictionary<string, WorldLoadReceipt> worldLoadReceipts =
             new Dictionary<string, WorldLoadReceipt>(StringComparer.Ordinal);
+        private readonly HashSet<string> pendingWorldSaveMutations =
+            new HashSet<string>(StringComparer.Ordinal);
+        private readonly HashSet<string> pendingWorldLoadMutations =
+            new HashSet<string>(StringComparer.Ordinal);
+        private readonly SemaphoreSlim worldStorageGate = new SemaphoreSlim(1, 1);
 
         public bool TryListWorldSlots(out JObject result, out RpcFailure failure)
         {
             AssertMainThread();
-            result = null;
-            failure = null;
-            try
-            {
-                string root = GetWorldStorageRoot();
-                var slots = new JArray();
-                var corruptSlots = new JArray();
-                if (Directory.Exists(root))
-                {
-                    foreach (string path in Directory.GetFiles(root, "*.brworld.json")
-                                 .OrderBy(candidate => candidate, StringComparer.Ordinal))
-                    {
-                        string slot = Path.GetFileName(path).Substring(
-                            0,
-                            Path.GetFileName(path).Length - ".brworld.json".Length);
-                        if (!TryReadWorldEnvelope(slot, out JObject envelope, out RpcFailure readFailure))
-                        {
-                            corruptSlots.Add(new JObject
-                            {
-                                ["slot"] = slot,
-                                ["reason"] = (string)readFailure.Data?["reason"] ?? "invalid_world_document",
-                            });
-                            continue;
-                        }
-                        JObject document = (JObject)envelope["document"];
-                        slots.Add(new JObject
-                        {
-                            ["slot"] = slot,
-                            ["digest"] = envelope["digest"].DeepClone(),
-                            ["savedRevision"] = document["savedRevision"].DeepClone(),
-                            ["savedUnixMs"] = document["savedUnixMs"].DeepClone(),
-                            ["label"] = document["metadata"]?["label"]?.DeepClone() ?? JValue.CreateNull(),
-                            ["bytes"] = new FileInfo(path).Length,
-                        });
-                    }
-                }
-                result = new JObject
-                {
-                    ["slots"] = slots,
-                    ["corruptSlots"] = corruptSlots,
-                    ["maximumSlots"] = MaxWorldSlots,
-                    ["maximumFileBytes"] = MaxWorldFileBytes,
-                    ["maximumStorageBytes"] = MaxWorldStorageBytes,
-                };
-                return true;
-            }
-            catch (Exception exception)
-            {
-                failure = PersistenceFailure(
-                    "Could not enumerate WorldDocument slots: " + exception.Message,
-                    "slot_list_failed",
-                    true);
-                return false;
-            }
+            WorldPersistenceWorkerResult worker =
+                WorldPersistenceWork.CreateList(GetWorldStorageRoot(), worldStorageGate).Execute();
+            result = worker.Result;
+            failure = worker.Failure;
+            return failure == null;
         }
 
         public bool TrySaveWorld(
@@ -95,6 +45,26 @@ namespace BrainRegion.RuntimeBridge
             out RpcFailure failure)
         {
             AssertMainThread();
+            if (!TryBeginWorldSave(
+                    principalId,
+                    request,
+                    out WorldPersistenceWork work,
+                    out result,
+                    out failure))
+                return false;
+            if (work == null) return true;
+            return TryCompleteWorldPersistence(work, work.Execute(), out result, out failure);
+        }
+
+        internal bool TryBeginWorldSave(
+            string principalId,
+            WorldSaveRequest request,
+            out WorldPersistenceWork work,
+            out JObject result,
+            out RpcFailure failure)
+        {
+            AssertMainThread();
+            work = null;
             result = null;
             failure = null;
             if (!TryValidateWorldMutationHeader(
@@ -128,7 +98,15 @@ namespace BrainRegion.RuntimeBridge
                 result["idempotentReplay"] = true;
                 return true;
             }
-            if (worldSaveReceipts.Count >= MaxWorldReceipts)
+            if (pendingWorldSaveMutations.Contains(receiptKey))
+            {
+                failure = PersistenceFailure(
+                    "The same WorldDocument save mutation is already in progress",
+                    "save_in_progress",
+                    true);
+                return false;
+            }
+            if (worldSaveReceipts.Count + pendingWorldSaveMutations.Count >= MaxWorldReceipts)
             {
                 failure = PersistenceFailure(
                     "World save receipt capacity is exhausted for this Player session",
@@ -154,90 +132,15 @@ namespace BrainRegion.RuntimeBridge
                     "persistent_capture_failed");
                 return false;
             }
-            string digest = ComputeWorldDigest(document);
-            var envelope = new JObject
-            {
-                ["digest"] = digest,
-                ["document"] = document,
-            };
-            string serialized = envelope.ToString(Formatting.None);
-            int byteCount = Encoding.UTF8.GetByteCount(serialized);
-            if (byteCount > MaxWorldFileBytes)
-            {
-                failure = PersistenceFailure(
-                    $"WorldDocument requires {byteCount} bytes; limit is {MaxWorldFileBytes}",
-                    "world_document_too_large");
-                return false;
-            }
-
-            try
-            {
-                string root = GetWorldStorageRoot();
-                Directory.CreateDirectory(root);
-                string target = GetWorldSlotPath(request.Slot);
-                string[] existing = Directory.GetFiles(root, "*.brworld.json");
-                if (!File.Exists(target) && existing.Length >= MaxWorldSlots)
-                {
-                    failure = PersistenceFailure(
-                        $"WorldDocument slot quota of {MaxWorldSlots} is full",
-                        "slot_quota_exceeded");
-                    return false;
-                }
-
-                string currentDigest = null;
-                long currentBytes = 0;
-                if (File.Exists(target))
-                {
-                    currentBytes = new FileInfo(target).Length;
-                    if (!TryReadWorldEnvelope(request.Slot, out JObject current, out RpcFailure readFailure))
-                    {
-                        failure = readFailure;
-                        return false;
-                    }
-                    currentDigest = (string)current["digest"];
-                }
-                if (!string.IsNullOrEmpty(request.ExpectedSlotDigest) &&
-                    !string.Equals(currentDigest, request.ExpectedSlotDigest, StringComparison.Ordinal))
-                {
-                    failure = PersistenceFailure(
-                        "WorldDocument slot digest changed before save",
-                        "slot_digest_conflict",
-                        true);
-                    failure.Data["expectedSlotDigest"] = request.ExpectedSlotDigest;
-                    failure.Data["actualSlotDigest"] = currentDigest == null
-                        ? JValue.CreateNull()
-                        : new JValue(currentDigest);
-                    return false;
-                }
-                long totalBytes = existing.Sum(path => new FileInfo(path).Length) - currentBytes + byteCount;
-                if (totalBytes > MaxWorldStorageBytes)
-                {
-                    failure = PersistenceFailure(
-                        $"WorldDocument storage would exceed {MaxWorldStorageBytes} bytes",
-                        "storage_quota_exceeded");
-                    return false;
-                }
-
-                AtomicWriteWorld(target, serialized);
-                result = new JObject
-                {
-                    ["slot"] = request.Slot,
-                    ["digest"] = digest,
-                    ["savedRevision"] = sceneRevision,
-                    ["bytes"] = byteCount,
-                    ["idempotentReplay"] = false,
-                };
-                worldSaveReceipts.Add(receiptKey, new WorldSaveReceipt(request, result));
-                return true;
-            }
-            catch (Exception exception)
-            {
-                failure = PersistenceFailure(
-                    "WorldDocument save failed: " + exception.Message,
-                    "save_failed",
-                    true);
-                return false;
-            }
+            WorldSaveRequest requestSnapshot = CloneWorldSaveRequest(request);
+            pendingWorldSaveMutations.Add(receiptKey);
+            work = WorldPersistenceWork.CreateSave(
+                GetWorldStorageRoot(),
+                worldStorageGate,
+                receiptKey,
+                requestSnapshot,
+                document);
+            return true;
         }
 
         public bool TryPreviewWorldLoad(
@@ -248,7 +151,28 @@ namespace BrainRegion.RuntimeBridge
             out RpcFailure failure)
         {
             AssertMainThread();
-            result = null;
+            if (!TryBeginWorldLoadPreview(
+                    principalId,
+                    connectionEpoch,
+                    request,
+                    out WorldPersistenceWork work,
+                    out failure))
+            {
+                result = null;
+                return false;
+            }
+            return TryCompleteWorldPersistence(work, work.Execute(), out result, out failure);
+        }
+
+        internal bool TryBeginWorldLoadPreview(
+            string principalId,
+            long connectionEpoch,
+            WorldLoadPreviewRequest request,
+            out WorldPersistenceWork work,
+            out RpcFailure failure)
+        {
+            AssertMainThread();
+            work = null;
             failure = null;
             CleanupWorldLoadProposals();
             if (!TryValidateWorldMutationHeader(
@@ -260,6 +184,7 @@ namespace BrainRegion.RuntimeBridge
                 return false;
             string mutationKey = WorldMutationKey(principalId, request.ClientMutationId);
             if (worldLoadReceipts.ContainsKey(mutationKey) ||
+                pendingWorldLoadMutations.Contains(mutationKey) ||
                 worldLoadProposals.Values.Any(candidate => candidate.MutationKey == mutationKey))
             {
                 failure = PersistenceFailure(
@@ -279,7 +204,7 @@ namespace BrainRegion.RuntimeBridge
                     "scene_revision_exhausted");
                 return false;
             }
-            if (worldLoadProposals.Count >= MaxWorldLoadPreviews)
+            if (worldLoadProposals.Count + pendingWorldLoadMutations.Count >= MaxWorldLoadPreviews)
             {
                 failure = PersistenceFailure(
                     "Too many WorldDocument load previews are pending",
@@ -287,44 +212,156 @@ namespace BrainRegion.RuntimeBridge
                     true);
                 return false;
             }
-            if (!TryReadWorldEnvelope(request.Slot, out JObject envelope, out failure) ||
-                !TryBuildWorldLoadPlan((JObject)envelope["document"], out WorldLoadPlan plan, out failure))
-                return false;
-
-            string token = Guid.NewGuid().ToString("N");
-            long expiresAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() +
-                checked((long)(Mathf.Max(1f, previewLifetimeSeconds) * 1000f));
-            var proposal = new WorldLoadProposal
-            {
-                Token = token,
-                MutationKey = mutationKey,
-                PrincipalId = principalId,
-                ConnectionEpoch = connectionEpoch,
-                Slot = request.Slot,
-                ClientMutationId = request.ClientMutationId,
-                BaseRevision = sceneRevision,
-                ExpiresAtUnixMs = expiresAt,
-                Digest = (string)envelope["digest"],
-                Document = (JObject)envelope["document"].DeepClone(),
-            };
-            worldLoadProposals.Add(token, proposal);
-            result = new JObject
-            {
-                ["previewToken"] = token,
-                ["slot"] = request.Slot,
-                ["digest"] = proposal.Digest,
-                ["baseRevision"] = sceneRevision,
-                ["clientMutationId"] = request.ClientMutationId,
-                ["expiresAtUnixMs"] = expiresAt,
-                ["summary"] = new JObject
-                {
-                    ["entities"] = plan.DocumentEntities.Count,
-                    ["create"] = plan.CreateCount,
-                    ["reuse"] = plan.ReuseCount,
-                    ["remove"] = plan.Remove.Count,
-                },
-            };
+            WorldLoadPreviewRequest requestSnapshot = CloneWorldLoadPreviewRequest(request);
+            pendingWorldLoadMutations.Add(mutationKey);
+            work = WorldPersistenceWork.CreateLoadPreview(
+                GetWorldStorageRoot(),
+                worldStorageGate,
+                mutationKey,
+                principalId,
+                connectionEpoch,
+                requestSnapshot);
             return true;
+        }
+
+        internal WorldPersistenceWork BeginWorldSlotList()
+        {
+            AssertMainThread();
+            return WorldPersistenceWork.CreateList(GetWorldStorageRoot(), worldStorageGate);
+        }
+
+        internal bool TryCompleteWorldPersistence(
+            WorldPersistenceWork work,
+            WorldPersistenceWorkerResult worker,
+            out JObject result,
+            out RpcFailure failure)
+        {
+            AssertMainThread();
+            result = null;
+            failure = null;
+            if (work == null || worker == null)
+            {
+                failure = PersistenceFailure(
+                    "WorldDocument background operation did not produce a result",
+                    "persistence_worker_failed");
+                return false;
+            }
+            if (worker.Failure == null && worker.Result == null)
+            {
+                worker = new WorldPersistenceWorkerResult(
+                    null,
+                    PersistenceFailure(
+                        "WorldDocument background operation returned no result",
+                        "persistence_worker_failed"));
+            }
+
+            switch (work.Kind)
+            {
+                case WorldPersistenceWorkKind.List:
+                    result = worker.Result;
+                    failure = worker.Failure;
+                    return failure == null;
+
+                case WorldPersistenceWorkKind.Save:
+                    pendingWorldSaveMutations.Remove(work.MutationKey);
+                    if (worker.Failure != null)
+                    {
+                        failure = worker.Failure;
+                        return false;
+                    }
+                    result = worker.Result;
+                    if (!worldSaveReceipts.ContainsKey(work.MutationKey))
+                        worldSaveReceipts.Add(
+                            work.MutationKey,
+                            new WorldSaveReceipt(work.SaveRequest, result));
+                    return true;
+
+                case WorldPersistenceWorkKind.LoadPreview:
+                    pendingWorldLoadMutations.Remove(work.MutationKey);
+                    if (worker.Failure != null)
+                    {
+                        failure = worker.Failure;
+                        return false;
+                    }
+                    CleanupWorldLoadProposals();
+                    if (work.LoadPreviewRequest.ExpectedRevision != sceneRevision)
+                    {
+                        failure = RevisionFailure(work.LoadPreviewRequest.ExpectedRevision);
+                        return false;
+                    }
+                    if (sceneRevision >= 9007199254740991L)
+                    {
+                        failure = PersistenceFailure(
+                            "WorldDocument load cannot advance an exhausted scene revision",
+                            "scene_revision_exhausted");
+                        return false;
+                    }
+                    if (worldLoadProposals.Count >= MaxWorldLoadPreviews)
+                    {
+                        failure = PersistenceFailure(
+                            "Too many WorldDocument load previews are pending",
+                            "load_preview_capacity",
+                            true);
+                        return false;
+                    }
+                    JObject envelope = worker.Result;
+                    if (!TryBuildWorldLoadPlan(
+                            (JObject)envelope["document"],
+                            out WorldLoadPlan plan,
+                            out failure))
+                        return false;
+
+                    string token = Guid.NewGuid().ToString("N");
+                    long expiresAt = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() +
+                        checked((long)(Mathf.Max(1f, previewLifetimeSeconds) * 1000f));
+                    var proposal = new WorldLoadProposal
+                    {
+                        Token = token,
+                        MutationKey = work.MutationKey,
+                        PrincipalId = work.PrincipalId,
+                        ConnectionEpoch = work.ConnectionEpoch,
+                        Slot = work.LoadPreviewRequest.Slot,
+                        ClientMutationId = work.LoadPreviewRequest.ClientMutationId,
+                        BaseRevision = sceneRevision,
+                        ExpiresAtUnixMs = expiresAt,
+                        Digest = (string)envelope["digest"],
+                        Document = (JObject)envelope["document"].DeepClone(),
+                    };
+                    worldLoadProposals.Add(token, proposal);
+                    result = new JObject
+                    {
+                        ["previewToken"] = token,
+                        ["slot"] = proposal.Slot,
+                        ["digest"] = proposal.Digest,
+                        ["baseRevision"] = sceneRevision,
+                        ["clientMutationId"] = proposal.ClientMutationId,
+                        ["expiresAtUnixMs"] = expiresAt,
+                        ["summary"] = new JObject
+                        {
+                            ["entities"] = plan.DocumentEntities.Count,
+                            ["create"] = plan.CreateCount,
+                            ["reuse"] = plan.ReuseCount,
+                            ["remove"] = plan.Remove.Count,
+                        },
+                    };
+                    return true;
+
+                default:
+                    failure = PersistenceFailure(
+                        "WorldDocument background operation kind is unsupported",
+                        "persistence_worker_failed");
+                    return false;
+            }
+        }
+
+        internal void DiscardWorldPersistenceWork(WorldPersistenceWork work)
+        {
+            AssertMainThread();
+            if (work == null) return;
+            if (work.Kind == WorldPersistenceWorkKind.LoadPreview)
+                pendingWorldLoadMutations.Remove(work.MutationKey);
+            else if (work.Kind == WorldPersistenceWorkKind.Save)
+                pendingWorldSaveMutations.Remove(work.MutationKey);
         }
 
         public bool TryLoadWorld(
@@ -1014,64 +1051,6 @@ namespace BrainRegion.RuntimeBridge
             return true;
         }
 
-        private bool TryReadWorldEnvelope(
-            string slot,
-            out JObject envelope,
-            out RpcFailure failure)
-        {
-            envelope = null;
-            failure = null;
-            if (!IsWorldSlot(slot))
-            {
-                failure = PersistenceFailure("WorldDocument slot is invalid", "invalid_slot");
-                return false;
-            }
-            try
-            {
-                string path = GetWorldSlotPath(slot);
-                if (!File.Exists(path))
-                {
-                    failure = PersistenceFailure(
-                        $"WorldDocument slot '{slot}' does not exist",
-                        "slot_not_found");
-                    return false;
-                }
-                var info = new FileInfo(path);
-                if (info.Length < 1 || info.Length > MaxWorldFileBytes)
-                {
-                    failure = PersistenceFailure(
-                        "WorldDocument file exceeds the configured bounds",
-                        "world_file_size");
-                    return false;
-                }
-                string text = File.ReadAllText(path, new UTF8Encoding(false, true));
-                envelope = JObject.Parse(text, new JsonLoadSettings
-                {
-                    DuplicatePropertyNameHandling = DuplicatePropertyNameHandling.Error,
-                });
-                if (!HasExactProperties(envelope, "digest", "document") ||
-                    envelope["digest"]?.Type != JTokenType.String ||
-                    envelope["document"] is not JObject document ||
-                    !string.Equals((string)envelope["digest"], ComputeWorldDigest(document), StringComparison.Ordinal))
-                {
-                    failure = PersistenceFailure(
-                        "WorldDocument digest or envelope is invalid",
-                        "world_digest_mismatch");
-                    envelope = null;
-                    return false;
-                }
-                return true;
-            }
-            catch (Exception exception)
-            {
-                failure = PersistenceFailure(
-                    "WorldDocument could not be read: " + exception.Message,
-                    "world_read_failed");
-                envelope = null;
-                return false;
-            }
-        }
-
         private static JObject SerializeTransform(Transform target)
         {
             return new JObject
@@ -1208,92 +1187,42 @@ namespace BrainRegion.RuntimeBridge
 
         private static bool IsWorldSlot(string slot)
         {
-            if (string.IsNullOrEmpty(slot) || slot.Length > 64 ||
-                !char.IsLetterOrDigit(slot[0])) return false;
-            return slot.All(character => character <= 127 &&
-                (char.IsLetterOrDigit(character) || character == '_' || character == '-'));
+            return WorldDocumentStorage.IsSlot(slot);
         }
 
         private static bool IsWorldDigest(string digest)
         {
-            if (digest == null || !digest.StartsWith("sha256:", StringComparison.Ordinal) ||
-                digest.Length != "sha256:".Length + 64) return false;
-            return digest.Skip("sha256:".Length)
-                .All(character => character >= '0' && character <= '9' ||
-                                  character >= 'a' && character <= 'f');
+            return WorldDocumentStorage.IsDigest(digest);
         }
 
         private string GetWorldStorageRoot()
         {
-            return Path.GetFullPath(Path.Combine(
-                Application.persistentDataPath,
-                "BrainRegion",
-                "Worlds"));
+            return WorldDocumentStorage.GetStorageRoot(Application.persistentDataPath);
         }
 
-        private string GetWorldSlotPath(string slot)
+        private static WorldSaveRequest CloneWorldSaveRequest(WorldSaveRequest request)
         {
-            if (!IsWorldSlot(slot)) throw new ArgumentException("Invalid WorldDocument slot", nameof(slot));
-            string root = GetWorldStorageRoot();
-            string path = Path.GetFullPath(Path.Combine(root, slot + ".brworld.json"));
-            string prefix = root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) +
-                Path.DirectorySeparatorChar;
-            if (!path.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
-                throw new InvalidOperationException("WorldDocument slot escaped its storage root");
-            return path;
+            return new WorldSaveRequest
+            {
+                Slot = request.Slot,
+                ExpectedRevision = request.ExpectedRevision,
+                ClientMutationId = request.ClientMutationId,
+                ExpectedSlotDigest = request.ExpectedSlotDigest,
+                Metadata = request.Metadata == null
+                    ? null
+                    : new WorldSaveMetadata { Label = request.Metadata.Label },
+            };
         }
 
-        private static void AtomicWriteWorld(string target, string text)
+        private static WorldLoadPreviewRequest CloneWorldLoadPreviewRequest(
+            WorldLoadPreviewRequest request)
         {
-            string temporary = target + ".tmp." + Guid.NewGuid().ToString("N");
-            string backup = target + ".bak";
-            try
+            return new WorldLoadPreviewRequest
             {
-                byte[] bytes = new UTF8Encoding(false, true).GetBytes(text);
-                using (var stream = new FileStream(
-                           temporary,
-                           FileMode.CreateNew,
-                           FileAccess.Write,
-                           FileShare.None,
-                           4096,
-                           FileOptions.WriteThrough))
-                {
-                    stream.Write(bytes, 0, bytes.Length);
-                    stream.Flush(true);
-                }
-                if (File.Exists(target))
-                {
-                    if (File.Exists(backup)) File.Delete(backup);
-                    File.Replace(temporary, target, backup);
-                    try
-                    {
-                        if (File.Exists(backup)) File.Delete(backup);
-                    }
-                    catch
-                    {
-                        // The target is already committed. A stale backup is safer
-                        // than reporting failure and inviting a duplicate retry.
-                    }
-                }
-                else
-                {
-                    File.Move(temporary, target);
-                }
-            }
-            finally
-            {
-                if (File.Exists(temporary)) File.Delete(temporary);
-            }
-        }
-
-        private static string ComputeWorldDigest(JObject document)
-        {
-            using (SHA256 sha256 = SHA256.Create())
-            {
-                byte[] bytes = Encoding.UTF8.GetBytes(document.ToString(Formatting.None));
-                byte[] digest = sha256.ComputeHash(bytes);
-                return "sha256:" + BitConverter.ToString(digest).Replace("-", string.Empty).ToLowerInvariant();
-            }
+                Slot = request.Slot,
+                ExpectedRevision = request.ExpectedRevision,
+                ClientMutationId = request.ClientMutationId,
+            };
         }
 
         private static string WorldMutationKey(string principalId, string clientMutationId)
@@ -1346,6 +1275,172 @@ namespace BrainRegion.RuntimeBridge
                     Message = source.Message,
                     Data = source.Data == null ? new JObject() : (JObject)source.Data.DeepClone(),
                 };
+        }
+
+        internal enum WorldPersistenceWorkKind
+        {
+            List,
+            Save,
+            LoadPreview,
+        }
+
+        internal sealed class WorldPersistenceWorkerResult
+        {
+            public readonly JObject Result;
+            public readonly RpcFailure Failure;
+
+            public WorldPersistenceWorkerResult(JObject result, RpcFailure failure)
+            {
+                Result = result;
+                Failure = failure;
+            }
+        }
+
+        internal sealed class WorldPersistenceWork
+        {
+            private readonly string root;
+            private readonly SemaphoreSlim gate;
+            private readonly JObject document;
+
+            public readonly WorldPersistenceWorkKind Kind;
+            public readonly string MutationKey;
+            public readonly string PrincipalId;
+            public readonly long ConnectionEpoch;
+            public readonly WorldSaveRequest SaveRequest;
+            public readonly WorldLoadPreviewRequest LoadPreviewRequest;
+            public long DeadlineUnixMs;
+
+            private WorldPersistenceWork(
+                WorldPersistenceWorkKind kind,
+                string root,
+                SemaphoreSlim gate,
+                string mutationKey = null,
+                string principalId = null,
+                long connectionEpoch = 0,
+                WorldSaveRequest saveRequest = null,
+                WorldLoadPreviewRequest loadPreviewRequest = null,
+                JObject document = null)
+            {
+                Kind = kind;
+                this.root = root;
+                this.gate = gate;
+                MutationKey = mutationKey;
+                PrincipalId = principalId;
+                ConnectionEpoch = connectionEpoch;
+                SaveRequest = saveRequest;
+                LoadPreviewRequest = loadPreviewRequest;
+                this.document = document;
+            }
+
+            public static WorldPersistenceWork CreateList(string root, SemaphoreSlim gate)
+            {
+                return new WorldPersistenceWork(WorldPersistenceWorkKind.List, root, gate);
+            }
+
+            public static WorldPersistenceWork CreateSave(
+                string root,
+                SemaphoreSlim gate,
+                string mutationKey,
+                WorldSaveRequest request,
+                JObject document)
+            {
+                return new WorldPersistenceWork(
+                    WorldPersistenceWorkKind.Save,
+                    root,
+                    gate,
+                    mutationKey,
+                    saveRequest: request,
+                    document: document);
+            }
+
+            public static WorldPersistenceWork CreateLoadPreview(
+                string root,
+                SemaphoreSlim gate,
+                string mutationKey,
+                string principalId,
+                long connectionEpoch,
+                WorldLoadPreviewRequest request)
+            {
+                return new WorldPersistenceWork(
+                    WorldPersistenceWorkKind.LoadPreview,
+                    root,
+                    gate,
+                    mutationKey,
+                    principalId,
+                    connectionEpoch,
+                    loadPreviewRequest: request);
+            }
+
+            public WorldPersistenceWorkerResult Execute()
+            {
+                bool entered = false;
+                try
+                {
+                    gate.Wait();
+                    entered = true;
+                    if (DeadlineUnixMs > 0 &&
+                        DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() > DeadlineUnixMs)
+                    {
+                        return new WorldPersistenceWorkerResult(
+                            null,
+                            RpcFailure.Create(
+                                SceneErrorCodes.ValidationFailed,
+                                "Scene RPC deadline elapsed before WorldDocument I/O began",
+                                "deadline_elapsed",
+                                true));
+                    }
+
+                    bool succeeded;
+                    JObject result;
+                    RpcFailure failure;
+                    switch (Kind)
+                    {
+                        case WorldPersistenceWorkKind.List:
+                            succeeded = WorldDocumentStorage.TryList(root, out result, out failure);
+                            break;
+                        case WorldPersistenceWorkKind.Save:
+                            succeeded = WorldDocumentStorage.TryWrite(
+                                root,
+                                SaveRequest.Slot,
+                                SaveRequest.ExpectedSlotDigest,
+                                document,
+                                out result,
+                                out failure);
+                            break;
+                        case WorldPersistenceWorkKind.LoadPreview:
+                            succeeded = WorldDocumentStorage.TryRead(
+                                root,
+                                LoadPreviewRequest.Slot,
+                                out result,
+                                out failure);
+                            break;
+                        default:
+                            succeeded = false;
+                            result = null;
+                            failure = RpcFailure.Create(
+                                SceneErrorCodes.PersistenceError,
+                                "WorldDocument worker kind is unsupported",
+                                "persistence_worker_failed");
+                            break;
+                    }
+                    return new WorldPersistenceWorkerResult(
+                        succeeded ? result : null,
+                        succeeded ? null : failure);
+                }
+                catch (Exception exception)
+                {
+                    return new WorldPersistenceWorkerResult(
+                        null,
+                        RpcFailure.Create(
+                            SceneErrorCodes.PersistenceError,
+                            "WorldDocument worker failed: " + exception.Message,
+                            "persistence_worker_failed"));
+                }
+                finally
+                {
+                    if (entered) gate.Release();
+                }
+            }
         }
 
         private sealed class WorldLoadPlan

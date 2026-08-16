@@ -5,6 +5,7 @@ using System.Diagnostics;
 using System.Linq;
 using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
@@ -22,6 +23,7 @@ namespace BrainRegion.RuntimeBridge
         public const int MaxFrameBytes = 1024 * 1024;
         private const int MaxAuthorizedPreviews = 512;
         private const int MaxAppliedAuthorizations = 256;
+        private const int MaxDeferredPersistenceOperations = 8;
 
         [SerializeField] private RuntimeSceneController controller;
         [SerializeField] private RuntimeLogBuffer logBuffer;
@@ -30,6 +32,10 @@ namespace BrainRegion.RuntimeBridge
         [SerializeField, Range(8, 1024)] private int maxQueuedRequests = 128;
 
         private readonly ConcurrentQueue<QueuedRequest> queue = new ConcurrentQueue<QueuedRequest>();
+        private readonly ConcurrentQueue<CompletedPersistenceRequest> completedPersistence =
+            new ConcurrentQueue<CompletedPersistenceRequest>();
+        private readonly Dictionary<long, DeferredPersistenceRequest> activePersistence =
+            new Dictionary<long, DeferredPersistenceRequest>();
         private readonly object lifecycleGate = new object();
         private readonly object peerEpochGate = new object();
         private readonly Dictionary<string, PeerEpochState> latestPeerEpochs =
@@ -44,6 +50,7 @@ namespace BrainRegion.RuntimeBridge
         private bool acceptingRequests;
         private bool hasStarted;
         private string cachedRegistrationNotification;
+        private long nextPersistenceOperationId;
 
         public event Action<string> OutboundNotification;
 
@@ -102,6 +109,18 @@ namespace BrainRegion.RuntimeBridge
                         "Scene RPC dispatcher stopped before this request could execute",
                         "dispatcher_stopped",
                         true)));
+            }
+            foreach (DeferredPersistenceRequest deferred in activePersistence.Values)
+            {
+                RpcFailure stopped = deferred.Work.Kind ==
+                    RuntimeSceneController.WorldPersistenceWorkKind.Save
+                    ? PersistenceOutcomeUnknownFailure()
+                    : RpcFailure.Create(
+                        SceneErrorCodes.Busy,
+                        "Scene RPC dispatcher stopped during background persistence I/O",
+                        "dispatcher_stopped",
+                        true);
+                deferred.TryComplete(SerializeError(deferred.Request.Request.Id, stopped));
             }
         }
 
@@ -221,13 +240,222 @@ namespace BrainRegion.RuntimeBridge
             int processed = 0;
             while (processed < Mathf.Max(1, maxRequestsPerFrame) &&
                    stopwatch.Elapsed.TotalMilliseconds <= Mathf.Max(0.05f, maxMillisecondsPerFrame) &&
+                   completedPersistence.TryDequeue(out CompletedPersistenceRequest completed))
+            {
+                CompleteDeferredPersistence(completed);
+                processed++;
+            }
+            while (processed < Mathf.Max(1, maxRequestsPerFrame) &&
+                   stopwatch.Elapsed.TotalMilliseconds <= Mathf.Max(0.05f, maxMillisecondsPerFrame) &&
                    queue.TryDequeue(out QueuedRequest queued))
             {
                 Interlocked.Decrement(ref queuedCount);
+                if (TryStartDeferredPersistence(queued, out string deferredResponse))
+                {
+                    if (deferredResponse != null)
+                        CompleteSafely(queued, deferredResponse);
+                    processed++;
+                    continue;
+                }
                 string response = Dispatch(queued.Request, queued.Peer);
                 CompleteSafely(queued, response);
                 processed++;
             }
+        }
+
+        private bool TryStartDeferredPersistence(
+            QueuedRequest queued,
+            out string immediateResponse)
+        {
+            immediateResponse = null;
+            string method = queued.Request.Method;
+            if (method != "persistence/list" &&
+                method != "persistence/save" &&
+                method != "persistence/loadPreview")
+                return false;
+
+            if (!IsCurrentPeerEpoch(queued.Peer))
+            {
+                immediateResponse = SerializeError(
+                    queued.Request.Id,
+                    StaleConnectionFailure());
+                return true;
+            }
+            if (queued.Request.DeadlineUnixMs < DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+            {
+                immediateResponse = SerializeError(
+                    queued.Request.Id,
+                    RpcFailure.Create(
+                        SceneErrorCodes.ValidationFailed,
+                        "Scene RPC request deadline elapsed before main-thread execution",
+                        "deadline_elapsed",
+                        true));
+                return true;
+            }
+            if (activePersistence.Count >= MaxDeferredPersistenceOperations)
+            {
+                immediateResponse = SerializeError(
+                    queued.Request.Id,
+                    RpcFailure.Create(
+                        SceneErrorCodes.Busy,
+                        "Too many WorldDocument I/O operations are active",
+                        "persistence_queue_full",
+                        true));
+                return true;
+            }
+
+            RuntimeSceneController.WorldPersistenceWork work;
+            JObject immediateResult = null;
+            RpcFailure failure = null;
+            switch (method)
+            {
+                case "persistence/list":
+                    work = controller.BeginWorldSlotList();
+                    break;
+                case "persistence/save":
+                    if (!controller.TryBeginWorldSave(
+                            queued.Peer.PrincipalId,
+                            (WorldSaveRequest)queued.Request.Parameters,
+                            out work,
+                            out immediateResult,
+                            out failure))
+                    {
+                        immediateResponse = SerializeError(queued.Request.Id, failure);
+                        return true;
+                    }
+                    if (work == null)
+                    {
+                        immediateResponse = SerializeSuccess(queued.Request.Id, immediateResult);
+                        return true;
+                    }
+                    break;
+                case "persistence/loadPreview":
+                    if (!controller.TryBeginWorldLoadPreview(
+                            queued.Peer.PrincipalId,
+                            queued.Peer.ConnectionEpoch,
+                            (WorldLoadPreviewRequest)queued.Request.Parameters,
+                            out work,
+                            out failure))
+                    {
+                        immediateResponse = SerializeError(queued.Request.Id, failure);
+                        return true;
+                    }
+                    break;
+                default:
+                    throw new InvalidOperationException("Unsupported deferred persistence method");
+            }
+
+            work.DeadlineUnixMs = queued.Request.DeadlineUnixMs;
+            long operationId = Interlocked.Increment(ref nextPersistenceOperationId);
+            var deferred = new DeferredPersistenceRequest(operationId, queued, work);
+            activePersistence.Add(operationId, deferred);
+            try
+            {
+                _ = Task.Run(work.Execute).ContinueWith(
+                    task =>
+                    {
+                        RuntimeSceneController.WorldPersistenceWorkerResult worker;
+                        if (task.Status == TaskStatus.RanToCompletion)
+                        {
+                            worker = task.Result;
+                        }
+                        else
+                        {
+                            string message = task.Exception?.GetBaseException().Message ??
+                                "WorldDocument worker did not complete";
+                            worker = new RuntimeSceneController.WorldPersistenceWorkerResult(
+                                null,
+                                RpcFailure.Create(
+                                    SceneErrorCodes.PersistenceError,
+                                    "WorldDocument background operation failed: " + message,
+                                    "persistence_worker_failed"));
+                        }
+                        completedPersistence.Enqueue(
+                            new CompletedPersistenceRequest(operationId, worker));
+                    },
+                    CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously,
+                    TaskScheduler.Default);
+            }
+            catch (Exception exception)
+            {
+                activePersistence.Remove(operationId);
+                controller.DiscardWorldPersistenceWork(work);
+                immediateResponse = SerializeError(
+                    queued.Request.Id,
+                    RpcFailure.Create(
+                        SceneErrorCodes.Busy,
+                        "Could not schedule WorldDocument I/O: " + exception.Message,
+                        "persistence_worker_unavailable",
+                        true));
+            }
+            return true;
+        }
+
+        private void CompleteDeferredPersistence(CompletedPersistenceRequest completed)
+        {
+            if (!activePersistence.TryGetValue(
+                    completed.OperationId,
+                    out DeferredPersistenceRequest deferred))
+                return;
+            activePersistence.Remove(completed.OperationId);
+
+            RuntimeSceneController.WorldPersistenceWork work = deferred.Work;
+            JObject result;
+            RpcFailure failure;
+            bool succeeded;
+            if (work.Kind == RuntimeSceneController.WorldPersistenceWorkKind.Save)
+            {
+                // A save may already be atomically committed even when the peer or
+                // deadline disappeared. Always record its receipt on the main thread.
+                succeeded = controller.TryCompleteWorldPersistence(
+                    work,
+                    completed.Worker,
+                    out result,
+                    out failure);
+            }
+            else if (!IsCurrentPeerEpoch(deferred.Request.Peer))
+            {
+                controller.DiscardWorldPersistenceWork(work);
+                succeeded = false;
+                result = null;
+                failure = StaleConnectionFailure();
+            }
+            else if (deferred.Request.Request.DeadlineUnixMs <
+                     DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
+            {
+                controller.DiscardWorldPersistenceWork(work);
+                succeeded = false;
+                result = null;
+                failure = RpcFailure.Create(
+                    SceneErrorCodes.ValidationFailed,
+                    "Scene RPC deadline elapsed during WorldDocument I/O",
+                    "deadline_elapsed",
+                    true);
+            }
+            else
+            {
+                succeeded = controller.TryCompleteWorldPersistence(
+                    work,
+                    completed.Worker,
+                    out result,
+                    out failure);
+            }
+
+            deferred.TryComplete(succeeded
+                ? SerializeSuccess(deferred.Request.Request.Id, result)
+                : SerializeError(deferred.Request.Request.Id, failure));
+        }
+
+        private static RpcFailure PersistenceOutcomeUnknownFailure()
+        {
+            RpcFailure failure = RpcFailure.Create(
+                SceneErrorCodes.PersistenceError,
+                "WorldDocument save may still complete after the dispatcher stopped",
+                "operation_outcome_unknown");
+            failure.Data["outcome"] = "unknown";
+            failure.Data["retryable"] = false;
+            return failure;
         }
 
         private string Dispatch(PreparedRequest request, AuthenticatedPeerContext peer)
@@ -1013,6 +1241,45 @@ namespace BrainRegion.RuntimeBridge
                 Request = request;
                 Peer = peer;
                 Completion = completion;
+            }
+        }
+
+        private sealed class DeferredPersistenceRequest
+        {
+            private int completed;
+
+            public readonly long OperationId;
+            public readonly QueuedRequest Request;
+            public readonly RuntimeSceneController.WorldPersistenceWork Work;
+
+            public DeferredPersistenceRequest(
+                long operationId,
+                QueuedRequest request,
+                RuntimeSceneController.WorldPersistenceWork work)
+            {
+                OperationId = operationId;
+                Request = request;
+                Work = work;
+            }
+
+            public void TryComplete(string response)
+            {
+                if (Interlocked.Exchange(ref completed, 1) == 0)
+                    CompleteSafely(Request, response);
+            }
+        }
+
+        private sealed class CompletedPersistenceRequest
+        {
+            public readonly long OperationId;
+            public readonly RuntimeSceneController.WorldPersistenceWorkerResult Worker;
+
+            public CompletedPersistenceRequest(
+                long operationId,
+                RuntimeSceneController.WorldPersistenceWorkerResult worker)
+            {
+                OperationId = operationId;
+                Worker = worker;
             }
         }
 
