@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "id": "save-1",
+  "method": "persistence/save",
+  "deadlineUnixMs": 4102444800000,
+  "params": {
+    "slot": "default-world",
+    "expectedRevision": 7,
+    "clientMutationId": "save-default-7",
+    "metadata": {
+      "label": "Default world"
+    }
+  }
+}

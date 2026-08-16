@@ -271,6 +271,8 @@ fn capability_name(capability: SceneCapability) -> &'static str {
         SceneCapability::SceneWrite => "scene.write",
         SceneCapability::SceneSpawn => "scene.spawn",
         SceneCapability::SceneUndo => "scene.undo",
+        SceneCapability::PersistenceRead => "persistence.read",
+        SceneCapability::PersistenceWrite => "persistence.write",
         SceneCapability::LogsRead => "logs.read",
     }
 }

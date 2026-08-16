@@ -54,6 +54,13 @@ that an active dynamic identity is automatically registered and cleaned up, and
 that an additive scene identity joins and leaves the registry with one external
 revision barrier per lifecycle change.
 
+The same end-to-end test saves both the base world and a world containing a
+spawned catalog prefab, lists the fixed slots, rejects invalid slots and stale
+slot digests, proves load preview has no side effects, restores a changed
+persistent property, and recreates a deleted prefab with its original object ID.
+Exact save/load replays return their receipts without applying the mutation a
+second time.
+
 The fixture currently pins `6000.0.59f2`, the installed editor with Windows
 IL2CPP support on the verification machine. The package itself is also compiled
 and tested under Unity `6000.3.20f1`; use an exact 6000.3 IL2CPP module before

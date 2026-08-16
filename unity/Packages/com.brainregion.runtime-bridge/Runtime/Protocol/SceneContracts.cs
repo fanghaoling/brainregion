@@ -85,6 +85,8 @@ namespace BrainRegion.RuntimeBridge
         public const string SceneWrite = "scene.write";
         public const string SceneSpawn = "scene.spawn";
         public const string SceneUndo = "scene.undo";
+        public const string PersistenceRead = "persistence.read";
+        public const string PersistenceWrite = "persistence.write";
         public const string LogsRead = "logs.read";
 
         public static bool IsKnown(string capability)
@@ -95,6 +97,8 @@ namespace BrainRegion.RuntimeBridge
                 case SceneWrite:
                 case SceneSpawn:
                 case SceneUndo:
+                case PersistenceRead:
+                case PersistenceWrite:
                 case LogsRead:
                     return true;
                 default:
@@ -255,6 +259,38 @@ namespace BrainRegion.RuntimeBridge
     }
 
     [Serializable]
+    public sealed class WorldSaveMetadata
+    {
+        [JsonProperty("label")] public string Label;
+    }
+
+    [Serializable]
+    public sealed class WorldSaveRequest
+    {
+        [JsonProperty("slot", Required = Required.Always)] public string Slot;
+        [JsonProperty("expectedRevision", Required = Required.Always)] public long ExpectedRevision;
+        [JsonProperty("clientMutationId", Required = Required.Always)] public string ClientMutationId;
+        [JsonProperty("expectedSlotDigest")] public string ExpectedSlotDigest;
+        [JsonProperty("metadata")] public WorldSaveMetadata Metadata;
+    }
+
+    [Serializable]
+    public sealed class WorldLoadPreviewRequest
+    {
+        [JsonProperty("slot", Required = Required.Always)] public string Slot;
+        [JsonProperty("expectedRevision", Required = Required.Always)] public long ExpectedRevision;
+        [JsonProperty("clientMutationId", Required = Required.Always)] public string ClientMutationId;
+    }
+
+    [Serializable]
+    public sealed class WorldLoadRequest
+    {
+        [JsonProperty("previewToken", Required = Required.Always)] public string PreviewToken;
+        [JsonProperty("expectedRevision", Required = Required.Always)] public long ExpectedRevision;
+        [JsonProperty("clientMutationId", Required = Required.Always)] public string ClientMutationId;
+    }
+
+    [Serializable]
     public sealed class RpcPropertyDescriptor
     {
         [JsonProperty("propertyId")] public string PropertyId;
@@ -363,5 +399,6 @@ namespace BrainRegion.RuntimeBridge
         public const int PropertyNotExposed = -32014;
         public const int PreviewExpired = -32015;
         public const int NotReversible = -32016;
+        public const int PersistenceError = -32020;
     }
 }

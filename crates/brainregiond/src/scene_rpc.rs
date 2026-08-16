@@ -181,6 +181,10 @@ pub enum SceneCapability {
     SceneSpawn,
     #[serde(rename = "scene.undo")]
     SceneUndo,
+    #[serde(rename = "persistence.read")]
+    PersistenceRead,
+    #[serde(rename = "persistence.write")]
+    PersistenceWrite,
     #[serde(rename = "logs.read")]
     LogsRead,
 }
@@ -377,6 +381,77 @@ pub struct SceneApplyParams {
     pub client_mutation_id: String,
 }
 
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorldSaveMetadata {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorldSaveParams {
+    pub slot: String,
+    pub expected_revision: u64,
+    pub client_mutation_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_slot_digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub metadata: Option<WorldSaveMetadata>,
+}
+
+impl WorldSaveParams {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_world_slot(&self.slot)?;
+        validate_revision(self.expected_revision)?;
+        validate_identifier("clientMutationId", &self.client_mutation_id, 128)?;
+        if let Some(digest) = &self.expected_slot_digest {
+            validate_world_digest(digest)?;
+        }
+        if self
+            .metadata
+            .as_ref()
+            .and_then(|metadata| metadata.label.as_ref())
+            .is_some_and(|label| label.chars().count() > 256)
+        {
+            return Err("WorldDocument label must not exceed 256 characters".to_owned());
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorldLoadPreviewParams {
+    pub slot: String,
+    pub expected_revision: u64,
+    pub client_mutation_id: String,
+}
+
+impl WorldLoadPreviewParams {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_world_slot(&self.slot)?;
+        validate_revision(self.expected_revision)?;
+        validate_identifier("clientMutationId", &self.client_mutation_id, 128)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct WorldLoadParams {
+    pub preview_token: String,
+    pub expected_revision: u64,
+    pub client_mutation_id: String,
+}
+
+impl WorldLoadParams {
+    pub fn validate(&self) -> Result<(), String> {
+        validate_identifier("previewToken", &self.preview_token, 128)?;
+        validate_revision(self.expected_revision)?;
+        validate_identifier("clientMutationId", &self.client_mutation_id, 128)
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RpcSuccessResponse {
@@ -437,6 +512,35 @@ fn validate_identifier_segment(name: &str, value: &str, maximum: usize) -> Resul
     validate_identifier(name, value, maximum)?;
     if value.bytes().any(|byte| matches!(byte, b':' | b'/')) {
         return Err(format!("{name} must not contain ':' or '/'"));
+    }
+    Ok(())
+}
+
+fn validate_world_slot(slot: &str) -> Result<(), String> {
+    if slot.is_empty() || slot.len() > 64 {
+        return Err("WorldDocument slot must contain 1..64 bytes".to_owned());
+    }
+    let mut bytes = slot.bytes();
+    if !bytes
+        .next()
+        .is_some_and(|byte| byte.is_ascii_alphanumeric())
+        || bytes.any(|byte| !(byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-')))
+    {
+        return Err("WorldDocument slot contains an unsupported character".to_owned());
+    }
+    Ok(())
+}
+
+fn validate_world_digest(digest: &str) -> Result<(), String> {
+    let Some(hex) = digest.strip_prefix("sha256:") else {
+        return Err("WorldDocument digest must use sha256".to_owned());
+    };
+    if hex.len() != 64
+        || hex
+            .bytes()
+            .any(|byte| !matches!(byte, b'0'..=b'9' | b'a'..=b'f'))
+    {
+        return Err("WorldDocument digest must contain 64 lowercase hex characters".to_owned());
     }
     Ok(())
 }
@@ -515,6 +619,46 @@ mod tests {
         let rendered = serde_json::to_value(&request).unwrap();
         assert_eq!(rendered["method"], "scene/preview");
         assert_eq!(rendered["params"]["commands"][0]["kind"], "spawn");
+    }
+
+    #[test]
+    fn persistence_fixtures_are_typed_and_bounded() {
+        let save_fixture =
+            include_str!("../../../schemas/scene-rpc/v1/examples/persistence-save-request.json");
+        let save: RpcRequest<WorldSaveParams> = serde_json::from_str(save_fixture).unwrap();
+        save.validate_envelope("persistence/save").unwrap();
+        save.params.validate().unwrap();
+
+        let preview_fixture = include_str!(
+            "../../../schemas/scene-rpc/v1/examples/persistence-load-preview-request.json"
+        );
+        let preview: RpcRequest<WorldLoadPreviewParams> =
+            serde_json::from_str(preview_fixture).unwrap();
+        preview
+            .validate_envelope("persistence/loadPreview")
+            .unwrap();
+        preview.params.validate().unwrap();
+
+        let load_fixture =
+            include_str!("../../../schemas/scene-rpc/v1/examples/persistence-load-request.json");
+        let load: RpcRequest<WorldLoadParams> = serde_json::from_str(load_fixture).unwrap();
+        load.validate_envelope("persistence/load").unwrap();
+        load.params.validate().unwrap();
+
+        let mut invalid_slot = save.params.clone();
+        invalid_slot.slot = "../escape".to_owned();
+        assert!(invalid_slot.validate().is_err());
+        invalid_slot.slot = "valid".to_owned();
+        invalid_slot.expected_slot_digest = Some("sha256:ABC".to_owned());
+        assert!(invalid_slot.validate().is_err());
+
+        let mut unicode_label = save.params.clone();
+        unicode_label.metadata = Some(WorldSaveMetadata {
+            label: Some("界".repeat(256)),
+        });
+        assert!(unicode_label.validate().is_ok());
+        unicode_label.metadata.as_mut().unwrap().label = Some("界".repeat(257));
+        assert!(unicode_label.validate().is_err());
     }
 
     #[test]

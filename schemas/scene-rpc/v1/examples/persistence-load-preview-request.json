@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": "load-preview-1",
+  "method": "persistence/loadPreview",
+  "deadlineUnixMs": 4102444800000,
+  "params": {
+    "slot": "default-world",
+    "expectedRevision": 9,
+    "clientMutationId": "load-default-9"
+  }
+}

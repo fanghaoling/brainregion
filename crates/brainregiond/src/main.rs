@@ -6,7 +6,10 @@ use brainregiond::scene_peer::ScenePeerRegistry;
 use brainregiond::scene_pipe::ScenePipeListener;
 use brainregiond::server::{probe, serve_stdio_until_with_scene_peers, termination_signal};
 use brainregiond::supervisor::McpSupervisor;
-use brainregiond::{CONTROL_SCHEMA_JSON, DAEMON_NAME, DAEMON_VERSION, Result, SCENE_SCHEMA_JSON};
+use brainregiond::{
+    CONTROL_SCHEMA_JSON, DAEMON_NAME, DAEMON_VERSION, Result, SCENE_SCHEMA_JSON,
+    WORLD_DOCUMENT_SCHEMA_JSON,
+};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> ExitCode {
@@ -38,6 +41,10 @@ async fn run() -> Result<()> {
         }
         RunMode::SceneSchema => {
             println!("{SCENE_SCHEMA_JSON}");
+            return Ok(());
+        }
+        RunMode::WorldSchema => {
+            println!("{WORLD_DOCUMENT_SCHEMA_JSON}");
             return Ok(());
         }
         RunMode::Serve | RunMode::Probe => {}
@@ -114,7 +121,11 @@ async fn run() -> Result<()> {
             };
             combine_probe_and_cleanup(serve_result, pipe_cleanup)?;
         }
-        RunMode::Schema | RunMode::SceneSchema | RunMode::Help | RunMode::Version => unreachable!(),
+        RunMode::Schema
+        | RunMode::SceneSchema
+        | RunMode::WorldSchema
+        | RunMode::Help
+        | RunMode::Version => unreachable!(),
     }
     Ok(())
 }

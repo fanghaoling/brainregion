@@ -1,0 +1,18 @@
+{
+  "jsonrpc": "2.0",
+  "id": "world-load-preview-1",
+  "result": {
+    "previewToken": "world-preview-1",
+    "slot": "default",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "baseRevision": 8,
+    "clientMutationId": "world-load-mutation-1",
+    "expiresAtUnixMs": 1786848005000,
+    "summary": {
+      "entities": 2,
+      "create": 1,
+      "reuse": 1,
+      "remove": 0
+    }
+  }
+}

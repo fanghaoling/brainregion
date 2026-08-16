@@ -1,6 +1,6 @@
 # Unity Player 运行时开放编辑与 Scene RPC v1
 
-状态：Unity Runtime 核心、Rust Runtime Peer 会话、opt-in Windows 命名管道客户端、Prefab Catalog 自动生成、AOT-safe 属性 binding codegen 和运行时对象生命周期同步已实现；独立 Windows High-stripping IL2CPP Player 的注册、读取、写事务、失败回滚、响应丢失查明、生成属性、Prefab 安全 staging/spawn、Undo、动态对象注册/销毁、additive scene load/unload 与断线重连闭环已通过，尚未接入实际 VR 项目。
+状态：Unity Runtime 核心、Rust Runtime Peer 会话、opt-in Windows 命名管道客户端、Prefab Catalog 自动生成、AOT-safe 属性 binding codegen、运行时对象生命周期同步和 `WorldDocument v1` 存档恢复已实现；独立 Windows High-stripping IL2CPP Player 的注册、读取、写事务、失败回滚、响应丢失查明、生成属性、Prefab 安全 staging/spawn、Undo、动态对象注册/销毁、additive scene load/unload、断线重连，以及 save/list/load preview/load 与缺失 Prefab 重建闭环已通过，尚未接入实际 VR 项目。
 
 ## 结论
 
@@ -39,6 +39,7 @@ unity/Packages/com.brainregion.runtime-bridge/
 - 运行时生命周期同步：active 动态对象在 `OnEnable` 后由主线程统一注册，销毁时清理死引用；显式打开 `includeLoadedScenes` 后同步 additive scene，外部生命周期变更按批次只推进一次 revision；
 - `scene/preview -> scene/apply`：预览 token 绑定 revision 和 mutation ID；
 - 单调 `sceneRevision`、幂等 mutation receipt、失败回滚和运行时 Undo；
+- `WorldDocument v1`：固定 slot、配额、SHA-256 完整性摘要、原子替换、兼容性校验、无副作用加载预览和幂等恢复；
 - `SceneRpcDispatcher`：认证主体、连接 epoch、逐方法 capability、1 MiB 帧上限、有界队列、deadline、每帧数量/时间预算；
 - `WindowsScenePipeTransport`：Player 主动连接当前用户命名管道，严格解析 challenge，生成跨语言一致的 HMAC proof，把服务器签名绑定的 grant 传给 Dispatcher，并在断线后以新 epoch 重连；
 - `BoundedJsonLineReader` / `BoundedSceneWriterQueue`：严格 UTF-8、1 MiB 单帧限制和有界非阻塞响应队列；队列过载会断开连接而不是卡住 Unity 主线程；
@@ -55,6 +56,7 @@ Rust 侧已经嵌入同一 schema，并提供严格 DTO、Runtime peer registry�
 
 ```powershell
 cargo run --locked -p brainregiond -- scene-schema
+cargo run --locked -p brainregiond -- world-schema
 ```
 
 ## Runtime Scene RPC v1
@@ -79,6 +81,10 @@ Windows 传输默认关闭。Player 侧可在运行时调用 `SetPairingSecret`�
 | `scene/apply` | revision 一致时原子应用 preview | 对应写权限 |
 | `history/undo` | 撤销最近一个 Runtime Scene RPC 事务 | `scene.undo` |
 | `logs/poll` | 按 sequence 增量读取 Player 日志 | `logs.read` |
+| `persistence/list` | 列出有效和损坏的固定 slot | `persistence.read` |
+| `persistence/save` | 原子保存当前 sandbox 世界 | `persistence.write` + `scene.read` |
+| `persistence/loadPreview` | 校验存档及结构恢复计划，不修改世界 | `persistence.read` + `scene.write` + `scene.spawn` |
+| `persistence/load` | 使用短时 preview token 恢复世界 | `persistence.read` + `persistence.write` + `scene.write` + `scene.spawn` |
 
 v1 只允许四种可逆操作：`spawn`、`set_transform`、`set_active`、`set_properties`。暂不开放任意 `AddComponent`、`RemoveComponent`、方法反射调用、文件路径或 `eval`。
 
@@ -104,7 +110,13 @@ Runtime entity
 
 内置内容先使用直接引用的 Prefab Catalog。后续用户内容使用 Addressables/AssetBundles 或专用 glTF、纹理、音频导入器。Unity 官方将 Addressables 定位为基于 AssetBundle、负责依赖和位置管理的运行时内容系统；AssetBundle 还是平台相关产物，Windows 与 Android 内容需要分别构建。[Unity Runtime Asset Management](https://docs.unity3d.com/Manual/assets-managing-runtime.html)、[AssetBundle 平台注意事项](https://docs.unity3d.com/Manual/assetbundles-platforms.html)
 
-场景存档应是独立、版本化的 `WorldDocument`，只记录 sandbox root 下的实体、父子关系、Prefab ID 和允许持久化的属性 override。不要尝试在 Player 中写 `.unity` 场景或 ScriptableObject asset；Unity 文档明确说明部署后的 build 不能用 ScriptableObject 保存数据。[Unity ScriptableObject](https://docs.unity3d.com/6000.1/Documentation/Manual/class-ScriptableObject.html)
+场景存档现在使用独立、版本化的 `brainregion.world.v1`。它只记录 sandbox root 下的基础实体和 Catalog 生成实体、父子关系、局部 Transform、active 状态，以及 adapter 明确标为 `Persistent && !ReadOnly` 的属性；不会写 `.unity` 场景、ScriptableObject、任意 MonoBehaviour 内存、物理/动画状态或外部文件路径。Unity 文档也明确说明部署后的 build 不能用 ScriptableObject 保存数据。[Unity ScriptableObject](https://docs.unity3d.com/6000.1/Documentation/Manual/class-ScriptableObject.html)
+
+每个 slot 是 `Application.persistentDataPath/BrainRegion/Worlds/<slot>.brworld.json` 下的单一封装文件，slot 只允许 1–64 位 ASCII 字母、数字、下划线和连字符。当前限制为 32 个 slot、每个 1 MiB、总量 16 MiB、256 个实体和 2048 个属性。保存使用同目录临时文件、强制刷新和原子替换；覆盖可带 `expectedSlotDigest` 做比较并交换，防止误覆盖更新后的存档。摘要用于发现损坏和意外改写，不是签名，不能抵御能同时篡改文档与摘要的攻击者。
+
+`loadPreview` 会先校验 product、build、scene、Catalog schema、基础对象身份、Prefab 白名单、父子图和所有持久化属性，返回与主体、连接 epoch、revision、mutation ID 和文档摘要绑定的短时 token，且不修改场景。`load` 在主线程再次校验后恢复基础对象、删除多余的 Catalog 实例并按原 object ID 重建缺失实例；失败会逆序回滚，回滚不完整时进入 degraded 状态并推进 dirty revision。成功加载形成外部历史屏障，旧 preview 和 Undo 不再覆盖新世界。
+
+当前 JSON 序列化和最多 1 MiB 的文件读写是用户显式触发、配额受限的同步主线程操作。Windows smoke 已验证正确性，但在真实 VR 中启用前仍应把文件读取、摘要和序列化移到后台，只把最终验证与世界应用留在 Unity 主线程；Android/Quest 的持久化路径、原子替换语义和掉电恢复也必须单独实机验证。
 
 ## “实时改脚本”的可行定义
 
@@ -123,7 +135,8 @@ Runtime entity
 3. 故障闭环已完成：同一事务先写 counter、再注入 adapter 写失败，实际 Player 会恢复 counter、保持 revision 不变并永久拒绝复用该 mutation ID；另一个事务在最后一次写入时主动断开管道，daemon 返回 `outcome=unknown, retryable=false`，Player 以新 epoch 重连后保留已提交 revision，并只用原 `clientMutationId + previewToken + expectedRevision` 精确回放得到幂等 receipt，没有二次修改。
 4. Catalog 自动生成、属性 binding codegen 和 High managed stripping smoke 已完成：EditMode 验证生成源码确定性、无反射成员访问、GUID prefabId 与 tag 排序，并拒绝 active Catalog root；实际 Player 验证生成整数属性的 write/Undo，以及 Catalog prefab 的 staging/spawn/Undo。probe 证明 Prefab 的 `Awake` 和 `OnEnable` 读取到正式 object ID。
 5. 运行时生命周期闭环已完成：打包 Player 实测 active 动态对象自动注册和销毁清理；显式开启 `includeLoadedScenes` 后，additive scene root 会加入和退出 registry；每次应用侧生命周期变化形成一次外部 mutation barrier，没有残留死引用。
-6. 下一步建议先实现版本化 `WorldDocument` 存档、slot 配额、原子写入和 load preview，再经你确认把 package 作为本地 UPM dependency 接入 VR 项目。随后做 Android ARM64/Quest、Addressables provider 和 Behavior Graph；文本脚本解释器最后接入。
+6. `WorldDocument v1` 已完成：实际 Player 验证原子 save、slot list、preview 零副作用、摘要 CAS、精确幂等 replay、属性恢复，以及按原 ID 重建已删除的 Catalog Prefab。
+7. 下一阶段建议先把持久化序列化/I/O 移出 Unity 主线程，并补齐异常中断恢复测试；再经你确认把 package 作为本地 UPM dependency 接入 VR 项目。随后做 Android ARM64/Quest、Addressables provider 和 Behavior Graph；文本脚本解释器最后接入。
 
 独立 smoke 项目位于 `unity/SmokeProjects/WindowsScenePipePlayer/`。它只用于集成验证，不是 VR 项目模板；构建输出位于 `target/`，不会提交到仓库。构建和测试命令见该目录的 `README.md`。
 

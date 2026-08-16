@@ -328,6 +328,43 @@ namespace BrainRegion.RuntimeBridge
                             ? SerializeSuccess(id, undoResult)
                             : SerializeError(id, undoError);
 
+                    case "persistence/list":
+                        return controller.TryListWorldSlots(out JObject slotsResult, out RpcFailure slotsError)
+                            ? SerializeSuccess(id, slotsResult)
+                            : SerializeError(id, slotsError);
+
+                    case "persistence/save":
+                        var save = (WorldSaveRequest)request.Parameters;
+                        return controller.TrySaveWorld(
+                            peer.PrincipalId,
+                            save,
+                            out JObject saveResult,
+                            out RpcFailure saveError)
+                            ? SerializeSuccess(id, saveResult)
+                            : SerializeError(id, saveError);
+
+                    case "persistence/loadPreview":
+                        var loadPreview = (WorldLoadPreviewRequest)request.Parameters;
+                        return controller.TryPreviewWorldLoad(
+                            peer.PrincipalId,
+                            peer.ConnectionEpoch,
+                            loadPreview,
+                            out JObject loadPreviewResult,
+                            out RpcFailure loadPreviewError)
+                            ? SerializeSuccess(id, loadPreviewResult)
+                            : SerializeError(id, loadPreviewError);
+
+                    case "persistence/load":
+                        var load = (WorldLoadRequest)request.Parameters;
+                        return controller.TryLoadWorld(
+                            peer.PrincipalId,
+                            peer.ConnectionEpoch,
+                            load,
+                            out JObject loadResult,
+                            out RpcFailure loadError)
+                            ? SerializeSuccess(id, loadResult)
+                            : SerializeError(id, loadError);
+
                     case "logs/poll":
                         if (logBuffer == null)
                             return SerializeError(id, RpcFailure.Create(
@@ -487,6 +524,64 @@ namespace BrainRegion.RuntimeBridge
                         typedParameters = undo;
                         break;
 
+                    case "persistence/list":
+                        if (!TryRequireCapability(peer, SceneCapabilities.PersistenceRead, out RpcFailure listAuth))
+                        {
+                            immediateResponse = SerializeError(id, listAuth);
+                            return false;
+                        }
+                        if (parameters.HasValues)
+                        {
+                            immediateResponse = InvalidParams(id, "persistence/list params must be empty");
+                            return false;
+                        }
+                        typedParameters = null;
+                        break;
+
+                    case "persistence/save":
+                        if (!TryRequireCapability(peer, SceneCapabilities.PersistenceWrite, out RpcFailure saveAuth) ||
+                            !TryRequireCapability(peer, SceneCapabilities.SceneRead, out saveAuth))
+                        {
+                            immediateResponse = SerializeError(id, saveAuth);
+                            return false;
+                        }
+                        if (!TryDeserialize(parameters, out WorldSaveRequest save, out parseFailure))
+                        {
+                            immediateResponse = SerializeError(id, parseFailure);
+                            return false;
+                        }
+                        typedParameters = save;
+                        break;
+
+                    case "persistence/loadPreview":
+                        if (!TryRequireWorldLoadCapabilities(peer, out RpcFailure loadPreviewAuth))
+                        {
+                            immediateResponse = SerializeError(id, loadPreviewAuth);
+                            return false;
+                        }
+                        if (!TryDeserialize(parameters, out WorldLoadPreviewRequest loadPreview, out parseFailure))
+                        {
+                            immediateResponse = SerializeError(id, parseFailure);
+                            return false;
+                        }
+                        typedParameters = loadPreview;
+                        break;
+
+                    case "persistence/load":
+                        if (!TryRequireCapability(peer, SceneCapabilities.PersistenceWrite, out RpcFailure loadWriteAuth) ||
+                            !TryRequireWorldLoadCapabilities(peer, out loadWriteAuth))
+                        {
+                            immediateResponse = SerializeError(id, loadWriteAuth);
+                            return false;
+                        }
+                        if (!TryDeserialize(parameters, out WorldLoadRequest load, out parseFailure))
+                        {
+                            immediateResponse = SerializeError(id, parseFailure);
+                            return false;
+                        }
+                        typedParameters = load;
+                        break;
+
                     case "logs/poll":
                         if (!TryRequireCapability(peer, SceneCapabilities.LogsRead, out RpcFailure logsAuth))
                         {
@@ -631,6 +726,15 @@ namespace BrainRegion.RuntimeBridge
                 "capability_required");
             failure.Data["requiredCapability"] = capability;
             return false;
+        }
+
+        private static bool TryRequireWorldLoadCapabilities(
+            AuthenticatedPeerContext peer,
+            out RpcFailure failure)
+        {
+            return TryRequireCapability(peer, SceneCapabilities.PersistenceRead, out failure) &&
+                   TryRequireCapability(peer, SceneCapabilities.SceneWrite, out failure) &&
+                   TryRequireCapability(peer, SceneCapabilities.SceneSpawn, out failure);
         }
 
         private bool TryAcceptPeerEpoch(AuthenticatedPeerContext peer, out RpcFailure failure)

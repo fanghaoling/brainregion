@@ -13,6 +13,10 @@
     { "$ref": "#/$defs/previewRequest" },
     { "$ref": "#/$defs/applyRequest" },
     { "$ref": "#/$defs/undoRequest" },
+    { "$ref": "#/$defs/persistenceListRequest" },
+    { "$ref": "#/$defs/persistenceSaveRequest" },
+    { "$ref": "#/$defs/persistenceLoadPreviewRequest" },
+    { "$ref": "#/$defs/persistenceLoadRequest" },
     { "$ref": "#/$defs/logsRequest" },
     { "$ref": "#/$defs/successResponse" },
     { "$ref": "#/$defs/errorResponse" },
@@ -38,6 +42,16 @@
       "type": "integer",
       "minimum": 0,
       "maximum": 9007199254740991
+    },
+    "worldSlot": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9_-]{0,63}$"
+    },
+    "worldDigest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
     },
     "vec3": {
       "type": "object",
@@ -181,7 +195,7 @@
               "type": "array",
               "uniqueItems": true,
               "items": {
-                "enum": ["scene.read", "scene.write", "scene.spawn", "scene.undo", "logs.read"]
+                "enum": ["scene.read", "scene.write", "scene.spawn", "scene.undo", "persistence.read", "persistence.write", "logs.read"]
               }
             }
           },
@@ -216,7 +230,7 @@
               "minItems": 1,
               "uniqueItems": true,
               "items": {
-                "enum": ["scene.read", "scene.write", "scene.spawn", "scene.undo", "logs.read"]
+                "enum": ["scene.read", "scene.write", "scene.spawn", "scene.undo", "persistence.read", "persistence.write", "logs.read"]
               }
             },
             "pairingProof": { "type": ["string", "null"], "pattern": "^hmac-sha256\\.[A-Za-z0-9_-]{43}$" }
@@ -375,6 +389,89 @@
       "required": ["jsonrpc", "id", "method", "deadlineUnixMs", "params"],
       "additionalProperties": false
     },
+    "persistenceListRequest": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "persistence/list" },
+        "deadlineUnixMs": { "$ref": "#/$defs/deadline" },
+        "params": { "type": "object", "maxProperties": 0 }
+      },
+      "required": ["jsonrpc", "id", "method", "deadlineUnixMs", "params"],
+      "additionalProperties": false
+    },
+    "persistenceSaveRequest": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "persistence/save" },
+        "deadlineUnixMs": { "$ref": "#/$defs/deadline" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "slot": { "$ref": "#/$defs/worldSlot" },
+            "expectedRevision": { "$ref": "#/$defs/revision" },
+            "clientMutationId": { "$ref": "#/$defs/id" },
+            "expectedSlotDigest": { "$ref": "#/$defs/worldDigest" },
+            "metadata": {
+              "type": "object",
+              "properties": {
+                "label": { "type": "string", "maxLength": 256 }
+              },
+              "additionalProperties": false
+            }
+          },
+          "required": ["slot", "expectedRevision", "clientMutationId"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "id", "method", "deadlineUnixMs", "params"],
+      "additionalProperties": false
+    },
+    "persistenceLoadPreviewRequest": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "persistence/loadPreview" },
+        "deadlineUnixMs": { "$ref": "#/$defs/deadline" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "slot": { "$ref": "#/$defs/worldSlot" },
+            "expectedRevision": { "$ref": "#/$defs/revision" },
+            "clientMutationId": { "$ref": "#/$defs/id" }
+          },
+          "required": ["slot", "expectedRevision", "clientMutationId"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "id", "method", "deadlineUnixMs", "params"],
+      "additionalProperties": false
+    },
+    "persistenceLoadRequest": {
+      "type": "object",
+      "properties": {
+        "jsonrpc": { "const": "2.0" },
+        "id": { "$ref": "#/$defs/id" },
+        "method": { "const": "persistence/load" },
+        "deadlineUnixMs": { "$ref": "#/$defs/deadline" },
+        "params": {
+          "type": "object",
+          "properties": {
+            "previewToken": { "$ref": "#/$defs/id" },
+            "expectedRevision": { "$ref": "#/$defs/revision" },
+            "clientMutationId": { "$ref": "#/$defs/id" }
+          },
+          "required": ["previewToken", "expectedRevision", "clientMutationId"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["jsonrpc", "id", "method", "deadlineUnixMs", "params"],
+      "additionalProperties": false
+    },
     "logsRequest": {
       "type": "object",
       "properties": {
@@ -479,7 +576,7 @@
           "type": "array",
           "minItems": 1,
           "uniqueItems": true,
-          "items": { "enum": ["scene.read", "scene.write", "scene.spawn", "scene.undo", "logs.read"] }
+          "items": { "enum": ["scene.read", "scene.write", "scene.spawn", "scene.undo", "persistence.read", "persistence.write", "logs.read"] }
         }
       },
       "required": ["protocolVersion", "instanceId", "sessionId", "buildId", "unityVersion", "platform", "product", "sceneId", "sceneRevision", "status", "error", "capabilities"],
@@ -568,6 +665,94 @@
       "required": ["sceneRevision", "undoId", "undoneClientMutationId"],
       "additionalProperties": false
     },
+    "persistenceListResult": {
+      "type": "object",
+      "properties": {
+        "slots": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "properties": {
+              "slot": { "$ref": "#/$defs/worldSlot" },
+              "digest": { "$ref": "#/$defs/worldDigest" },
+              "savedRevision": { "$ref": "#/$defs/revision" },
+              "savedUnixMs": { "$ref": "#/$defs/deadline" },
+              "label": { "type": ["string", "null"], "maxLength": 256 },
+              "bytes": { "type": "integer", "minimum": 1, "maximum": 1048576 }
+            },
+            "required": ["slot", "digest", "savedRevision", "savedUnixMs", "label", "bytes"],
+            "additionalProperties": false
+          }
+        },
+        "corruptSlots": {
+          "type": "array",
+          "maxItems": 32,
+          "items": {
+            "type": "object",
+            "properties": {
+              "slot": { "type": "string", "minLength": 1, "maxLength": 255 },
+              "reason": { "type": "string", "minLength": 1, "maxLength": 128 }
+            },
+            "required": ["slot", "reason"],
+            "additionalProperties": false
+          }
+        },
+        "maximumSlots": { "const": 32 },
+        "maximumFileBytes": { "const": 1048576 },
+        "maximumStorageBytes": { "const": 16777216 }
+      },
+      "required": ["slots", "corruptSlots", "maximumSlots", "maximumFileBytes", "maximumStorageBytes"],
+      "additionalProperties": false
+    },
+    "persistenceSaveResult": {
+      "type": "object",
+      "properties": {
+        "slot": { "$ref": "#/$defs/worldSlot" },
+        "digest": { "$ref": "#/$defs/worldDigest" },
+        "savedRevision": { "$ref": "#/$defs/revision" },
+        "bytes": { "type": "integer", "minimum": 1, "maximum": 1048576 },
+        "idempotentReplay": { "type": "boolean" }
+      },
+      "required": ["slot", "digest", "savedRevision", "bytes", "idempotentReplay"],
+      "additionalProperties": false
+    },
+    "persistenceLoadPreviewResult": {
+      "type": "object",
+      "properties": {
+        "previewToken": { "$ref": "#/$defs/id" },
+        "slot": { "$ref": "#/$defs/worldSlot" },
+        "digest": { "$ref": "#/$defs/worldDigest" },
+        "baseRevision": { "$ref": "#/$defs/revision" },
+        "clientMutationId": { "$ref": "#/$defs/id" },
+        "expiresAtUnixMs": { "$ref": "#/$defs/deadline" },
+        "summary": {
+          "type": "object",
+          "properties": {
+            "entities": { "type": "integer", "minimum": 1, "maximum": 256 },
+            "create": { "type": "integer", "minimum": 0, "maximum": 256 },
+            "reuse": { "type": "integer", "minimum": 0, "maximum": 256 },
+            "remove": { "type": "integer", "minimum": 0, "maximum": 256 }
+          },
+          "required": ["entities", "create", "reuse", "remove"],
+          "additionalProperties": false
+        }
+      },
+      "required": ["previewToken", "slot", "digest", "baseRevision", "clientMutationId", "expiresAtUnixMs", "summary"],
+      "additionalProperties": false
+    },
+    "persistenceLoadResult": {
+      "type": "object",
+      "properties": {
+        "slot": { "$ref": "#/$defs/worldSlot" },
+        "digest": { "$ref": "#/$defs/worldDigest" },
+        "sceneRevision": { "$ref": "#/$defs/revision" },
+        "clientMutationId": { "$ref": "#/$defs/id" },
+        "idempotentReplay": { "type": "boolean" }
+      },
+      "required": ["slot", "digest", "sceneRevision", "clientMutationId", "idempotentReplay"],
+      "additionalProperties": false
+    },
     "logsResult": {
       "type": "object",
       "properties": {
@@ -607,6 +792,10 @@
             { "$ref": "#/$defs/previewResult" },
             { "$ref": "#/$defs/mutationResult" },
             { "$ref": "#/$defs/undoResult" },
+            { "$ref": "#/$defs/persistenceListResult" },
+            { "$ref": "#/$defs/persistenceSaveResult" },
+            { "$ref": "#/$defs/persistenceLoadPreviewResult" },
+            { "$ref": "#/$defs/persistenceLoadResult" },
             { "$ref": "#/$defs/logsResult" }
           ]
         }

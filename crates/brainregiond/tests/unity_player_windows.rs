@@ -257,6 +257,8 @@ async fn packaged_il2cpp_player_executes_transaction_and_reconnects() {
         principal_id: PRINCIPAL_ID.to_owned(),
         pairing_secret: PairingSecret::new(secret.as_bytes()).unwrap(),
         granted_capabilities: vec![
+            SceneCapability::PersistenceRead,
+            SceneCapability::PersistenceWrite,
             SceneCapability::SceneRead,
             SceneCapability::SceneSpawn,
             SceneCapability::SceneWrite,
@@ -281,6 +283,8 @@ async fn packaged_il2cpp_player_executes_transaction_and_reconnects() {
     assert_eq!(
         first_snapshot.granted_capabilities,
         vec![
+            SceneCapability::PersistenceRead,
+            SceneCapability::PersistenceWrite,
             SceneCapability::SceneRead,
             SceneCapability::SceneSpawn,
             SceneCapability::SceneUndo,
@@ -714,6 +718,20 @@ async fn packaged_il2cpp_player_executes_transaction_and_reconnects() {
         hierarchy_with_spawn["nodes"].as_array().map(Vec::len),
         Some(2)
     );
+    let spawned_world = third
+        .request(
+            SceneMethod::PersistenceSave,
+            json!({
+                "slot": "integration-spawned",
+                "expectedRevision": 7,
+                "clientMutationId": "smoke-world-save-spawned-01",
+                "metadata": {"label": "World with generated prefab"},
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(spawned_world["savedRevision"], 7);
     let spawn_undone = third
         .request(
             SceneMethod::Undo,
@@ -759,12 +777,207 @@ async fn packaged_il2cpp_player_executes_transaction_and_reconnects() {
             .contains(&"BrainRegion Additive Lifecycle Object".to_owned())
     );
 
+    // WorldDocument slots are hashed and saved atomically. Only properties marked
+    // persistent are captured; load is a revision-bound preview/apply mutation.
+    let invalid_slot = third
+        .request(
+            SceneMethod::PersistenceSave,
+            json!({
+                "slot": "../escape",
+                "expectedRevision": 16,
+                "clientMutationId": "smoke-world-invalid-slot-01",
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+    assert_upstream_error(invalid_slot, -32020, "invalid_persistence_params");
+
+    let save_params = json!({
+        "slot": "integration-smoke",
+        "expectedRevision": 16,
+        "clientMutationId": "smoke-world-save-01",
+        "metadata": {"label": "IL2CPP integration world"},
+    });
+    let saved = third
+        .request(
+            SceneMethod::PersistenceSave,
+            save_params.clone(),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(saved["slot"], "integration-smoke");
+    assert_eq!(saved["savedRevision"], 16);
+    assert_eq!(saved["idempotentReplay"], false);
+    assert!(
+        saved["digest"]
+            .as_str()
+            .is_some_and(|digest| digest.starts_with("sha256:") && digest.len() == 71)
+    );
+    let save_replay = third
+        .request(SceneMethod::PersistenceSave, save_params, REQUEST_TIMEOUT)
+        .await
+        .unwrap();
+    assert_eq!(save_replay["digest"], saved["digest"]);
+    assert_eq!(save_replay["idempotentReplay"], true);
+    let digest_conflict = third
+        .request(
+            SceneMethod::PersistenceSave,
+            json!({
+                "slot": "integration-smoke",
+                "expectedRevision": 16,
+                "clientMutationId": "smoke-world-save-conflict-01",
+                "expectedSlotDigest": format!("sha256:{}", "0".repeat(64)),
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+    assert_upstream_error(digest_conflict, -32020, "slot_digest_conflict");
+
+    let listed = third
+        .request(SceneMethod::PersistenceList, json!({}), REQUEST_TIMEOUT)
+        .await
+        .unwrap();
+    assert!(listed["slots"].as_array().is_some_and(|slots| {
+        slots
+            .iter()
+            .any(|slot| slot["slot"] == "integration-smoke" && slot["digest"] == saved["digest"])
+    }));
+
+    let post_save_preview = third
+        .request(
+            SceneMethod::Preview,
+            json!({
+                "expectedRevision": 16,
+                "clientMutationId": "smoke-post-save-change-01",
+                "commands": [{
+                    "kind": "set_properties",
+                    "objectId": SMOKE_OBJECT_ID,
+                    "componentId": SMOKE_COMPONENT_ID,
+                    "changes": [{"propertyId": "counter", "value": 41}],
+                }],
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    let post_save_applied = third
+        .request(
+            SceneMethod::Apply,
+            json!({
+                "previewToken": post_save_preview["previewToken"],
+                "expectedRevision": 16,
+                "clientMutationId": "smoke-post-save-change-01",
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(post_save_applied["sceneRevision"], 17);
+    assert_eq!(inspect_counter(&third).await, 41);
+
+    let load_preview = third
+        .request(
+            SceneMethod::PersistenceLoadPreview,
+            json!({
+                "slot": "integration-smoke",
+                "expectedRevision": 17,
+                "clientMutationId": "smoke-world-load-01",
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(load_preview["baseRevision"], 17);
+    assert_eq!(load_preview["summary"]["entities"], 1);
+    assert_eq!(load_preview["summary"]["create"], 0);
+    // Preview is side-effect free.
+    assert_eq!(inspect_counter(&third).await, 41);
+
+    let load_params = json!({
+        "previewToken": load_preview["previewToken"],
+        "expectedRevision": 17,
+        "clientMutationId": "smoke-world-load-01",
+    });
+    let loaded = third
+        .request(
+            SceneMethod::PersistenceLoad,
+            load_params.clone(),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(loaded["sceneRevision"], 18);
+    assert_eq!(loaded["digest"], saved["digest"]);
+    assert_eq!(loaded["idempotentReplay"], false);
+    assert_eq!(inspect_counter(&third).await, 1);
+    let load_replay = third
+        .request(SceneMethod::PersistenceLoad, load_params, REQUEST_TIMEOUT)
+        .await
+        .unwrap();
+    assert_eq!(load_replay["sceneRevision"], 18);
+    assert_eq!(load_replay["idempotentReplay"], true);
+    assert_eq!(inspect_counter(&third).await, 1);
+
+    // A second document was saved while the generated prefab existed. Loading it
+    // after Undo must recreate the exact objectId from the catalog and still stage
+    // Awake/OnEnable behind identity assignment.
+    let spawned_load_preview = third
+        .request(
+            SceneMethod::PersistenceLoadPreview,
+            json!({
+                "slot": "integration-spawned",
+                "expectedRevision": 18,
+                "clientMutationId": "smoke-world-load-spawned-01",
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(spawned_load_preview["summary"]["create"], 1);
+    let spawned_loaded = third
+        .request(
+            SceneMethod::PersistenceLoad,
+            json!({
+                "previewToken": spawned_load_preview["previewToken"],
+                "expectedRevision": 18,
+                "clientMutationId": "smoke-world-load-spawned-01",
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(spawned_loaded["sceneRevision"], 19);
+    assert_eq!(hierarchy_names(&third).await.len(), 2);
+    assert_eq!(
+        inspect_property(
+            &third,
+            &spawned_object_id,
+            &staging_component_id,
+            "awake_identity",
+        )
+        .await,
+        spawned_object_id
+    );
+    assert_eq!(
+        inspect_property(
+            &third,
+            &spawned_object_id,
+            &staging_component_id,
+            "enable_identity",
+        )
+        .await,
+        spawned_object_id
+    );
+
     registry.close_all().await;
     listener.shutdown().await.unwrap();
     if player.try_wait().unwrap().is_none() {
         player.start_kill().unwrap();
     }
-    tokio::time::timeout(Duration::from_secs(10), player.wait())
+    tokio::time::timeout(Duration::from_secs(30), player.wait())
         .await
         .expect("Unity smoke Player did not exit after kill")
         .expect("could not wait for Unity smoke Player");

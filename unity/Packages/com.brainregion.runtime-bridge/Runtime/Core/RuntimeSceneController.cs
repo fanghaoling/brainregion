@@ -111,7 +111,13 @@ namespace BrainRegion.RuntimeBridge
                 ["sceneRevision"] = sceneRevision,
                 ["status"] = IsReady ? "ready" : "degraded",
                 ["error"] = initializationError,
-                ["capabilities"] = new JArray("scene.read", "scene.write", "scene.spawn", "scene.undo"),
+                ["capabilities"] = new JArray(
+                    "scene.read",
+                    "scene.write",
+                    "scene.spawn",
+                    "scene.undo",
+                    "persistence.read",
+                    "persistence.write"),
             };
         }
 
@@ -336,6 +342,7 @@ namespace BrainRegion.RuntimeBridge
             // command log. It invalidates every outstanding preview and forms a
             // linear-history barrier so a later RPC undo cannot overwrite newer game
             // state with a stale inverse snapshot.
+            InvalidateWorldLoadPreviews();
             EstablishExternalMutationBarrier();
             AdvanceRevision(null, string.IsNullOrWhiteSpace(summary) ? "external mutation" : summary);
         }

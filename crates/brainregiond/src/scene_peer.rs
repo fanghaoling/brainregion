@@ -87,6 +87,10 @@ pub enum SceneMethod {
     Preview,
     Apply,
     Undo,
+    PersistenceList,
+    PersistenceSave,
+    PersistenceLoadPreview,
+    PersistenceLoad,
     LogsPoll,
 }
 
@@ -100,6 +104,10 @@ impl SceneMethod {
             Self::Preview => "scene/preview",
             Self::Apply => "scene/apply",
             Self::Undo => "history/undo",
+            Self::PersistenceList => "persistence/list",
+            Self::PersistenceSave => "persistence/save",
+            Self::PersistenceLoadPreview => "persistence/loadPreview",
+            Self::PersistenceLoad => "persistence/load",
             Self::LogsPoll => "logs/poll",
         }
     }
@@ -113,6 +121,10 @@ impl SceneMethod {
             "scene/preview" => Some(Self::Preview),
             "scene/apply" => Some(Self::Apply),
             "history/undo" => Some(Self::Undo),
+            "persistence/list" => Some(Self::PersistenceList),
+            "persistence/save" => Some(Self::PersistenceSave),
+            "persistence/loadPreview" => Some(Self::PersistenceLoadPreview),
+            "persistence/load" => Some(Self::PersistenceLoad),
             "logs/poll" => Some(Self::LogsPoll),
             _ => None,
         }
@@ -125,12 +137,19 @@ impl SceneMethod {
             }
             Self::Preview | Self::Apply => SceneCapability::SceneWrite,
             Self::Undo => SceneCapability::SceneUndo,
+            Self::PersistenceList | Self::PersistenceLoadPreview => {
+                SceneCapability::PersistenceRead
+            }
+            Self::PersistenceSave | Self::PersistenceLoad => SceneCapability::PersistenceWrite,
             Self::LogsPoll => SceneCapability::LogsRead,
         }
     }
 
     fn may_mutate_scene(self) -> bool {
-        matches!(self, Self::Apply | Self::Undo)
+        matches!(
+            self,
+            Self::Apply | Self::Undo | Self::PersistenceSave | Self::PersistenceLoad
+        )
     }
 }
 
@@ -376,6 +395,21 @@ impl ScenePeerHandle {
         self.require_capability(method.required_capability())?;
         if method == SceneMethod::Preview && preview_contains_spawn(&params) {
             self.require_capability(SceneCapability::SceneSpawn)?;
+        }
+        match method {
+            SceneMethod::PersistenceSave => {
+                self.require_capability(SceneCapability::SceneRead)?;
+            }
+            SceneMethod::PersistenceLoadPreview => {
+                self.require_capability(SceneCapability::SceneWrite)?;
+                self.require_capability(SceneCapability::SceneSpawn)?;
+            }
+            SceneMethod::PersistenceLoad => {
+                self.require_capability(SceneCapability::PersistenceRead)?;
+                self.require_capability(SceneCapability::SceneWrite)?;
+                self.require_capability(SceneCapability::SceneSpawn)?;
+            }
+            _ => {}
         }
 
         let (deadline_unix_ms, deadline_at) = request_deadline(timeout)?;
@@ -902,6 +936,8 @@ fn capability_name(capability: SceneCapability) -> &'static str {
         SceneCapability::SceneWrite => "scene.write",
         SceneCapability::SceneSpawn => "scene.spawn",
         SceneCapability::SceneUndo => "scene.undo",
+        SceneCapability::PersistenceRead => "persistence.read",
+        SceneCapability::PersistenceWrite => "persistence.write",
         SceneCapability::LogsRead => "logs.read",
     }
 }

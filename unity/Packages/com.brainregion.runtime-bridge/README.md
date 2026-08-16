@@ -12,6 +12,7 @@ The first slice deliberately exposes a small, reversible surface:
 - instantiate prefabs from an application-owned catalog;
 - preview and then atomically apply transform, active-state, and exposed-property changes;
 - undo the most recent Scene RPC transaction;
+- save, enumerate, preview, and restore bounded `brainregion.world.v1` documents;
 - enqueue JSON-RPC work from a transport and execute it under a main-thread budget.
 
 No network listener is enabled by this package. The opt-in
@@ -42,6 +43,10 @@ enforces these grants independently of the transport:
 | a preview containing `spawn`, and its apply/replay | `scene.spawn` in addition to `scene.write` |
 | `history/undo` | `scene.undo` |
 | `logs/poll` | `logs.read` |
+| `persistence/list` | `persistence.read` |
+| `persistence/save` | `persistence.write` and `scene.read` |
+| `persistence/loadPreview` | `persistence.read`, `scene.write`, and `scene.spawn` |
+| `persistence/load` | `persistence.read`, `persistence.write`, `scene.write`, and `scene.spawn` |
 
 A preview token is bound to its authenticated principal and connection epoch;
 another connection must preview again. Applied mutation receipts remain bound
@@ -100,11 +105,33 @@ Prefab activation is intentionally the final transaction step. Project
 irreversible filesystem, network, or application side effects: Unity does not
 provide a general rollback mechanism for arbitrary lifecycle callbacks.
 
+World persistence writes only to fixed slots below
+`Application.persistentDataPath/BrainRegion/Worlds`. Slot names are restricted,
+and the implementation enforces 32 slots, 1 MiB per document, 16 MiB total,
+256 entities, and 2048 persistent properties. Files are strict versioned JSON
+envelopes with a SHA-256 integrity digest and same-directory atomic replacement.
+The digest detects corruption but is not an authenticity signature.
+
+Only sandbox identities and adapter properties marked both persistent and
+writable are captured. A load preview validates product/build/scene/catalog
+compatibility, base identities, prefab membership, topology, and property
+values without changing the scene. The resulting token is bound to the peer,
+connection epoch, revision, mutation ID, and document digest. Load can recreate
+missing catalog instances with their saved object IDs and rolls back on failure.
+Successful load creates an Undo/history barrier.
+
+Serialization, hashing, and bounded file I/O are currently synchronous explicit
+main-thread operations. Before enabling persistence in a latency-sensitive VR
+product, move those phases to background work and leave only final validation
+and scene application on the Unity thread. Android/Quest storage and crash-
+recovery behavior have not yet been smoke-tested.
+
 The package includes EditMode tests for the Rust/C# pairing golden vector,
 expired and over-granted challenges, JSONL frame bounds, writer backpressure,
 deterministic binding source, and GUID-based catalog generation. The repository
 smoke Player also exercises generated property write/Undo, generated catalog
 spawn/Undo, pre-activation identity staging, active dynamic object registration
-and destruction cleanup, and additive scene load/unload under Windows IL2CPP
-with High managed stripping. Product integration still needs platform-specific
+and destruction cleanup, additive scene load/unload, and WorldDocument
+save/list/load with structural prefab recreation under Windows IL2CPP with High
+managed stripping. Product integration still needs platform-specific
 PlayMode coverage and a real Windows/Android VR build after package import.

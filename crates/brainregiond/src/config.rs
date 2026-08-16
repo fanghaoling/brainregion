@@ -23,6 +23,7 @@ pub enum RunMode {
     Probe,
     Schema,
     SceneSchema,
+    WorldSchema,
     Help,
     Version,
 }
@@ -167,6 +168,10 @@ impl DaemonConfig {
                 }
                 "scene-schema" => {
                     self.mode = RunMode::SceneSchema;
+                    args.next();
+                }
+                "world-schema" => {
+                    self.mode = RunMode::WorldSchema;
                     args.next();
                 }
                 "help" | "--help" | "-h" => {
@@ -348,7 +353,9 @@ fn parse_scene_capabilities(value: &str) -> Result<Vec<SceneCapability>> {
         SceneCapability::SceneWrite => 1,
         SceneCapability::SceneSpawn => 2,
         SceneCapability::SceneUndo => 3,
-        SceneCapability::LogsRead => 4,
+        SceneCapability::PersistenceRead => 4,
+        SceneCapability::PersistenceWrite => 5,
+        SceneCapability::LogsRead => 6,
     });
     capabilities.dedup();
     Ok(capabilities)
@@ -432,13 +439,14 @@ fn discover_mcp_process(current_dir: &Path) -> McpProcessConfig {
 }
 
 pub fn usage() -> &'static str {
-    "brainregiond [serve|probe|schema|scene-schema] [options]\n\
+    "brainregiond [serve|probe|schema|scene-schema|world-schema] [options]\n\
 \n\
 Commands:\n\
   serve                       Start the JSONL control protocol on stdin/stdout (default)\n\
   probe                       Initialize the MCP child, call ping, print JSON, and exit\n\
   schema                      Print the embedded control-protocol JSON Schema and exit\n\
   scene-schema                Print the embedded Runtime Scene RPC JSON Schema and exit\n\
+  world-schema                Print the embedded WorldDocument JSON Schema and exit\n\
 \n\
 Options:\n\
   --mcp-program PATH          MCP executable (default: local .venv Python or brain-region-mcp)\n\

@@ -22,6 +22,8 @@ pub const CONTROL_SCHEMA_JSON: &str =
     include_str!("../../../schemas/agent-core/v1/control-message.schema.json");
 pub const SCENE_SCHEMA_JSON: &str =
     include_str!("../../../schemas/scene-rpc/v1/scene-message.schema.json");
+pub const WORLD_DOCUMENT_SCHEMA_JSON: &str =
+    include_str!("../../../schemas/scene-rpc/v1/world-document.schema.json");
 pub const DAEMON_NAME: &str = "brainregiond";
 pub const DAEMON_VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -39,6 +41,16 @@ mod tests {
     #[test]
     fn embedded_scene_schema_is_valid_json() {
         let schema: serde_json::Value = serde_json::from_str(super::SCENE_SCHEMA_JSON).unwrap();
+        assert_eq!(
+            schema["$schema"],
+            "https://json-schema.org/draft/2020-12/schema"
+        );
+    }
+
+    #[test]
+    fn embedded_world_document_schema_is_valid_json() {
+        let schema: serde_json::Value =
+            serde_json::from_str(super::WORLD_DOCUMENT_SCHEMA_JSON).unwrap();
         assert_eq!(
             schema["$schema"],
             "https://json-schema.org/draft/2020-12/schema"
