@@ -19,7 +19,29 @@ New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 
 $playerPath = Join-Path $OutputDirectory 'BrainRegionScenePipeSmoke.exe'
 $logPath = Join-Path $OutputDirectory 'unity-build.log'
+$generationLogPath = Join-Path $OutputDirectory 'unity-binding-generation.log'
 $env:BRAINREGION_UNITY_SMOKE_OUTPUT = $playerPath
+
+$generationArguments = @(
+    '-batchmode',
+    '-nographics',
+    '-buildTarget', 'Win64',
+    '-projectPath', "`"$projectRoot`"",
+    '-executeMethod', 'BrainRegion.RuntimeBridge.Editor.RuntimePropertyBindingGenerator.GenerateAllBatch',
+    '-quit',
+    '-logFile', "`"$generationLogPath`""
+)
+$generationStartParameters = @{
+    FilePath = $UnityEditor
+    ArgumentList = $generationArguments
+    Wait = $true
+    PassThru = $true
+    WindowStyle = 'Hidden'
+}
+$generationProcess = Start-Process @generationStartParameters
+if ($generationProcess.ExitCode -ne 0) {
+    throw "Unity binding generation failed with exit code $($generationProcess.ExitCode). See $generationLogPath"
+}
 
 $arguments = @(
     '-batchmode',

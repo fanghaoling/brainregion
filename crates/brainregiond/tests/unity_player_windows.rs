@@ -22,6 +22,7 @@ const PLAYER_RECONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
 const SMOKE_OBJECT_ID: &str = "smoke-object-01";
 const SMOKE_COMPONENT_ID: &str = "smoke-object-01/smoke";
+const GENERATED_COMPONENT_ID: &str = "smoke-object-01/generated";
 
 fn unique_pipe_name() -> String {
     let nanos = SystemTime::now()
@@ -94,29 +95,49 @@ async fn wait_for_peer(
     }
 }
 
-async fn inspect_counter(peer: &ScenePeerHandle) -> i64 {
+async fn inspect_property(peer: &ScenePeerHandle, component_id: &str, property_id: &str) -> Value {
     let inspected = peer
         .request(
             SceneMethod::Inspect,
             json!({
                 "objectId": SMOKE_OBJECT_ID,
-                "componentIds": [SMOKE_COMPONENT_ID],
+                "componentIds": [component_id],
             }),
             REQUEST_TIMEOUT,
         )
         .await
         .unwrap();
-    assert_eq!(
-        inspected["object"]["components"][0]["componentId"],
-        SMOKE_COMPONENT_ID
-    );
-    assert_eq!(
-        inspected["object"]["components"][0]["properties"][0]["descriptor"]["propertyId"],
-        "counter"
-    );
-    inspected["object"]["components"][0]["properties"][0]["value"]
+    let component = inspected["object"]["components"]
+        .as_array()
+        .and_then(|components| {
+            components
+                .iter()
+                .find(|component| component["componentId"] == component_id)
+        })
+        .expect("requested smoke component must be present");
+    component["properties"]
+        .as_array()
+        .and_then(|properties| {
+            properties
+                .iter()
+                .find(|property| property["descriptor"]["propertyId"] == property_id)
+        })
+        .expect("requested smoke property must be present")["value"]
+        .clone()
+}
+
+async fn inspect_counter(peer: &ScenePeerHandle) -> i64 {
+    inspect_property(peer, SMOKE_COMPONENT_ID, "counter")
+        .await
         .as_i64()
         .expect("smoke counter must be an integer")
+}
+
+async fn inspect_generated_brightness(peer: &ScenePeerHandle) -> i64 {
+    inspect_property(peer, GENERATED_COMPONENT_ID, "brightness")
+        .await
+        .as_i64()
+        .expect("generated brightness must be an integer")
 }
 
 fn assert_upstream_error(error: BrainregiondError, code: i64, reason: &str) -> Value {
@@ -153,6 +174,7 @@ async fn packaged_il2cpp_player_executes_transaction_and_reconnects() {
         pairing_secret: PairingSecret::new(secret.as_bytes()).unwrap(),
         granted_capabilities: vec![
             SceneCapability::SceneRead,
+            SceneCapability::SceneSpawn,
             SceneCapability::SceneWrite,
             SceneCapability::SceneUndo,
         ],
@@ -176,6 +198,7 @@ async fn packaged_il2cpp_player_executes_transaction_and_reconnects() {
         first_snapshot.granted_capabilities,
         vec![
             SceneCapability::SceneRead,
+            SceneCapability::SceneSpawn,
             SceneCapability::SceneUndo,
             SceneCapability::SceneWrite,
         ]
@@ -199,6 +222,28 @@ async fn packaged_il2cpp_player_executes_transaction_and_reconnects() {
     assert_eq!(hierarchy["nodes"].as_array().map(Vec::len), Some(1));
     assert_eq!(hierarchy["nodes"][0]["objectId"], SMOKE_OBJECT_ID);
     assert_eq!(inspect_counter(&first).await, 1);
+    assert_eq!(inspect_generated_brightness(&first).await, 2);
+
+    let prefab_list = first
+        .request(SceneMethod::PrefabList, json!({}), REQUEST_TIMEOUT)
+        .await
+        .unwrap();
+    assert!(
+        prefab_list["schemaVersion"]
+            .as_str()
+            .is_some_and(|version| version.starts_with("1-")),
+        "unexpected generated prefab catalog: {prefab_list:#?}"
+    );
+    assert_eq!(prefab_list["entries"].as_array().map(Vec::len), Some(1));
+    assert_eq!(
+        prefab_list["entries"][0]["displayName"],
+        "Generated Runtime Prefab"
+    );
+    assert_eq!(prefab_list["entries"][0]["tags"], json!(["smoke"]));
+    let generated_prefab_id = prefab_list["entries"][0]["prefabId"]
+        .as_str()
+        .expect("generated catalog entry must have a prefab id")
+        .to_owned();
 
     let invalid_value = first
         .request(
@@ -472,6 +517,109 @@ async fn packaged_il2cpp_player_executes_transaction_and_reconnects() {
         unknown_mutation_id
     );
     assert_eq!(inspect_counter(&third).await, 1);
+
+    // Generated direct-access bindings must survive High managed stripping in
+    // the packaged IL2CPP Player and remain reversible.
+    let generated_mutation_id = "smoke-generated-binding-01";
+    let generated_preview = third
+        .request(
+            SceneMethod::Preview,
+            json!({
+                "expectedRevision": 4,
+                "clientMutationId": generated_mutation_id,
+                "commands": [{
+                    "kind": "set_properties",
+                    "objectId": SMOKE_OBJECT_ID,
+                    "componentId": GENERATED_COMPONENT_ID,
+                    "changes": [{"propertyId": "brightness", "value": 8}],
+                }],
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    let generated_applied = third
+        .request(
+            SceneMethod::Apply,
+            json!({
+                "previewToken": generated_preview["previewToken"],
+                "expectedRevision": 4,
+                "clientMutationId": generated_mutation_id,
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(generated_applied["sceneRevision"], 5);
+    assert_eq!(inspect_generated_brightness(&third).await, 8);
+    let generated_undone = third
+        .request(
+            SceneMethod::Undo,
+            json!({
+                "expectedRevision": 5,
+                "undoId": generated_applied["undoId"],
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(generated_undone["sceneRevision"], 6);
+    assert_eq!(inspect_generated_brightness(&third).await, 2);
+
+    // Spawn through the generated catalog's opaque, GUID-derived prefab ID.
+    let spawn_mutation_id = "smoke-generated-catalog-01";
+    let spawn_preview = third
+        .request(
+            SceneMethod::Preview,
+            json!({
+                "expectedRevision": 6,
+                "clientMutationId": spawn_mutation_id,
+                "commands": [{
+                    "kind": "spawn",
+                    "tempId": "tmp:generated-prefab",
+                    "prefabId": generated_prefab_id,
+                }],
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    let spawned = third
+        .request(
+            SceneMethod::Apply,
+            json!({
+                "previewToken": spawn_preview["previewToken"],
+                "expectedRevision": 6,
+                "clientMutationId": spawn_mutation_id,
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(spawned["sceneRevision"], 7);
+    assert!(spawned["tempIdMap"]["tmp:generated-prefab"].is_string());
+    let hierarchy_with_spawn = third
+        .request(SceneMethod::Hierarchy, json!({}), REQUEST_TIMEOUT)
+        .await
+        .unwrap();
+    assert_eq!(
+        hierarchy_with_spawn["nodes"].as_array().map(Vec::len),
+        Some(2)
+    );
+    let spawn_undone = third
+        .request(
+            SceneMethod::Undo,
+            json!({"expectedRevision": 7, "undoId": spawned["undoId"]}),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(spawn_undone["sceneRevision"], 8);
+    let final_hierarchy = third
+        .request(SceneMethod::Hierarchy, json!({}), REQUEST_TIMEOUT)
+        .await
+        .unwrap();
+    assert_eq!(final_hierarchy["nodes"].as_array().map(Vec::len), Some(1));
 
     registry.close_all().await;
     listener.shutdown().await.unwrap();

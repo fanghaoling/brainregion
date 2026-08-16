@@ -53,6 +53,15 @@ Before building, the Editor validator rejects missing/duplicate authored object
 IDs and invalid prefab catalogs. Use **Tools > BrainRegion > Assign Missing
 Runtime IDs**, then save the modified scenes.
 
+The default application catalog can be generated instead of maintained by hand.
+Add the `BrainRegionRuntimePrefab` asset label to each allowed prefab, keep exactly
+one `RpcObjectIdentity` on its root, then run **Tools > BrainRegion > Rebuild
+Runtime Prefab Catalog**. The generated asset is written to
+`Assets/BrainRegionGenerated/RuntimePrefabCatalog.asset`; each wire `prefabId`
+uses the prefab asset GUID, so moving or renaming the asset does not change its
+identity. Other sorted Unity asset labels become catalog tags. The same generator
+runs before Player builds when labeled sources or the generated catalog exist.
+
 JSON envelope and typed DTO parsing now happen in `TryEnqueue`, before the
 request reaches the Unity main-thread queue. Completion callbacks still run on
 the main thread and must only enqueue bytes for a non-blocking transport writer.
@@ -64,9 +73,19 @@ call `BuildRegistrationNotification`.
 Arbitrary reflection, method invocation, component injection, and C# evaluation
 are intentionally absent. Project components opt in by deriving from
 `RpcPropertyAdapterBehaviour` and implementing typed validation/read/write.
+For simple public fields or properties, mark a public `MonoBehaviour` with
+`[RpcBindingTarget(componentKey, typeId)]` and selected writable members with
+`[RpcExposedProperty(propertyId)]`, then run **Tools > BrainRegion > Generate
+Runtime Property Bindings**. The Editor uses reflection only while generating;
+the emitted `IRpcPropertyAdapter` code performs direct typed member access in the
+Player. v1 generation supports `bool`, `int`, `float`, `double`, and bounded
+`string` members. Complex state and side effects still require a hand-written
+adapter with explicit rollback behavior.
 
 The package includes EditMode tests for the Rust/C# pairing golden vector,
-expired and over-granted challenges, JSONL frame bounds, and writer backpressure.
-Before write capabilities are enabled in a product, the integration still needs
-Player tests for scene unload/reload, dynamic project-owned object registration,
-prefab `Awake`/`OnEnable` staging, and a real Windows IL2CPP pipe smoke.
+expired and over-granted challenges, JSONL frame bounds, writer backpressure,
+deterministic binding source, and GUID-based catalog generation. The repository
+smoke Player also exercises generated property write/Undo and generated catalog
+spawn/Undo under Windows IL2CPP with High managed stripping. Product integration
+still needs tests for scene unload/reload, dynamic project-owned object
+registration, and prefab `Awake`/`OnEnable` staging.
