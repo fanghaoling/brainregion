@@ -107,6 +107,11 @@ namespace BrainRegion.RuntimeBridge.Editor
                 throw new BuildFailedException(
                     $"BrainRegion catalog prefab '{path}' must have exactly one root RpcObjectIdentity");
             }
+            if (prefab.activeSelf)
+            {
+                throw new BuildFailedException(
+                    $"BrainRegion catalog prefab '{path}' must have an inactive root so its runtime identity is assigned before Awake/OnEnable");
+            }
 
             List<string> tags = AssetDatabase.GetLabels(prefab)
                 .Where(label => !string.Equals(label, sourceLabel, StringComparison.Ordinal))

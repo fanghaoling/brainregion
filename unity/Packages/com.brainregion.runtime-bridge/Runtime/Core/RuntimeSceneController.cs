@@ -17,6 +17,7 @@ namespace BrainRegion.RuntimeBridge
     {
         [SerializeField] private Transform sandboxRoot;
         [SerializeField] private RuntimePrefabCatalog prefabCatalog;
+        [SerializeField] private bool includeLoadedScenes;
         [SerializeField, Min(1)] private int maxUndoEntries = 128;
         [SerializeField, Min(1f)] private float previewLifetimeSeconds = 30f;
 
@@ -27,6 +28,10 @@ namespace BrainRegion.RuntimeBridge
         private string instanceId;
         private string sessionId;
         private long sceneRevision;
+        private bool lifecycleInitialized;
+        private bool lifecycleReconcileRequested;
+        private bool lifecycleChangePending;
+        private string lastLifecycleWarning;
 
         public long SceneRevision => sceneRevision;
         public string InstanceId => instanceId;
@@ -52,6 +57,41 @@ namespace BrainRegion.RuntimeBridge
 
             if (!TryIndexExistingObjects(out string registryError))
                 initializationError = AppendError(initializationError, registryError);
+
+            lifecycleInitialized = true;
+            lifecycleReconcileRequested = true;
+        }
+
+        private void OnEnable()
+        {
+            RuntimeIdentityLifecycle.Changed += HandleIdentityLifecycleChanged;
+            SceneManager.sceneLoaded += HandleSceneLoaded;
+            SceneManager.sceneUnloaded += HandleSceneUnloaded;
+            lifecycleReconcileRequested = true;
+        }
+
+        private void OnDisable()
+        {
+            RuntimeIdentityLifecycle.Changed -= HandleIdentityLifecycleChanged;
+            SceneManager.sceneLoaded -= HandleSceneLoaded;
+            SceneManager.sceneUnloaded -= HandleSceneUnloaded;
+        }
+
+        private void OnDestroy()
+        {
+            foreach (RpcObjectIdentity identity in objects.Values.ToArray())
+            {
+                if (identity != null)
+                    identity.Release(this);
+            }
+            objects.Clear();
+        }
+
+        private void LateUpdate()
+        {
+            if (!lifecycleInitialized || !lifecycleReconcileRequested) return;
+            lifecycleReconcileRequested = false;
+            ReconcileRuntimeIdentities();
         }
 
         public JObject GetRuntimeInfo()
@@ -308,10 +348,11 @@ namespace BrainRegion.RuntimeBridge
         public bool TryRegister(RpcObjectIdentity identity, out string error)
         {
             AssertMainThread();
-            if (identity == null ||
-                (identity.transform != SandboxRoot && !identity.transform.IsChildOf(SandboxRoot)))
+            if (!IsIdentityInScope(identity))
             {
-                error = "Editable object must be inside the configured sandbox root";
+                error = includeLoadedScenes
+                    ? "Editable object must belong to a loaded scene"
+                    : "Editable object must be inside the configured sandbox root";
                 return false;
             }
             identity.EnsureIdentity();
@@ -403,6 +444,7 @@ namespace BrainRegion.RuntimeBridge
                 return false;
             }
             if (!TryValidateAdapters(identity, out error)) return false;
+            if (!identity.TryClaim(this, out error)) return false;
             objects.Add(identity.StableId, identity);
             error = null;
             return true;
@@ -412,30 +454,143 @@ namespace BrainRegion.RuntimeBridge
         {
             if (identity == null || string.IsNullOrEmpty(identity.StableId)) return;
             if (objects.TryGetValue(identity.StableId, out RpcObjectIdentity current) && current == identity)
+            {
                 objects.Remove(identity.StableId);
+                identity.Release(this);
+            }
         }
 
         private bool TryIndexExistingObjects(out string error)
         {
+            foreach (RpcObjectIdentity existing in objects.Values.ToArray())
+            {
+                if (existing != null)
+                    existing.Release(this);
+            }
             objects.Clear();
-            foreach (RpcObjectIdentity identity in SandboxRoot.GetComponentsInChildren<RpcObjectIdentity>(true))
+            foreach (RpcObjectIdentity identity in EnumerateScopedIdentities())
             {
                 identity.EnsureIdentity();
-                if (!SceneProtocol.IsIdentifier(identity.StableId, 160))
-                {
-                    error = $"RpcObjectIdentity '{identity.StableId}' is not a valid wire identifier";
-                    return false;
-                }
-                if (objects.ContainsKey(identity.StableId))
-                {
-                    error = $"Duplicate RpcObjectIdentity '{identity.StableId}' under sandbox root";
-                    return false;
-                }
-                if (!TryValidateAdapters(identity, out error)) return false;
-                objects.Add(identity.StableId, identity);
+                if (!RegisterSpawned(identity, out error)) return false;
             }
             error = null;
             return true;
+        }
+
+        internal void NotifyIdentityDestroyed(RpcObjectIdentity identity, string objectId)
+        {
+            if (string.IsNullOrEmpty(objectId)) return;
+            if (objects.TryGetValue(objectId, out RpcObjectIdentity current) &&
+                ReferenceEquals(current, identity))
+            {
+                objects.Remove(objectId);
+                identity.Release(this);
+                lifecycleChangePending = true;
+                lifecycleReconcileRequested = true;
+            }
+        }
+
+        private void HandleIdentityLifecycleChanged(RpcObjectIdentity identity)
+        {
+            lifecycleReconcileRequested = true;
+        }
+
+        private void HandleSceneLoaded(Scene scene, LoadSceneMode mode)
+        {
+            lifecycleReconcileRequested = true;
+        }
+
+        private void HandleSceneUnloaded(Scene scene)
+        {
+            lifecycleReconcileRequested = true;
+        }
+
+        private void ReconcileRuntimeIdentities()
+        {
+            bool changed = lifecycleChangePending;
+            lifecycleChangePending = false;
+            List<RpcObjectIdentity> scoped = EnumerateScopedIdentities();
+            var scopedSet = new HashSet<RpcObjectIdentity>(scoped);
+
+            foreach (KeyValuePair<string, RpcObjectIdentity> pair in objects.ToArray())
+            {
+                RpcObjectIdentity identity = pair.Value;
+                if (IsAlive(identity) && scopedSet.Contains(identity)) continue;
+                objects.Remove(pair.Key);
+                if (identity != null)
+                    identity.Release(this);
+                changed = true;
+            }
+
+            foreach (RpcObjectIdentity identity in scoped)
+            {
+                identity.EnsureIdentity();
+                if (objects.TryGetValue(identity.StableId, out RpcObjectIdentity registered))
+                {
+                    if (registered == identity) continue;
+                    WarnLifecycleOnce(
+                        $"Duplicate runtime object id '{identity.StableId}' was ignored during lifecycle reconciliation");
+                    continue;
+                }
+                if (!RegisterSpawned(identity, out string error))
+                {
+                    WarnLifecycleOnce(error);
+                    continue;
+                }
+                changed = true;
+            }
+
+            if (!changed) return;
+            lastLifecycleWarning = null;
+            NotifyExternalPersistentMutation("runtime object lifecycle changed");
+        }
+
+        private List<RpcObjectIdentity> EnumerateScopedIdentities()
+        {
+            var result = new List<RpcObjectIdentity>();
+            if (!includeLoadedScenes)
+            {
+                result.AddRange(SandboxRoot.GetComponentsInChildren<RpcObjectIdentity>(true));
+            }
+            else
+            {
+                // Awake can run before Unity reports the startup scene as loaded.
+                // The configured sandbox is nevertheless the authoritative baseline
+                // and must be indexed without manufacturing an external revision.
+                result.AddRange(SandboxRoot.GetComponentsInChildren<RpcObjectIdentity>(true));
+                for (int sceneIndex = 0; sceneIndex < SceneManager.sceneCount; sceneIndex++)
+                {
+                    Scene scene = SceneManager.GetSceneAt(sceneIndex);
+                    if (!scene.IsValid() || !scene.isLoaded) continue;
+                    foreach (GameObject root in scene.GetRootGameObjects())
+                        result.AddRange(root.GetComponentsInChildren<RpcObjectIdentity>(true));
+                }
+            }
+            return result
+                .Where(IsAlive)
+                .Distinct()
+                .OrderBy(identity => identity.gameObject.scene.handle)
+                .ThenBy(identity => BuildHierarchySortKey(identity.transform), StringComparer.Ordinal)
+                .ToList();
+        }
+
+        private bool IsIdentityInScope(RpcObjectIdentity identity)
+        {
+            if (!IsAlive(identity)) return false;
+            if (includeLoadedScenes)
+            {
+                Scene scene = identity.gameObject.scene;
+                return scene.IsValid() && scene.isLoaded;
+            }
+            return identity.transform == SandboxRoot || identity.transform.IsChildOf(SandboxRoot);
+        }
+
+        private void WarnLifecycleOnce(string warning)
+        {
+            if (string.IsNullOrEmpty(warning) ||
+                string.Equals(lastLifecycleWarning, warning, StringComparison.Ordinal)) return;
+            lastLifecycleWarning = warning;
+            Debug.LogWarning("[BrainRegion] " + warning);
         }
 
         private RpcObjectSnapshot BuildObjectSnapshot(

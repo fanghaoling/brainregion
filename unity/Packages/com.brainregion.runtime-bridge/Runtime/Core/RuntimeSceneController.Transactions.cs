@@ -213,17 +213,28 @@ namespace BrainRegion.RuntimeBridge
 
             var inverseActions = new List<IUndoAction>();
             var tempIdMap = new Dictionary<string, string>(StringComparer.Ordinal);
+            var stagedActivations = new List<RpcObjectIdentity>();
             RpcFailure executionFailure = null;
             try
             {
                 foreach (SceneOperation command in proposal.Commands)
                 {
-                    if (!TryExecuteOperation(command, inverseActions, tempIdMap, out failure))
+                    if (!TryExecuteOperation(
+                            command,
+                            inverseActions,
+                            tempIdMap,
+                            stagedActivations,
+                            out failure))
                     {
                         executionFailure = failure;
                         break;
                     }
                 }
+                // Activation happens only after every reversible command has
+                // completed. This guarantees project Awake/OnEnable callbacks
+                // observe the final runtime identity and transform.
+                if (executionFailure == null)
+                    TryActivateStagedSpawns(stagedActivations, out executionFailure);
             }
             catch (Exception exception)
             {
@@ -705,6 +716,13 @@ namespace BrainRegion.RuntimeBridge
                             "prefab_not_found");
                         return false;
                     }
+                    if (entry.Prefab.activeSelf)
+                    {
+                        failure = ValidationFailure(
+                            $"Prefab '{canonical.PrefabId}' is active and cannot be staged safely",
+                            "unsafe_prefab_lifecycle");
+                        return false;
+                    }
                     if (!SceneProtocol.IsIdentifier(canonical.TempId, 124) ||
                         !canonical.TempId.StartsWith("tmp:", StringComparison.Ordinal) ||
                         canonical.TempId.Length == "tmp:".Length ||
@@ -833,6 +851,7 @@ namespace BrainRegion.RuntimeBridge
             SceneOperation command,
             List<IUndoAction> inverseActions,
             Dictionary<string, string> tempIdMap,
+            List<RpcObjectIdentity> stagedActivations,
             out RpcFailure failure)
         {
             failure = null;
@@ -845,6 +864,13 @@ namespace BrainRegion.RuntimeBridge
                         failure = ValidationFailure(
                             $"Prefab '{command.PrefabId}' disappeared after preview",
                             "prefab_not_found");
+                        return false;
+                    }
+                    if (entry.Prefab.activeSelf)
+                    {
+                        failure = ValidationFailure(
+                            $"Prefab '{command.PrefabId}' became active after preview",
+                            "unsafe_prefab_lifecycle");
                         return false;
                     }
                     Transform parent = SandboxRoot;
@@ -899,6 +925,7 @@ namespace BrainRegion.RuntimeBridge
                     inverseActions.Add(new SpawnUndoAction(this, identity));
                     ApplyTransformPatch(identity.transform, command.LocalTransform);
                     tempIdMap.Add(command.TempId, objectId);
+                    stagedActivations.Add(identity);
                     return true;
 
                 case "set_transform":
@@ -984,6 +1011,48 @@ namespace BrainRegion.RuntimeBridge
                     failure = ValidationFailure("Unsupported operation reached executor", "executor_mismatch");
                     return false;
             }
+        }
+
+        private bool TryActivateStagedSpawns(
+            List<RpcObjectIdentity> stagedActivations,
+            out RpcFailure failure)
+        {
+            failure = null;
+            foreach (RpcObjectIdentity identity in stagedActivations)
+            {
+                if (!IsAlive(identity) || identity.Owner != this)
+                {
+                    failure = RpcFailure.Create(
+                        SceneErrorCodes.Internal,
+                        "Staged prefab disappeared before activation",
+                        "spawn_activation_failed");
+                    return false;
+                }
+                try
+                {
+                    identity.gameObject.SetActive(true);
+                }
+                catch (Exception exception)
+                {
+                    failure = RpcFailure.Create(
+                        SceneErrorCodes.Internal,
+                        "Staged prefab activation failed: " + exception.Message,
+                        "spawn_activation_failed");
+                    return false;
+                }
+                if (!IsAlive(identity) || !identity.gameObject.activeSelf ||
+                    identity.Owner != this ||
+                    !objects.TryGetValue(identity.StableId, out RpcObjectIdentity registered) ||
+                    registered != identity)
+                {
+                    failure = RpcFailure.Create(
+                        SceneErrorCodes.Internal,
+                        "Staged prefab did not preserve its registered identity during activation",
+                        "spawn_activation_failed");
+                    return false;
+                }
+            }
+            return true;
         }
 
         private bool TryResolveWritableObject(

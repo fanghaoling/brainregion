@@ -65,6 +65,11 @@ namespace BrainRegion.RuntimeBridge
                     error = $"Prefab '{entry.PrefabId}' must contain RpcObjectIdentity on its root";
                     return false;
                 }
+                if (entry.Prefab.activeSelf)
+                {
+                    error = $"Prefab '{entry.PrefabId}' root must be inactive so BrainRegion can assign its runtime identity before Awake/OnEnable";
+                    return false;
+                }
                 if (entry.Prefab.GetComponentsInChildren<RpcObjectIdentity>(true).Length != 1)
                 {
                     error = $"Prefab '{entry.PrefabId}' must expose exactly one root RpcObjectIdentity; nested editable entities belong in separate catalog prefabs";

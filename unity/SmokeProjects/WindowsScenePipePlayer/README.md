@@ -47,7 +47,12 @@ an unknown non-retryable outcome and can be confirmed by replaying only the exac
 same mutation request after reconnect. The test kills only the child Player it
 launched. It additionally writes and undoes an attribute-generated property,
 lists the generated GUID-based prefab catalog, spawns that prefab, and undoes the
-spawn while running the High-stripping IL2CPP build.
+spawn while running the High-stripping IL2CPP build. The catalog template is
+inactive; a read-only probe proves its `Awake` and `OnEnable` callbacks observe
+the final spawned object ID. Test-only application lifecycle commands then prove
+that an active dynamic identity is automatically registered and cleaned up, and
+that an additive scene identity joins and leaves the registry with one external
+revision barrier per lifecycle change.
 
 The fixture currently pins `6000.0.59f2`, the installed editor with Windows
 IL2CPP support on the verification machine. The package itself is also compiled

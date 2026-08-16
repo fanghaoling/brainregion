@@ -95,12 +95,17 @@ async fn wait_for_peer(
     }
 }
 
-async fn inspect_property(peer: &ScenePeerHandle, component_id: &str, property_id: &str) -> Value {
+async fn inspect_property(
+    peer: &ScenePeerHandle,
+    object_id: &str,
+    component_id: &str,
+    property_id: &str,
+) -> Value {
     let inspected = peer
         .request(
             SceneMethod::Inspect,
             json!({
-                "objectId": SMOKE_OBJECT_ID,
+                "objectId": object_id,
                 "componentIds": [component_id],
             }),
             REQUEST_TIMEOUT,
@@ -127,17 +132,96 @@ async fn inspect_property(peer: &ScenePeerHandle, component_id: &str, property_i
 }
 
 async fn inspect_counter(peer: &ScenePeerHandle) -> i64 {
-    inspect_property(peer, SMOKE_COMPONENT_ID, "counter")
+    inspect_property(peer, SMOKE_OBJECT_ID, SMOKE_COMPONENT_ID, "counter")
         .await
         .as_i64()
         .expect("smoke counter must be an integer")
 }
 
 async fn inspect_generated_brightness(peer: &ScenePeerHandle) -> i64 {
-    inspect_property(peer, GENERATED_COMPONENT_ID, "brightness")
+    inspect_property(peer, SMOKE_OBJECT_ID, GENERATED_COMPONENT_ID, "brightness")
         .await
         .as_i64()
         .expect("generated brightness must be an integer")
+}
+
+async fn wait_for_scene_revision(peer: &ScenePeerHandle, expected: i64) {
+    let deadline = Instant::now() + REQUEST_TIMEOUT;
+    loop {
+        let info = peer
+            .request(SceneMethod::RuntimeInfo, json!({}), REQUEST_TIMEOUT)
+            .await
+            .unwrap();
+        if info["sceneRevision"] == expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out waiting for scene revision {expected}; latest info: {info:#?}"
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+async fn apply_lifecycle_command(
+    peer: &ScenePeerHandle,
+    expected_revision: i64,
+    mutation_id: &str,
+    command: &str,
+) {
+    let preview = peer
+        .request(
+            SceneMethod::Preview,
+            json!({
+                "expectedRevision": expected_revision,
+                "clientMutationId": mutation_id,
+                "commands": [{
+                    "kind": "set_properties",
+                    "objectId": SMOKE_OBJECT_ID,
+                    "componentId": SMOKE_COMPONENT_ID,
+                    "changes": [{"propertyId": "lifecycle_command", "value": command}],
+                }],
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    let applied = peer
+        .request(
+            SceneMethod::Apply,
+            json!({
+                "previewToken": preview["previewToken"],
+                "expectedRevision": expected_revision,
+                "clientMutationId": mutation_id,
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(applied["sceneRevision"], expected_revision + 1);
+    wait_for_scene_revision(peer, expected_revision + 2).await;
+}
+
+async fn hierarchy_names(peer: &ScenePeerHandle) -> Vec<String> {
+    let hierarchy = peer
+        .request(
+            SceneMethod::Hierarchy,
+            json!({"includeInactive": true}),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    hierarchy["nodes"]
+        .as_array()
+        .expect("hierarchy nodes must be an array")
+        .iter()
+        .map(|node| {
+            node["name"]
+                .as_str()
+                .expect("hierarchy node name must be a string")
+                .to_owned()
+        })
+        .collect()
 }
 
 fn assert_upstream_error(error: BrainregiondError, code: i64, reason: &str) -> Value {
@@ -597,7 +681,31 @@ async fn packaged_il2cpp_player_executes_transaction_and_reconnects() {
         .await
         .unwrap();
     assert_eq!(spawned["sceneRevision"], 7);
-    assert!(spawned["tempIdMap"]["tmp:generated-prefab"].is_string());
+    let spawned_object_id = spawned["tempIdMap"]["tmp:generated-prefab"]
+        .as_str()
+        .expect("spawn must map the temporary id")
+        .to_owned();
+    let staging_component_id = format!("{spawned_object_id}/staging");
+    assert_eq!(
+        inspect_property(
+            &third,
+            &spawned_object_id,
+            &staging_component_id,
+            "awake_identity",
+        )
+        .await,
+        spawned_object_id
+    );
+    assert_eq!(
+        inspect_property(
+            &third,
+            &spawned_object_id,
+            &staging_component_id,
+            "enable_identity",
+        )
+        .await,
+        spawned_object_id
+    );
     let hierarchy_with_spawn = third
         .request(SceneMethod::Hierarchy, json!({}), REQUEST_TIMEOUT)
         .await
@@ -620,6 +728,36 @@ async fn packaged_il2cpp_player_executes_transaction_and_reconnects() {
         .await
         .unwrap();
     assert_eq!(final_hierarchy["nodes"].as_array().map(Vec::len), Some(1));
+
+    // Active objects created by application code are discovered automatically,
+    // and their destruction forms one external-mutation revision barrier.
+    apply_lifecycle_command(&third, 8, "smoke-lifecycle-create-01", "create_dynamic").await;
+    assert!(
+        hierarchy_names(&third)
+            .await
+            .contains(&"BrainRegion Dynamic Lifecycle Object".to_owned())
+    );
+    apply_lifecycle_command(&third, 10, "smoke-lifecycle-destroy-01", "destroy_dynamic").await;
+    assert!(
+        !hierarchy_names(&third)
+            .await
+            .contains(&"BrainRegion Dynamic Lifecycle Object".to_owned())
+    );
+
+    // With includeLoadedScenes explicitly enabled, additive scene roots join and
+    // leave the same registry without retaining dead Unity object references.
+    apply_lifecycle_command(&third, 12, "smoke-additive-load-01", "load_additive").await;
+    assert!(
+        hierarchy_names(&third)
+            .await
+            .contains(&"BrainRegion Additive Lifecycle Object".to_owned())
+    );
+    apply_lifecycle_command(&third, 14, "smoke-additive-unload-01", "unload_additive").await;
+    assert!(
+        !hierarchy_names(&third)
+            .await
+            .contains(&"BrainRegion Additive Lifecycle Object".to_owned())
+    );
 
     registry.close_all().await;
     listener.shutdown().await.unwrap();

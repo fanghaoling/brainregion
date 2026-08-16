@@ -55,8 +55,12 @@ Runtime IDs**, then save the modified scenes.
 
 The default application catalog can be generated instead of maintained by hand.
 Add the `BrainRegionRuntimePrefab` asset label to each allowed prefab, keep exactly
-one `RpcObjectIdentity` on its root, then run **Tools > BrainRegion > Rebuild
-Runtime Prefab Catalog**. The generated asset is written to
+one `RpcObjectIdentity` on its root, and keep that root inactive. The inactive
+template is a safety boundary: spawn assigns the final object ID, registers the
+object, and applies its transform before the transaction activates it and permits
+project `Awake`/`OnEnable` callbacks. Active catalog roots fail validation and
+block the Player build. Then run **Tools > BrainRegion > Rebuild Runtime Prefab
+Catalog**. The generated asset is written to
 `Assets/BrainRegionGenerated/RuntimePrefabCatalog.asset`; each wire `prefabId`
 uses the prefab asset GUID, so moving or renaming the asset does not change its
 identity. Other sorted Unity asset labels become catalog tags. The same generator
@@ -82,10 +86,25 @@ Player. v1 generation supports `bool`, `int`, `float`, `double`, and bounded
 `string` members. Complex state and side effects still require a hand-written
 adapter with explicit rollback behavior.
 
+Active application-created `RpcObjectIdentity` instances are reconciled on the
+main thread after `OnEnable`; destroyed objects are removed without retaining a
+dead Unity reference. `RuntimeSceneController.includeLoadedScenes` is an explicit,
+default-off opt-in for indexing identities in additive loaded scenes. Each batch
+of external lifecycle changes invalidates previews, clears incompatible Undo
+history, and advances `sceneRevision` once. Inactive objects created after scene
+load cannot signal `OnEnable`; their owner must call `TryRegister` and then
+`NotifyExternalPersistentMutation` explicitly.
+
+Prefab activation is intentionally the final transaction step. Project
+`Awake`/`OnEnable` code may observe the assigned ID, but it must not perform
+irreversible filesystem, network, or application side effects: Unity does not
+provide a general rollback mechanism for arbitrary lifecycle callbacks.
+
 The package includes EditMode tests for the Rust/C# pairing golden vector,
 expired and over-granted challenges, JSONL frame bounds, writer backpressure,
 deterministic binding source, and GUID-based catalog generation. The repository
-smoke Player also exercises generated property write/Undo and generated catalog
-spawn/Undo under Windows IL2CPP with High managed stripping. Product integration
-still needs tests for scene unload/reload, dynamic project-owned object
-registration, and prefab `Awake`/`OnEnable` staging.
+smoke Player also exercises generated property write/Undo, generated catalog
+spawn/Undo, pre-activation identity staging, active dynamic object registration
+and destruction cleanup, and additive scene load/unload under Windows IL2CPP
+with High managed stripping. Product integration still needs platform-specific
+PlayMode coverage and a real Windows/Android VR build after package import.

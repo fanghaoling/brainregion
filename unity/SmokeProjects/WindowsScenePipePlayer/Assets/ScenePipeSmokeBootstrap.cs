@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using BrainRegion.RuntimeBridge;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
+using UnityEngine.SceneManagement;
 
 namespace BrainRegion.ScenePipeSmoke
 {
@@ -11,6 +12,10 @@ namespace BrainRegion.ScenePipeSmoke
         private const string CounterPropertyId = "counter";
         private const string InjectWriteFailurePropertyId = "inject_write_failure";
         private const string DisconnectAfterWritePropertyId = "disconnect_after_write";
+        private const string LifecycleCommandPropertyId = "lifecycle_command";
+        private const string DynamicObjectName = "BrainRegion Dynamic Lifecycle Object";
+        private const string AdditiveObjectName = "BrainRegion Additive Lifecycle Object";
+        private const string AdditiveSceneName = "BrainRegion Lifecycle Additive Scene";
 
         private static readonly IReadOnlyList<RpcPropertyDescriptor> Properties =
             new[]
@@ -41,6 +46,22 @@ namespace BrainRegion.ScenePipeSmoke
                     ReadOnly = false,
                     Persistent = false,
                 },
+                new RpcPropertyDescriptor
+                {
+                    PropertyId = LifecycleCommandPropertyId,
+                    DisplayName = "Lifecycle smoke command",
+                    ValueType = "enum",
+                    ReadOnly = false,
+                    Persistent = false,
+                    EnumValues = new List<string>
+                    {
+                        string.Empty,
+                        "create_dynamic",
+                        "destroy_dynamic",
+                        "load_additive",
+                        "unload_additive",
+                    },
+                },
             };
 
         [SerializeField] private int counter = 1;
@@ -48,6 +69,9 @@ namespace BrainRegion.ScenePipeSmoke
         private WindowsScenePipeTransport transport;
         private string observedError;
         private bool observedConnected;
+        private string pendingLifecycleCommand = string.Empty;
+        private GameObject dynamicObject;
+        private Scene additiveScene;
 
         public override IReadOnlyList<RpcPropertyDescriptor> DescribeProperties()
         {
@@ -66,6 +90,12 @@ namespace BrainRegion.ScenePipeSmoke
                 string.Equals(propertyId, DisconnectAfterWritePropertyId, StringComparison.Ordinal))
             {
                 value = new JValue(false);
+                error = null;
+                return true;
+            }
+            if (string.Equals(propertyId, LifecycleCommandPropertyId, StringComparison.Ordinal))
+            {
+                value = new JValue(pendingLifecycleCommand);
                 error = null;
                 return true;
             }
@@ -109,6 +139,19 @@ namespace BrainRegion.ScenePipeSmoke
                 error = null;
                 return true;
             }
+            if (string.Equals(propertyId, LifecycleCommandPropertyId, StringComparison.Ordinal) &&
+                proposed != null && proposed.Type == JTokenType.String)
+            {
+                string command = proposed.Value<string>() ?? string.Empty;
+                if (command == string.Empty || command == "create_dynamic" ||
+                    command == "destroy_dynamic" || command == "load_additive" ||
+                    command == "unload_additive")
+                {
+                    canonical = new JValue(command);
+                    error = null;
+                    return true;
+                }
+            }
 
             error = "Unknown smoke property or invalid value type";
             return false;
@@ -145,6 +188,10 @@ namespace BrainRegion.ScenePipeSmoke
                 transport.Disconnect();
                 transport.Connect();
             }
+            else if (string.Equals(propertyId, LifecycleCommandPropertyId, StringComparison.Ordinal))
+            {
+                pendingLifecycleCommand = normalized.Value<string>() ?? string.Empty;
+            }
 
             error = null;
             return true;
@@ -158,6 +205,7 @@ namespace BrainRegion.ScenePipeSmoke
 
         private void Update()
         {
+            ExecutePendingLifecycleCommand();
             if (transport == null) return;
             bool connected = transport.IsConnected;
             if (connected != observedConnected)
@@ -171,6 +219,46 @@ namespace BrainRegion.ScenePipeSmoke
             {
                 observedError = error;
                 Debug.LogError($"[BrainRegion Smoke] pipe error: {error}");
+            }
+        }
+
+        private void ExecutePendingLifecycleCommand()
+        {
+            string command = pendingLifecycleCommand;
+            if (string.IsNullOrEmpty(command)) return;
+            pendingLifecycleCommand = string.Empty;
+
+            switch (command)
+            {
+                case "create_dynamic":
+                    if (dynamicObject != null) return;
+                    dynamicObject = new GameObject(DynamicObjectName);
+                    dynamicObject.transform.SetParent(transform, false);
+                    dynamicObject.AddComponent<RpcObjectIdentity>();
+                    Debug.Log("[BrainRegion Smoke] created dynamic editable object");
+                    return;
+
+                case "destroy_dynamic":
+                    if (dynamicObject == null) return;
+                    Destroy(dynamicObject);
+                    dynamicObject = null;
+                    Debug.Log("[BrainRegion Smoke] destroyed dynamic editable object");
+                    return;
+
+                case "load_additive":
+                    if (additiveScene.IsValid() && additiveScene.isLoaded) return;
+                    additiveScene = SceneManager.CreateScene(AdditiveSceneName);
+                    var additiveObject = new GameObject(AdditiveObjectName);
+                    SceneManager.MoveGameObjectToScene(additiveObject, additiveScene);
+                    additiveObject.AddComponent<RpcObjectIdentity>();
+                    Debug.Log("[BrainRegion Smoke] loaded additive editable scene");
+                    return;
+
+                case "unload_additive":
+                    if (!additiveScene.IsValid() || !additiveScene.isLoaded) return;
+                    SceneManager.UnloadSceneAsync(additiveScene);
+                    Debug.Log("[BrainRegion Smoke] requested additive scene unload");
+                    return;
             }
         }
     }

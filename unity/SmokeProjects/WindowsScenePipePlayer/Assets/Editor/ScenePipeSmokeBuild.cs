@@ -144,6 +144,7 @@ namespace BrainRegion.ScenePipeSmoke.Editor
             SetSerializedString(adapter, "componentKey", "smoke");
             SetSerializedString(adapter, "typeId", "brainregion.smoke");
             SetSerializedObject(controller, "prefabCatalog", catalog);
+            SetSerializedBoolean(controller, "includeLoadedScenes", true);
             SetSerializedBoolean(transport, "connectOnEnable", true);
             return controller;
         }
@@ -154,7 +155,11 @@ namespace BrainRegion.ScenePipeSmoke.Editor
             try
             {
                 RpcObjectIdentity identity = root.AddComponent<RpcObjectIdentity>();
+                StagedPrefabProbe probe = root.AddComponent<StagedPrefabProbe>();
                 SetSerializedString(identity, "stableId", "prefab-template-smoke");
+                SetSerializedString(probe, "componentKey", "staging");
+                SetSerializedString(probe, "typeId", "brainregion.smoke.staging");
+                root.SetActive(false);
                 GameObject prefab = PrefabUtility.SaveAsPrefabAsset(
                     root,
                     GeneratedPrefabPath);

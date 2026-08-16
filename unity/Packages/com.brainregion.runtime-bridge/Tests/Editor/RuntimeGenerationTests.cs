@@ -2,6 +2,7 @@ using System;
 using BrainRegion.RuntimeBridge.Editor;
 using NUnit.Framework;
 using UnityEditor;
+using UnityEditor.Build;
 using UnityEngine;
 
 namespace BrainRegion.RuntimeBridge.EditorTests
@@ -54,6 +55,7 @@ namespace BrainRegion.RuntimeBridge.EditorTests
                 var serialized = new SerializedObject(identity);
                 serialized.FindProperty("stableId").stringValue = "catalog-test-object";
                 serialized.ApplyModifiedPropertiesWithoutUndo();
+                root.SetActive(false);
                 GameObject prefab = PrefabUtility.SaveAsPrefabAsset(root, prefabPath);
                 Assert.That(prefab, Is.Not.Null);
                 AssetDatabase.SetLabels(prefab, new[] { sourceLabel, "zeta", "alpha" });
@@ -70,6 +72,35 @@ namespace BrainRegion.RuntimeBridge.EditorTests
                 RuntimePrefabCatalog rebuilt =
                     RuntimePrefabCatalogGenerator.RebuildCatalog(catalogPath, sourceLabel);
                 Assert.That(rebuilt.SchemaVersion, Is.EqualTo(firstSchema));
+            }
+            finally
+            {
+                UnityEngine.Object.DestroyImmediate(root);
+                AssetDatabase.DeleteAsset(folderPath);
+            }
+        }
+
+        [Test]
+        public void CatalogGeneratorRejectsActivePrefabRoot()
+        {
+            string suffix = Guid.NewGuid().ToString("N");
+            string folderName = "__BrainRegionActivePrefabTest_" + suffix;
+            string folderPath = "Assets/" + folderName;
+            string prefabPath = folderPath + "/UnsafeRuntime.prefab";
+            string catalogPath = folderPath + "/Catalog.asset";
+            string sourceLabel = "BrainRegionActivePrefab" + suffix;
+            AssetDatabase.CreateFolder("Assets", folderName);
+            var root = new GameObject("Unsafe Active Runtime Prefab");
+            try
+            {
+                root.AddComponent<RpcObjectIdentity>();
+                GameObject prefab = PrefabUtility.SaveAsPrefabAsset(root, prefabPath);
+                Assert.That(prefab, Is.Not.Null);
+                AssetDatabase.SetLabels(prefab, new[] { sourceLabel });
+
+                BuildFailedException exception = Assert.Throws<BuildFailedException>(() =>
+                    RuntimePrefabCatalogGenerator.RebuildCatalog(catalogPath, sourceLabel));
+                StringAssert.Contains("inactive root", exception.Message);
             }
             finally
             {
