@@ -30,10 +30,12 @@ cargo test --locked -p brainregiond --test unity_player_windows `
   -- --ignored --test-threads=1
 ```
 
-The Rust test creates a fresh current-user pipe and random pairing secret,
-launches the packaged Player, calls `runtime/info` and `scene/hierarchy`, then
-closes the first peer and verifies that the same Player process reconnects with
-a larger daemon connection epoch. It kills only the child Player it launched.
+The generated scene contains one stable, explicitly writable object with an
+AOT-safe integer property adapter. The Rust test creates a fresh current-user
+pipe and random pairing secret, launches the packaged Player, verifies property
+bounds, preview isolation, apply, stale-revision rejection, exact idempotent
+replay after reconnect, and Undo. It also verifies that an undone mutation cannot
+replay as success, and kills only the child Player it launched.
 
 The fixture currently pins `6000.0.59f2`, the installed editor with Windows
 IL2CPP support on the verification machine. The package itself is also compiled

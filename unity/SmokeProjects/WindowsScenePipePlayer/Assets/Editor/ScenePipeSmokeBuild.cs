@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using BrainRegion.RuntimeBridge;
 using UnityEditor;
 using UnityEditor.Build;
 using UnityEditor.Build.Reporting;
@@ -60,6 +61,7 @@ namespace BrainRegion.ScenePipeSmoke.Editor
             Scene scene = EditorSceneManager.NewScene(
                 NewSceneSetup.EmptyScene,
                 NewSceneMode.Single);
+            CreateRuntimeFixture();
             if (!EditorSceneManager.SaveScene(scene, GeneratedScenePath))
                 throw new BuildFailedException("Could not create smoke scene");
 
@@ -88,6 +90,53 @@ namespace BrainRegion.ScenePipeSmoke.Editor
             {
                 AssetDatabase.DeleteAsset(GeneratedScenePath);
             }
+        }
+
+        private static void CreateRuntimeFixture()
+        {
+            var root = new GameObject("BrainRegion Scene Pipe Smoke Root");
+
+            RpcObjectIdentity identity = root.AddComponent<RpcObjectIdentity>();
+            ScenePipeSmokeBootstrap adapter = root.AddComponent<ScenePipeSmokeBootstrap>();
+            root.AddComponent<RuntimeSceneController>();
+            root.AddComponent<RuntimeLogBuffer>();
+            root.AddComponent<SceneRpcDispatcher>();
+            WindowsScenePipeTransport transport =
+                root.AddComponent<WindowsScenePipeTransport>();
+
+            SetSerializedString(identity, "stableId", "smoke-object-01");
+            SetSerializedBoolean(identity, "allowRemoteChanges", true);
+            SetSerializedString(adapter, "componentKey", "smoke");
+            SetSerializedString(adapter, "typeId", "brainregion.smoke");
+            SetSerializedBoolean(transport, "connectOnEnable", true);
+        }
+
+        private static void SetSerializedString(
+            UnityEngine.Object target,
+            string propertyName,
+            string value)
+        {
+            var serialized = new SerializedObject(target);
+            SerializedProperty property = serialized.FindProperty(propertyName);
+            if (property == null)
+                throw new BuildFailedException(
+                    $"Could not configure serialized property '{propertyName}'");
+            property.stringValue = value;
+            serialized.ApplyModifiedPropertiesWithoutUndo();
+        }
+
+        private static void SetSerializedBoolean(
+            UnityEngine.Object target,
+            string propertyName,
+            bool value)
+        {
+            var serialized = new SerializedObject(target);
+            SerializedProperty property = serialized.FindProperty(propertyName);
+            if (property == null)
+                throw new BuildFailedException(
+                    $"Could not configure serialized property '{propertyName}'");
+            property.boolValue = value;
+            serialized.ApplyModifiedPropertiesWithoutUndo();
         }
     }
 }

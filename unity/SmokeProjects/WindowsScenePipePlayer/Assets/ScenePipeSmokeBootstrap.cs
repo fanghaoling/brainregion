@@ -1,46 +1,90 @@
+using System;
+using System.Collections.Generic;
 using BrainRegion.RuntimeBridge;
+using Newtonsoft.Json.Linq;
 using UnityEngine;
 
 namespace BrainRegion.ScenePipeSmoke
 {
-    internal static class ScenePipeSmokeBootstrap
+    public sealed class ScenePipeSmokeBootstrap : RpcPropertyAdapterBehaviour
     {
-        private static bool initialized;
+        private static readonly IReadOnlyList<RpcPropertyDescriptor> Properties =
+            new[]
+            {
+                new RpcPropertyDescriptor
+                {
+                    PropertyId = "counter",
+                    DisplayName = "Smoke Counter",
+                    ValueType = "integer",
+                    ReadOnly = false,
+                    Persistent = true,
+                    Minimum = 0,
+                    Maximum = 100,
+                },
+            };
 
-        [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.BeforeSceneLoad)]
-        private static void Initialize()
-        {
-            if (initialized) return;
-            initialized = true;
-            Application.runInBackground = true;
+        [SerializeField] private int counter = 1;
 
-            var root = new GameObject("BrainRegion Scene Pipe Smoke Root");
-            Object.DontDestroyOnLoad(root);
-
-            // Add in this order so the controller indexes one readable identity
-            // before the dispatcher builds its first registration snapshot.
-            root.AddComponent<RpcObjectIdentity>();
-            root.AddComponent<RuntimeSceneController>();
-            root.AddComponent<RuntimeLogBuffer>();
-            root.AddComponent<SceneRpcDispatcher>();
-            WindowsScenePipeTransport transport =
-                root.AddComponent<WindowsScenePipeTransport>();
-            root.AddComponent<ScenePipeSmokeReporter>().Bind(transport);
-            transport.Connect();
-
-            Debug.Log("[BrainRegion Smoke] Windows Scene RPC pipe client started");
-        }
-    }
-
-    internal sealed class ScenePipeSmokeReporter : MonoBehaviour
-    {
         private WindowsScenePipeTransport transport;
         private string observedError;
         private bool observedConnected;
 
-        internal void Bind(WindowsScenePipeTransport value)
+        public override IReadOnlyList<RpcPropertyDescriptor> DescribeProperties()
         {
-            transport = value;
+            return Properties;
+        }
+
+        public override bool TryRead(string propertyId, out JToken value, out string error)
+        {
+            if (!string.Equals(propertyId, "counter", StringComparison.Ordinal))
+            {
+                value = null;
+                error = "Unknown smoke property";
+                return false;
+            }
+            value = new JValue(counter);
+            error = null;
+            return true;
+        }
+
+        public override bool TryValidate(
+            string propertyId,
+            JToken proposed,
+            out JToken canonical,
+            out string error)
+        {
+            canonical = null;
+            if (!string.Equals(propertyId, "counter", StringComparison.Ordinal) ||
+                proposed == null || proposed.Type != JTokenType.Integer)
+            {
+                error = "counter must be an integer";
+                return false;
+            }
+
+            long candidate = proposed.Value<long>();
+            if (candidate < 0 || candidate > 100)
+            {
+                error = "counter must be between 0 and 100";
+                return false;
+            }
+            canonical = new JValue(checked((int)candidate));
+            error = null;
+            return true;
+        }
+
+        public override bool TryWrite(string propertyId, JToken canonical, out string error)
+        {
+            if (!TryValidate(propertyId, canonical, out JToken normalized, out error))
+                return false;
+            counter = normalized.Value<int>();
+            error = null;
+            return true;
+        }
+
+        private void Start()
+        {
+            transport = GetComponent<WindowsScenePipeTransport>();
+            Debug.Log("[BrainRegion Smoke] Windows Scene RPC pipe client started");
         }
 
         private void Update()

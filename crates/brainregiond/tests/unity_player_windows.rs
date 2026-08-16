@@ -8,10 +8,11 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use brainregiond::config::{PairingSecret, ScenePipeConfig};
+use brainregiond::error::BrainregiondError;
 use brainregiond::scene_peer::{SceneMethod, ScenePeerHandle, ScenePeerRegistry};
 use brainregiond::scene_pipe::ScenePipeListener;
 use brainregiond::scene_rpc::{RuntimeStatus, SceneCapability};
-use serde_json::json;
+use serde_json::{Value, json};
 use tokio::process::{Child, Command};
 use tokio::time::Instant;
 
@@ -19,6 +20,8 @@ const PRINCIPAL_ID: &str = "unity-il2cpp-smoke";
 const PLAYER_STARTUP_TIMEOUT: Duration = Duration::from_secs(60);
 const PLAYER_RECONNECT_TIMEOUT: Duration = Duration::from_secs(30);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(5);
+const SMOKE_OBJECT_ID: &str = "smoke-object-01";
+const SMOKE_COMPONENT_ID: &str = "smoke-object-01/smoke";
 
 fn unique_pipe_name() -> String {
     let nanos = SystemTime::now()
@@ -91,9 +94,43 @@ async fn wait_for_peer(
     }
 }
 
+async fn inspect_counter(peer: &ScenePeerHandle) -> i64 {
+    let inspected = peer
+        .request(
+            SceneMethod::Inspect,
+            json!({
+                "objectId": SMOKE_OBJECT_ID,
+                "componentIds": [SMOKE_COMPONENT_ID],
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        inspected["object"]["components"][0]["componentId"],
+        SMOKE_COMPONENT_ID
+    );
+    assert_eq!(
+        inspected["object"]["components"][0]["properties"][0]["descriptor"]["propertyId"],
+        "counter"
+    );
+    inspected["object"]["components"][0]["properties"][0]["value"]
+        .as_i64()
+        .expect("smoke counter must be an integer")
+}
+
+fn assert_upstream_error(error: BrainregiondError, code: i64, reason: &str) -> Value {
+    let BrainregiondError::Upstream(payload) = error else {
+        panic!("expected Runtime Scene RPC upstream error, got {error}");
+    };
+    assert_eq!(payload["code"], code);
+    assert_eq!(payload["data"]["reason"], reason);
+    payload
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires a locally built Windows IL2CPP smoke Player"]
-async fn packaged_il2cpp_player_registers_calls_and_reconnects() {
+async fn packaged_il2cpp_player_executes_transaction_and_reconnects() {
     let player_path = configured_player_path();
     let player_log = player_path.with_file_name("BrainRegionScenePipeSmoke.e2e.log");
     let pipe_name = unique_pipe_name();
@@ -103,7 +140,11 @@ async fn packaged_il2cpp_player_registers_calls_and_reconnects() {
         name: pipe_name.clone(),
         principal_id: PRINCIPAL_ID.to_owned(),
         pairing_secret: PairingSecret::new(secret.as_bytes()).unwrap(),
-        granted_capabilities: vec![SceneCapability::SceneRead],
+        granted_capabilities: vec![
+            SceneCapability::SceneRead,
+            SceneCapability::SceneWrite,
+            SceneCapability::SceneUndo,
+        ],
         max_connections: 2,
         authentication_timeout: Duration::from_secs(10),
     };
@@ -122,7 +163,11 @@ async fn packaged_il2cpp_player_registers_calls_and_reconnects() {
     assert_eq!(first_snapshot.runtime_status, RuntimeStatus::Ready);
     assert_eq!(
         first_snapshot.granted_capabilities,
-        vec![SceneCapability::SceneRead]
+        vec![
+            SceneCapability::SceneRead,
+            SceneCapability::SceneUndo,
+            SceneCapability::SceneWrite,
+        ]
     );
 
     let info = first
@@ -141,6 +186,97 @@ async fn packaged_il2cpp_player_registers_calls_and_reconnects() {
         .unwrap();
     assert_eq!(hierarchy["sceneRevision"], 0);
     assert_eq!(hierarchy["nodes"].as_array().map(Vec::len), Some(1));
+    assert_eq!(hierarchy["nodes"][0]["objectId"], SMOKE_OBJECT_ID);
+    assert_eq!(inspect_counter(&first).await, 1);
+
+    let invalid_value = first
+        .request(
+            SceneMethod::Preview,
+            json!({
+                "expectedRevision": 0,
+                "clientMutationId": "smoke-invalid-01",
+                "commands": [{
+                    "kind": "set_properties",
+                    "objectId": SMOKE_OBJECT_ID,
+                    "componentId": SMOKE_COMPONENT_ID,
+                    "changes": [{"propertyId": "counter", "value": 101}],
+                }],
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+    let invalid_payload =
+        assert_upstream_error(invalid_value, -32013, "property_validation_failed");
+    assert_eq!(invalid_payload["data"]["propertyId"], "counter");
+    assert_eq!(inspect_counter(&first).await, 1);
+
+    let mutation_id = "smoke-counter-01";
+    let preview = first
+        .request(
+            SceneMethod::Preview,
+            json!({
+                "expectedRevision": 0,
+                "clientMutationId": mutation_id,
+                "commands": [{
+                    "kind": "set_properties",
+                    "objectId": SMOKE_OBJECT_ID,
+                    "componentId": SMOKE_COMPONENT_ID,
+                    "changes": [{"propertyId": "counter", "value": 7}],
+                }],
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(preview["baseRevision"], 0);
+    assert_eq!(preview["clientMutationId"], mutation_id);
+    let preview_token = preview["previewToken"]
+        .as_str()
+        .expect("preview must return a token")
+        .to_owned();
+
+    // Preview is validation-only and must not mutate the Player.
+    assert_eq!(inspect_counter(&first).await, 1);
+
+    let apply_params = json!({
+        "previewToken": preview_token,
+        "expectedRevision": 0,
+        "clientMutationId": mutation_id,
+    });
+    let applied = first
+        .request(SceneMethod::Apply, apply_params.clone(), REQUEST_TIMEOUT)
+        .await
+        .unwrap();
+    assert_eq!(applied["sceneRevision"], 1);
+    assert_eq!(applied["clientMutationId"], mutation_id);
+    assert_eq!(applied["idempotentReplay"], false);
+    let undo_id = applied["undoId"]
+        .as_str()
+        .expect("apply must return an undo id")
+        .to_owned();
+    assert_eq!(inspect_counter(&first).await, 7);
+
+    let stale_error = first
+        .request(
+            SceneMethod::Preview,
+            json!({
+                "expectedRevision": 0,
+                "clientMutationId": "smoke-stale-01",
+                "commands": [{
+                    "kind": "set_properties",
+                    "objectId": SMOKE_OBJECT_ID,
+                    "componentId": SMOKE_COMPONENT_ID,
+                    "changes": [{"propertyId": "counter", "value": 9}],
+                }],
+            }),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap_err();
+    let stale_payload = assert_upstream_error(stale_error, -32010, "revision_conflict");
+    assert_eq!(stale_payload["data"]["expectedRevision"], 0);
+    assert_eq!(stale_payload["data"]["actualRevision"], 1);
 
     let first_epoch = first.connection_epoch();
     first.close();
@@ -158,12 +294,44 @@ async fn packaged_il2cpp_player_registers_calls_and_reconnects() {
     assert!(second_snapshot.connection_epoch > first_epoch);
     assert_eq!(second_snapshot.instance_id, first_snapshot.instance_id);
     assert_eq!(second_snapshot.session_id, first_snapshot.session_id);
+    assert_eq!(second_snapshot.scene_revision, 1);
     let reconnected_info = second
         .request(SceneMethod::RuntimeInfo, json!({}), REQUEST_TIMEOUT)
         .await
         .unwrap();
     assert_eq!(reconnected_info["instanceId"], first_snapshot.instance_id);
     assert_eq!(reconnected_info["sessionId"], first_snapshot.session_id);
+    assert_eq!(reconnected_info["sceneRevision"], 1);
+
+    // An exact apply replay by the same principal survives a new connection epoch
+    // and confirms the already-committed outcome without applying it twice.
+    let replayed = second
+        .request(SceneMethod::Apply, apply_params.clone(), REQUEST_TIMEOUT)
+        .await
+        .unwrap();
+    assert_eq!(replayed["sceneRevision"], 1);
+    assert_eq!(replayed["clientMutationId"], mutation_id);
+    assert_eq!(replayed["undoId"], undo_id);
+    assert_eq!(replayed["idempotentReplay"], true);
+    assert_eq!(inspect_counter(&second).await, 7);
+
+    let undone = second
+        .request(
+            SceneMethod::Undo,
+            json!({"expectedRevision": 1, "undoId": undo_id}),
+            REQUEST_TIMEOUT,
+        )
+        .await
+        .unwrap();
+    assert_eq!(undone["sceneRevision"], 2);
+    assert_eq!(undone["undoneClientMutationId"], mutation_id);
+    assert_eq!(inspect_counter(&second).await, 1);
+
+    let replay_after_undo = second
+        .request(SceneMethod::Apply, apply_params, REQUEST_TIMEOUT)
+        .await
+        .unwrap_err();
+    assert_upstream_error(replay_after_undo, -32016, "mutation_was_undone");
 
     registry.close_all().await;
     listener.shutdown().await.unwrap();
