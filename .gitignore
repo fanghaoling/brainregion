@@ -6,6 +6,7 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .tmp/
+/target/
 dist/
 build/
 *.db
@@ -18,6 +19,8 @@ design_review_config.json*
 
 # Local generated project data
 Assets/
+!unity/SmokeProjects/**/Assets/
+!unity/SmokeProjects/**/Assets/**
 
 # Local tooling artifacts (codegraph index, brain-region eval/memory data)
 .codegraph/

@@ -1,0 +1,14 @@
+{
+  "name": "BrainRegion.RuntimeBridge",
+  "rootNamespace": "BrainRegion.RuntimeBridge",
+  "references": [],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

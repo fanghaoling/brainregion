@@ -1,0 +1,25 @@
+{
+  "jsonrpc": "2.0",
+  "id": "preview-01",
+  "method": "scene/preview",
+  "deadlineUnixMs": 4102444800000,
+  "params": {
+    "expectedRevision": 0,
+    "clientMutationId": "mutation-01",
+    "commands": [
+      {
+        "kind": "spawn",
+        "tempId": "tmp:lamp",
+        "prefabId": "prop.lamp",
+        "localTransform": {
+          "position": { "x": 0, "y": 1.5, "z": 2 }
+        }
+      },
+      {
+        "kind": "set_active",
+        "objectId": "existing-object-01",
+        "active": true
+      }
+    ]
+  }
+}

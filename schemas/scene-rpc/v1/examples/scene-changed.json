@@ -1,0 +1,9 @@
+{
+  "jsonrpc": "2.0",
+  "method": "scene/changed",
+  "params": {
+    "sceneRevision": 1,
+    "clientMutationId": "mutation-01",
+    "summary": "spawn Lamp (tmp:lamp)"
+  }
+}

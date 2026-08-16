@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": "world-save-1",
+  "result": {
+    "slot": "default",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "savedRevision": 7,
+    "bytes": 1024,
+    "idempotentReplay": false
+  }
+}

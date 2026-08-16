@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://brainregion.dev/schemas/scene-rpc/v1/world-document.schema.json",
+  "title": "BrainRegion WorldDocument v1",
+  "type": "object",
+  "properties": {
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[a-f0-9]{64}$"
+    },
+    "document": { "$ref": "#/$defs/document" }
+  },
+  "required": ["digest", "document"],
+  "additionalProperties": false,
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9._:/-]+$"
+    },
+    "identifierSegment": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._-]+$"
+    },
+    "vec3": {
+      "type": "object",
+      "properties": {
+        "x": { "type": "number", "minimum": -3.4028235e38, "maximum": 3.4028235e38 },
+        "y": { "type": "number", "minimum": -3.4028235e38, "maximum": 3.4028235e38 },
+        "z": { "type": "number", "minimum": -3.4028235e38, "maximum": 3.4028235e38 }
+      },
+      "required": ["x", "y", "z"],
+      "additionalProperties": false
+    },
+    "transform": {
+      "type": "object",
+      "properties": {
+        "position": { "$ref": "#/$defs/vec3" },
+        "rotationEuler": { "$ref": "#/$defs/vec3" },
+        "scale": { "$ref": "#/$defs/vec3" }
+      },
+      "required": ["position", "rotationEuler", "scale"],
+      "additionalProperties": false
+    },
+    "propertyValue": {
+      "anyOf": [
+        { "type": "null" },
+        { "type": "boolean" },
+        { "type": "integer" },
+        { "type": "number" },
+        { "type": "string", "maxLength": 16384 },
+        { "$ref": "#/$defs/vec3" },
+        {
+          "type": "object",
+          "properties": { "objectRef": { "$ref": "#/$defs/identifier" } },
+          "required": ["objectRef"],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": { "assetRef": { "type": "string", "minLength": 1, "maxLength": 256 } },
+          "required": ["assetRef"],
+          "additionalProperties": false
+        },
+        {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "anyOf": [
+              { "type": "null" },
+              { "type": "boolean" },
+              { "type": "integer" },
+              { "type": "number" },
+              { "type": "string", "maxLength": 4096 },
+              { "$ref": "#/$defs/vec3" }
+            ]
+          }
+        }
+      ]
+    },
+    "component": {
+      "type": "object",
+      "properties": {
+        "componentKey": { "$ref": "#/$defs/identifierSegment" },
+        "typeId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[A-Za-z0-9._:/-]+$"
+        },
+        "properties": {
+          "type": "object",
+          "maxProperties": 128,
+          "propertyNames": { "$ref": "#/$defs/identifierSegment" },
+          "additionalProperties": { "$ref": "#/$defs/propertyValue" }
+        }
+      },
+      "required": ["componentKey", "typeId", "properties"],
+      "additionalProperties": false
+    },
+    "entity": {
+      "type": "object",
+      "properties": {
+        "objectId": { "$ref": "#/$defs/identifier" },
+        "prefabId": {
+          "anyOf": [
+            { "type": "null" },
+            { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[A-Za-z0-9._:/-]+$" }
+          ]
+        },
+        "parentId": {
+          "anyOf": [
+            { "type": "null" },
+            { "$ref": "#/$defs/identifier" }
+          ]
+        },
+        "active": { "type": "boolean" },
+        "localTransform": { "$ref": "#/$defs/transform" },
+        "components": {
+          "type": "array",
+          "maxItems": 128,
+          "items": { "$ref": "#/$defs/component" }
+        }
+      },
+      "required": ["objectId", "prefabId", "parentId", "active", "localTransform", "components"],
+      "additionalProperties": false
+    },
+    "document": {
+      "type": "object",
+      "properties": {
+        "formatVersion": { "const": "brainregion.world.v1" },
+        "protocolVersion": { "const": "brainregion.scene.v1" },
+        "product": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "buildId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "sceneId": { "type": "string", "minLength": 1, "maxLength": 256 },
+        "catalogSchemaVersion": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "savedRevision": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "savedUnixMs": { "type": "integer", "minimum": 0, "maximum": 9007199254740991 },
+        "metadata": {
+          "type": "object",
+          "properties": { "label": { "type": "string", "maxLength": 256 } },
+          "additionalProperties": false
+        },
+        "entities": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 256,
+          "items": { "$ref": "#/$defs/entity" }
+        }
+      },
+      "required": [
+        "formatVersion",
+        "protocolVersion",
+        "product",
+        "buildId",
+        "sceneId",
+        "catalogSchemaVersion",
+        "savedRevision",
+        "savedUnixMs",
+        "metadata",
+        "entities"
+      ],
+      "additionalProperties": false
+    }
+  }
+}

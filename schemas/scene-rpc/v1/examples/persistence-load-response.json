@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": "world-load-1",
+  "result": {
+    "slot": "default",
+    "digest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+    "sceneRevision": 9,
+    "clientMutationId": "world-load-mutation-1",
+    "idempotentReplay": false
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "jsonrpc": "2.0",
+  "id": "load-1",
+  "method": "persistence/load",
+  "deadlineUnixMs": 4102444800000,
+  "params": {
+    "previewToken": "preview-token-1",
+    "expectedRevision": 9,
+    "clientMutationId": "load-default-9"
+  }
+}

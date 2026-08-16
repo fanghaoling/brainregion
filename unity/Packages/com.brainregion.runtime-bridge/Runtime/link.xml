@@ -1,0 +1,3 @@
+<linker>
+  <assembly fullname="BrainRegion.RuntimeBridge" preserve="all" />
+</linker>

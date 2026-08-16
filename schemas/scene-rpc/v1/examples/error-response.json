@@ -1,0 +1,14 @@
+{
+  "jsonrpc": "2.0",
+  "id": "apply-02",
+  "error": {
+    "code": -32010,
+    "message": "Scene revision conflict",
+    "data": {
+      "reason": "revision_conflict",
+      "expectedRevision": 0,
+      "actualRevision": 1,
+      "retryable": true
+    }
+  }
+}

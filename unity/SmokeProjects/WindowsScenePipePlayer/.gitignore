@@ -1,0 +1,10 @@
+/Library/
+/Logs/
+/Temp/
+/UserSettings/
+/Build/
+/Assets/__GeneratedSmokeScene.unity
+/Assets/__GeneratedSmokeScene.unity.meta
+/Packages/packages-lock.json
+/ProjectSettings/*
+!/ProjectSettings/ProjectVersion.txt
